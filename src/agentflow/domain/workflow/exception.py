@@ -1,5 +1,3 @@
-
-
 class DuplicateStepError(Exception):
     pass
 

@@ -1,6 +1,11 @@
-from agentflow.domain.execution.exception import InvalidStateTransitionError
-from agentflow.domain.execution.status import StepStatus,WorkflowStatus
+"""显式迁移表避免散落的 if/else。
 
+状态机是纯校验服务，只返回目标状态，不执行步骤、不访问数据库。
+持久执行层还需要在事务内核对租约和令牌：仅验证状态无法防止并发覆盖。
+"""
+
+from agentflow.domain.execution.exception import InvalidStateTransitionError
+from agentflow.domain.execution.status import StepStatus, WorkflowStatus
 
 STEP_TRANSITIONS = {
     StepStatus.PENDING: {
@@ -32,8 +37,9 @@ STEP_TRANSITIONS = {
     StepStatus.CANCELLED: set(),
 }
 
+
 class StepStateMachine:
-    def transition(self, current:StepStatus, target:StepStatus)->StepStatus:
+    def transition(self, current: StepStatus, target: StepStatus) -> StepStatus:
         allowed = STEP_TRANSITIONS[current]
         if target not in allowed:
             raise InvalidStateTransitionError()
@@ -48,14 +54,17 @@ WORKFLOW_TRANSITION = {
         WorkflowStatus.SUCCEEDED,
         WorkflowStatus.FAILED,
         WorkflowStatus.WAITING,
-        WorkflowStatus.CANCELLED
+        WorkflowStatus.CANCELLED,
     },
-    WorkflowStatus.PENDING: {WorkflowStatus.CANCELLED,WorkflowStatus.RUNNING},
-    WorkflowStatus.WAITING: {WorkflowStatus.CANCELLED,WorkflowStatus.RUNNING},
+    WorkflowStatus.PENDING: {WorkflowStatus.CANCELLED, WorkflowStatus.RUNNING},
+    WorkflowStatus.WAITING: {WorkflowStatus.CANCELLED, WorkflowStatus.RUNNING},
 }
 
+
 class WorkflowStateMachine:
-    def transition(self,current:WorkflowStatus,target:WorkflowStatus)->WorkflowStatus:
+    def transition(
+        self, current: WorkflowStatus, target: WorkflowStatus
+    ) -> WorkflowStatus:
         allowed = WORKFLOW_TRANSITION[current]
         if target not in allowed:
             raise InvalidStateTransitionError()

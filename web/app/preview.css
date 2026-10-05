@@ -1,2 +1,29 @@
 /* 引文按正文展示，原始 JSON 折叠为学习/调试用的检查点。 */
-.draft{background:#fafbf6;border:1px solid #e0e5dc;border-radius:8px;padding:20px;margin:14px 0}.draft h2{font-size:16px;line-height:1.6}.draft blockquote{margin:18px 0 0;padding-left:16px;border-left:3px solid #b8cda0}.draft p{font-size:13px;color:#304f43;margin:0 0 8px;white-space:pre-wrap;overflow-wrap:anywhere}.draft cite{font-size:10px;color:#7d8f7c;font-style:normal}
+.draft {
+  background: #fafbf6;
+  border: 1px solid #e0e5dc;
+  border-radius: 8px;
+  padding: 20px;
+  margin: 14px 0;
+}
+.draft h2 {
+  font-size: 16px;
+  line-height: 1.6;
+}
+.draft blockquote {
+  margin: 18px 0 0;
+  padding-left: 16px;
+  border-left: 3px solid #b8cda0;
+}
+.draft p {
+  font-size: 13px;
+  color: #304f43;
+  margin: 0 0 8px;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+.draft cite {
+  font-size: 10px;
+  color: #7d8f7c;
+  font-style: normal;
+}

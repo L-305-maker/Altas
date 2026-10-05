@@ -1,5 +1,8 @@
 # V0.1 Local Engine
 
+本文仅描述保留的本地教学入口。V1.0 服务模式使用 `Worker + Store`，其持久化、
+恢复、审批和取消语义见 [durability.md](durability.md)，启动方式见仓库 README。
+
 `WorkflowGraph` 保存步骤定义和依赖，`DependencyResolver` 只查询就绪候选，
 `Scheduler` 协调运行状态与执行器。Application 依赖 Domain。
 

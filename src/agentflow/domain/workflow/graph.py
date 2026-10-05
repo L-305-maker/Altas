@@ -1,3 +1,5 @@
+"""可变的建图接口与只读查询接口分离，避免调用者绕过校验修改依赖集合。"""
+
 from agentflow.domain.workflow.definition import StepDefinition
 from agentflow.domain.workflow.exception import (
     CycleDetectedError,
@@ -30,6 +32,10 @@ class WorkflowGraph:
         self._dependencies[step_id].add(depends_on)
 
     def validate(self) -> None:
+        """DFS 中 visiting 表示当前递归路径，visited 表示已完整检查的节点。
+
+        再次遇到 visiting 才是环；遇到 visited 是合法的共享依赖（例如菱形 DAG）。
+        """
         visited = set()
         visiting = set()
 

@@ -1,3 +1,9 @@
+"""只查询就绪候选，不修改运行状态。
+
+根节点没有父依赖，all([]) 为 True，因此自然就绪；已 READY/RUNNING 的步骤
+不再返回，避免调度器重复派发。失败传播属于调度器的职责。
+"""
+
 from agentflow.domain.execution.run import StepRun
 from agentflow.domain.execution.status import StepStatus
 from agentflow.domain.workflow.graph import WorkflowGraph
@@ -5,7 +11,11 @@ from agentflow.domain.workflow.ids import StepId
 
 
 class DependencyResolver:
-    def find_ready_steps(self,graph: WorkflowGraph,step_runs: dict[StepId, StepRun],) -> set[StepId]:
+    def find_ready_steps(
+        self,
+        graph: WorkflowGraph,
+        step_runs: dict[StepId, StepRun],
+    ) -> set[StepId]:
         ready_steps: set[StepId] = set()
 
         for step_id in graph.step_ids():
@@ -18,7 +28,10 @@ class DependencyResolver:
             dependencies = graph.dependencies_of(step_id)
 
             # 所有依赖都成功，当前 Step 才能执行
-            all_dependencies_succeeded = all(step_runs[dependency_id].status == StepStatus.SUCCEEDED for dependency_id in dependencies)
+            all_dependencies_succeeded = all(
+                step_runs[dependency_id].status == StepStatus.SUCCEEDED
+                for dependency_id in dependencies
+            )
 
             if all_dependencies_succeeded:
                 ready_steps.add(step_id)

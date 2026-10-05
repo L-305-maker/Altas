@@ -1,3 +1,5 @@
+"""本地运行状态容器；每次调度都新建实例，不修改共享的 StepDefinition。"""
+
 from dataclasses import dataclass, field
 
 from agentflow.domain.execution.status import StepStatus, WorkflowStatus
