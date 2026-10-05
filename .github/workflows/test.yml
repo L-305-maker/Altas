@@ -1,0 +1,52 @@
+name: Verify AgentFlow
+on: [push, pull_request]
+permissions:
+  contents: read
+jobs:
+  python:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python: ['3.12', '3.13']
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          version: '0.12.13'
+          python-version: ${{ matrix.python }}
+      - run: uv sync --frozen
+      - run: uv run ruff check src tests scripts migrations evals
+      - run: uv run ruff format --check src tests scripts migrations evals
+      - run: uv run pytest -q
+      - name: PostgreSQL integration with isolated temporary instance
+        run: uv run python scripts/verify_postgres.py --bin "$(pg_config --bindir)"
+  web:
+    runs-on: ubuntu-latest
+    env:
+      NEXT_TELEMETRY_DISABLED: '1'
+    defaults:
+      run:
+        working-directory: web
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - run: npm ci --no-audit --no-fund
+      - run: npm run build
+  docker-sandbox:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          version: '0.12.13'
+          python-version: '3.13'
+      - run: uv sync --frozen
+      - run: docker build -f deploy/docker/api.Dockerfile -t agentflow-api:1.0 .
+      - run: docker build -f deploy/docker/sandbox.Dockerfile -t agentflow-sandbox:1.0 .
+      - run: uv run pytest tests/integration/test_docker_sandbox.py -q
+        env:
+          AGENTFLOW_TEST_DOCKER: '1'

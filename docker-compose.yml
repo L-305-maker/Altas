@@ -1,0 +1,79 @@
+name: agentflow
+services:
+  postgres:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_USER: agentflow
+      POSTGRES_DB: agentflow
+      POSTGRES_PASSWORD: ${AGENTFLOW_POSTGRES_PASSWORD:?Set AGENTFLOW_POSTGRES_PASSWORD}
+    volumes: ["postgres-data:/var/lib/postgresql/data"]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U agentflow -d agentflow"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    restart: unless-stopped
+  migrate:
+    build: { context: ., dockerfile: deploy/docker/api.Dockerfile }
+    image: agentflow-api:1.0
+    command: ["alembic", "upgrade", "head"]
+    environment:
+      AGENTFLOW_DATABASE_URL: ${AGENTFLOW_DATABASE_URL:?Set PostgreSQL URL with host postgres}
+    depends_on:
+      postgres: { condition: service_healthy }
+  api:
+    image: agentflow-api:1.0
+    environment: &runtime
+      AGENTFLOW_DATABASE_URL: ${AGENTFLOW_DATABASE_URL:?Set AGENTFLOW_DATABASE_URL}
+      AGENTFLOW_API_TOKEN: ${AGENTFLOW_API_TOKEN:?Set AGENTFLOW_API_TOKEN}
+      AGENTFLOW_PROVIDER: ${AGENTFLOW_PROVIDER:-mock}
+      AGENTFLOW_DEEPSEEK_API_KEY: ${AGENTFLOW_DEEPSEEK_API_KEY:-}
+      AGENTFLOW_MODEL: ${AGENTFLOW_MODEL:-deepseek-chat}
+      AGENTFLOW_TELEMETRY: ${AGENTFLOW_TELEMETRY:-false}
+    ports: ["127.0.0.1:8000:8000"]
+    depends_on:
+      migrate: { condition: service_completed_successfully }
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=2)"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+    restart: unless-stopped
+  worker:
+    image: agentflow-api:1.0
+    command: ["python", "-m", "agentflow.interfaces.cli.main", "worker"]
+    environment: *runtime
+    depends_on:
+      migrate: { condition: service_completed_successfully }
+    restart: unless-stopped
+  web:
+    build: { context: ., dockerfile: deploy/docker/web.Dockerfile }
+    environment:
+      AGENTFLOW_BACKEND_URL: http://api:8000
+      NEXT_TELEMETRY_DISABLED: "1"
+    ports: ["127.0.0.1:3000:3000"]
+    depends_on:
+      api: { condition: service_healthy }
+    restart: unless-stopped
+  prometheus:
+    image: prom/prometheus:v3.5.0
+    profiles: [observability]
+    environment:
+      AGENTFLOW_API_TOKEN: ${AGENTFLOW_API_TOKEN:?Set AGENTFLOW_API_TOKEN}
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - 'umask 077; printf "%s" "$$AGENTFLOW_API_TOKEN" > /tmp/api-token; exec /bin/prometheus --config.file=/etc/prometheus/prometheus.yml'
+    volumes: ["./deploy/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro"]
+    ports: ["127.0.0.1:9090:9090"]
+  grafana:
+    image: grafana/grafana:12.1.1
+    profiles: [observability]
+    entrypoint: ["/bin/sh", "-c"]
+    command: ['test -n "$$GF_SECURITY_ADMIN_PASSWORD" || exit 1; exec /run.sh']
+    environment:
+      GF_SECURITY_ADMIN_PASSWORD: ${AGENTFLOW_GRAFANA_PASSWORD:-}
+      GF_AUTH_ANONYMOUS_ENABLED: "false"
+    volumes: ["./deploy/grafana/provisioning:/etc/grafana/provisioning:ro"]
+    ports: ["127.0.0.1:3001:3000"]
+volumes:
+  postgres-data:

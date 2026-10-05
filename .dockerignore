@@ -1,0 +1,12 @@
+.git
+.venv
+.env*
+**/__pycache__
+**/node_modules
+**/.next
+**/*.db
+output
+.playwright-cli
+.pytest_cache
+.ruff_cache
+.hypothesis
