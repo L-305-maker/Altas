@@ -5,3 +5,14 @@ __pycache__/
 
 .env
 .venv
+
+# 本地运行数据和验证产物不进入版本库。
+.env.*
+!.env.example
+*.db
+*.db-shm
+*.db-wal
+output/
+.playwright-cli/
+.hypothesis/
+dist/
