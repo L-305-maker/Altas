@@ -28,6 +28,16 @@ def pgstore():
     store.close()
 
 
+def test_postgres_concurrent_workflow_registration(pgstore):
+    spec = WorkflowSpec(
+        name="concurrent-registration",
+        steps=(StepSpec(id="a", handler="echo"),),
+    )
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        ids = list(pool.map(lambda _: pgstore.register(spec), range(8)))
+    assert len(set(ids)) == 1
+
+
 def test_postgres_workers_claim_without_duplicates(pgstore):
     spec = WorkflowSpec(
         name="parallel",
