@@ -24,8 +24,6 @@ def main():
         subprocess.run(
             command,
             check=True,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
             creationflags=flags,
             timeout=30,
         )
@@ -53,6 +51,8 @@ def main():
             ]
         )
         ctl = str(binaries / "pg_ctl")
+        log = root / "server.log"
+        started = False
         try:
             run(
                 [
@@ -60,13 +60,16 @@ def main():
                     "-D",
                     str(data),
                     "-l",
-                    str(root / "server.log"),
+                    str(log),
                     "-o",
-                    f"-h 127.0.0.1 -p {port}",
+                    # 所有测试均通过 TCP 连接。禁用 Unix socket，避免 Linux
+                    # 发行版的默认 socket 目录属于 postgres 用户而 CI 无权写入。
+                    f"-h 127.0.0.1 -p {port} -c unix_socket_directories=",
                     "-w",
                     "start",
                 ]
             )
+            started = True
             environment = dict(
                 os.environ,
                 AGENTFLOW_TEST_POSTGRES_URL=f"postgresql+psycopg://agentflow@127.0.0.1:{port}/postgres",
@@ -88,8 +91,29 @@ def main():
             print(result.stdout)
             if result.returncode:
                 print(result.stderr)
+        except (subprocess.CalledProcessError, subprocess.TimeoutExpired):
+            # pg_ctl 的输出只有启动摘要，真正的服务端错误写在此日志中。
+            # 在 TemporaryDirectory 删除它之前输出，便于排查 CI 环境差异。
+            if log.exists():
+                print(
+                    log.read_text(encoding="utf-8", errors="replace"), file=sys.stderr
+                )
+            raise
         finally:
-            run([ctl, "-D", str(data), "-m", "immediate", "-w", "stop"])
+            # 启动失败时也可能已有服务进程（例如等待超时），检查 PID 文件
+            # 后再清理；清理失败不能遮盖最初的启动错误。
+            if started:
+                run([ctl, "-D", str(data), "-m", "immediate", "-w", "stop"])
+            elif (data / "postmaster.pid").exists():
+                try:
+                    subprocess.run(
+                        [ctl, "-D", str(data), "-m", "immediate", "-w", "stop"],
+                        check=False,
+                        creationflags=flags,
+                        timeout=30,
+                    )
+                except (OSError, subprocess.TimeoutExpired) as error:
+                    print(f"PostgreSQL cleanup failed: {error}", file=sys.stderr)
         return result.returncode
 
 
