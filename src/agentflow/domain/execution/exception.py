@@ -1,0 +1,3 @@
+
+class InvalidStateTransitionError(Exception):
+    pass

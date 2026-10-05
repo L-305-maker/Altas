@@ -28,6 +28,7 @@ agentflow/
 │   ├── mcp.md
 │   ├── sandbox.md
 │   ├── observability.md
+│   │
 │   └── adr/
 │       ├── 0001-postgres-queue.md
 │       ├── 0002-at-least-once.md
@@ -173,7 +174,12 @@ agentflow/
 │           ├── api/
 │           │   ├── app.py
 │           │   ├── dependencies.py
+│           │   │
 │           │   ├── schemas/
+│           │   │   ├── workflow.py
+│           │   │   ├── run.py
+│           │   │   └── approval.py
+│           │   │
 │           │   └── routes/
 │           │       ├── workflows.py
 │           │       ├── runs.py
@@ -193,14 +199,17 @@ agentflow/
 ├── web/
 │   ├── package.json
 │   ├── next.config.ts
+│   │
 │   ├── app/
 │   │   ├── workflows/
 │   │   ├── runs/
 │   │   └── approvals/
+│   │
 │   ├── components/
 │   │   ├── workflow/
 │   │   ├── run/
 │   │   └── trace/
+│   │
 │   └── lib/
 │       ├── api.ts
 │       └── events.ts
@@ -246,17 +255,58 @@ agentflow/
 │   ├── research_agent/
 │   │   └── workflow.py
 │   │
+│   └── code_review/
+│       └── workflow.py
+│
+├── applications/
+│   │
 │   └── living_guideline/
-│       ├── workflow.py
+│       │
+│       ├── domain/
+│       │   ├── recommendation.py
+│       │   ├── evidence.py
+│       │   ├── guideline.py
+│       │   └── lineage.py
+│       │
+│       ├── workflows/
+│       │   └── guideline_analysis.py
+│       │
 │       ├── agents/
 │       │   ├── extractor.py
+│       │   ├── lineage_matcher.py
+│       │   ├── evidence_analyzer.py
+│       │   ├── etd_analyzer.py
+│       │   └── verifier.py
+│       │
+│       ├── tools/
+│       │   ├── guideline_search.py
+│       │   ├── evidence_search.py
+│       │   └── document_parser.py
+│       │
+│       ├── retrieval/
+│       │   ├── retriever.py
+│       │   ├── reranker.py
+│       │   └── indexing.py
+│       │
+│       ├── prompts/
+│       │   ├── extraction.py
 │       │   ├── lineage.py
 │       │   ├── evidence.py
-│       │   ├── etd.py
-│       │   └── verifier.py
-│       └── tools/
-│           ├── guideline_search.py
-│           └── evidence_search.py
+│       │   └── verification.py
+│       │
+│       ├── policies/
+│       │   ├── retry.py
+│       │   ├── model_selection.py
+│       │   └── approval.py
+│       │
+│       ├── evals/
+│       │   ├── datasets/
+│       │   ├── evaluators/
+│       │   └── benchmark.py
+│       │
+│       └── tests/
+│           ├── unit/
+│           └── integration/
 │
 ├── scripts/
 │   ├── dev.sh
@@ -269,6 +319,7 @@ agentflow/
     │   ├── api.Dockerfile
     │   ├── worker.Dockerfile
     │   └── web.Dockerfile
+    │
     └── prometheus/
         └── prometheus.yml
 ```
