@@ -18,6 +18,9 @@ dependencies = [
 requires = ["uv_build>=0.12.12,<0.13"]
 build-backend = "uv_build"
 
+[project.scripts]
+agentflow = "agentflow.interfaces.cli.main:main"
+
 [dependency-groups]
 dev = [
     "hypothesis>=6,<7",
