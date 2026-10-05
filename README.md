@@ -1,7 +1,16 @@
 # AgentFlow 1.0
 
 一个用于学习和单租户内部部署的持久工作流引擎：DAG、PostgreSQL 队列、worker
-租约恢复、Agent 工具循环、人工审批，以及 Next.js 证据工作台。
+租约恢复、Agent 工具循环、人工审批、事件和制品等通用运行机制。
+
+Living Guideline 是基于 AgentFlow 的 reference application，业务代码位于
+`src/applications/living_guideline/`，Next.js 证据工作台 `web/` 是它的 application UI。
+依赖方向为 `applications / examples → agentflow`，Core 不认识任何具体业务。
+`agentflow/application/` 表示框架用例层，`src/applications/` 表示业务应用。
+
+`agentflow api/worker` 启动通用引擎，不注册业务工作流；下列
+`living-guideline api/worker` 命令启动 reference application。
+仍使用单一 distribution，wheel 同时包含两个独立顶层 package。
 
 完整业务路径：导入本地 `.txt` / `.md` 证据 → 提取可追溯引文 → 生成证据草稿 →
 人工审批 → 保存不可变 JSON 版本。默认使用明确标记的离线 mock，不调用真实模型。
@@ -24,10 +33,10 @@ uv run agentflow init-db
 
 ```powershell
 # 终端 1：API；先在这个终端配置 AGENTFLOW_API_TOKEN
-uv run agentflow api
+uv run living-guideline api
 
 # 终端 2：worker；使用相同的工作目录和数据库配置
-uv run agentflow worker
+uv run living-guideline worker
 
 # 终端 3：界面
 cd web
@@ -90,7 +99,7 @@ npm audit --omit=dev --audit-level=high
 常规测试会明确跳过需独立 PostgreSQL 或 Docker 的测试。PostgreSQL 脚本会建立
 并关闭专用临时实例，不接触既有数据库。也可用 `AGENTFLOW_TEST_POSTGRES_URL`
 指定**可清空的专用测试库**。Docker 测试需显式配置 `AGENTFLOW_TEST_DOCKER=1`。
-CI 还会启动 PostgreSQL → Alembic → API → worker → Next.js 的完整 Compose 栈，
+CI 还会启动 PostgreSQL → Alembic → API → worker → Next.js 的reference application 的完整 Compose 栈，
 并通过 `scripts/verify_compose.py` 从 Web 同源代理执行“创建草稿 → 等待审批 →
 批准 → 保存制品”的发布冒烟测试。
 

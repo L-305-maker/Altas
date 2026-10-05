@@ -30,7 +30,7 @@ Python callable、闭包和异常实例不能作为安全、稳定的数据库�
 `domain/workflow/spec.py` 保存 handler 注册名、依赖、JSON 参数和执行策略。
 Pydantic 在提交前验证名称、依赖存在、环、重试/超时范围。
 
-`bootstrap.py` 是组合根：把注册名映射到部署时已知的函数。
+Core `bootstrap.py` 创建通用运行设施；业务自己的 bootstrap 将注册名映射到函数。
 API 不能提交任意模块路径或 Python 源码供进程直接导入。
 工作流同名同版本不可覆盖；升级 handler 时也应使用新注册名或保持原语义。
 
@@ -77,7 +77,7 @@ DockerSandbox 用无网络、只读根目录、非 root、内存/CPU/PID 限制�
 审批通过后恢复 ready，拒绝则失败并阻止下游。无需让协程保持运行等人点击。
 审批记录和状态在同一事务里更新；取消运行后不能通过审批重新激活它。
 
-`applications/living_guideline.py` 展示完整业务流程。extract 验证每条引用确实存在
+`src/applications/living_guideline/handlers.py` 展示完整业务流程。extract 验证每条引用确实存在
 于对应原文；draft 装配人可阅读的证据草稿；publish 由审批解锁，并将版本输出
 交给数据库事务保存。业务 handler 不负责创建数据库连接或 HTTP 路由。
 
@@ -87,7 +87,7 @@ DockerSandbox 用无网络、只读根目录、非 root、内存/CPU/PID 限制�
 SSE 提供事件 ID，客户端可以从游标继续读取。网页代理不会把 token 放进 URL。
 前端以 React state 保存 token，刷新即丢失；没有 localStorage 持久化。
 
-依次运行 unit → integration → e2e → chaos。重点阅读旧 token 拒收、审批重放、
+依次运行 unit → integration → applications/living_guideline → chaos。重点阅读旧 token 拒收、审批重放、
 真正进程崩溃和伪造引文测试，它们验证的是行为约束，而非“某方法被调用了几次”。
 
 可尝试的学习练习：增加一个纯计算 async handler，为它注册新名称，创建一个
@@ -100,3 +100,7 @@ SSE 提供事件 ID，客户端可以从游标继续读取。网页代理不会�
 - [MCP 客户端](https://modelcontextprotocol.io/docs/develop/build-client)
 - [Next.js App Router 安装与结构](https://nextjs.org/docs/app/getting-started/installation)
 - [DeepSeek 官方 API 文档](https://api-docs.deepseek.com/)
+
+新 Agent 只在 `src/applications/` 或 `examples/` 定义并注册，不修改 Core。
+运行 `uv run python examples/hello_workflow/workflow.py` 查看本地 DAG 示例；
+运行 `uv run python examples/simple_agent/main.py` 查看外部注册 Agent 的持久执行示例。

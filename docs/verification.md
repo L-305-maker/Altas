@@ -38,3 +38,25 @@ FastAPI/Starlette 测试客户端当前有一条上游 HTTPX 弃用警告，不�
 上述验证证明 V1.0 的单租户内部部署基线可复现，但不证明任意生产负载或故障下都正确。
 正式部署仍需依据目标环境验证 TLS、访问控制、限流、数据库备份/恢复、监控告警、
 容量规划以及真实模型行为。
+
+## 2026-10-05 Framework / Application 边界重构验证
+
+- `uv sync --frozen`：通过。
+- Ruff check / format check：通过。
+- `uv run pytest -q`：90 passed、6 skipped（4 PostgreSQL、2 Docker opt-in）。
+- `verify_postgres.py --bin D:/PSQL/bin`：专用临时实例，4 passed。
+- Architecture boundary AST guard：3 passed，纳入 CI；Core 空业务 registry 与
+  独立 research handler 注入测试通过。
+- Living Guideline reference application API：证据、草稿、审批、发布制品、取消、
+  SSE / WebSocket 回放保持通过。
+- `evals/run.py`：3/3；评测实现和数据属于 `applications.living_guideline`。
+- `uv build`：sdist / wheel 通过；`scripts/verify_wheel.py` 在 checkout 之外的
+  临时虚拟环境安装 wheel，完整业务流程与打包的评测数据均验证通过，纳入 CI。
+- hello_workflow 与 simple_agent 示例：通过。
+- `npm ci --no-audit --no-fund`、`npm run build`：通过。
+- `npm audit --omit=dev --audit-level=high`：0 vulnerabilities。
+- 本机 Docker CLI 已安装，但启动 Docker Desktop 后 Linux daemon 仍不可连接；
+  Docker sandbox 与 Compose E2E 未在本机运行，不能以此声称容器验收通过。
+  CI 保留两个独立容器 job，Compose 现在明确启动 Living Guideline host。
+
+未调用真实 DeepSeek API。上述验证不改变已有持久执行语义或业务质量声明。

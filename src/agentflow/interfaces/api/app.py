@@ -26,7 +26,7 @@ from pydantic import BaseModel, ConfigDict, Field, JsonValue
 from sqlalchemy.exc import SQLAlchemyError
 
 from agentflow import __version__
-from agentflow.applications.living_guideline import GUIDELINE, GuidelineInput
+from agentflow.application.orchestration.worker import HandlerRegistry
 from agentflow.bootstrap import build_handlers
 from agentflow.config import Settings
 from agentflow.domain.workflow.spec import WorkflowSpec
@@ -87,7 +87,11 @@ class DecisionRequest(BaseModel):
     reason: str = Field(default="", max_length=1000)
 
 
-def create_app(settings: Settings | None = None, store: Store | None = None) -> FastAPI:
+def create_app(
+    settings: Settings | None = None,
+    store: Store | None = None,
+    handlers: HandlerRegistry | None = None,
+) -> FastAPI:
     settings = settings or Settings()
     if settings.api_token is None or len(settings.api_token.get_secret_value()) < 16:
         raise ValueError(
@@ -95,16 +99,18 @@ def create_app(settings: Settings | None = None, store: Store | None = None) -> 
         )
     owned_store = store is None
     store = store or Store(settings.database_url.get_secret_value())
-    handlers = build_handlers(settings)
+    handlers = handlers if handlers is not None else build_handlers(settings)
 
     @asynccontextmanager
     async def lifespan(app):
-        app.state.guideline_id = await asyncio.to_thread(store.register, GUIDELINE)
-        yield
-        if owned_store:
-            store.close()
+        try:
+            yield
+        finally:
+            if owned_store:
+                store.close()
 
     app = FastAPI(title="AgentFlow", version=__version__, lifespan=lifespan)
+    app.state.store = store
     app.add_middleware(BodyLimit)
     bearer = HTTPBearer(auto_error=False)
 
@@ -119,6 +125,7 @@ def create_app(settings: Settings | None = None, store: Store | None = None) -> 
                 401, "unauthorized", headers={"WWW-Authenticate": "Bearer"}
             )
 
+    app.state.authorize = authorize
     auth = [Depends(authorize)]
 
     @app.exception_handler(NotFoundError)
@@ -167,18 +174,6 @@ def create_app(settings: Settings | None = None, store: Store | None = None) -> 
     @app.post("/api/runs", dependencies=auth, status_code=201)
     def submit(body: SubmitRequest):
         return {"id": store.submit(body.workflow_id, body.inputs, body.submission_key)}
-
-    @app.post("/api/guidelines", dependencies=auth, status_code=201)
-    def guideline(
-        body: GuidelineInput,
-        request: Request,
-        idempotency_key: str | None = Header(default=None, max_length=128),
-    ):
-        return {
-            "id": store.submit(
-                request.app.state.guideline_id, body.model_dump(), idempotency_key
-            )
-        }
 
     @app.get("/api/runs/{run_id}", dependencies=auth)
     def detail(run_id: str):

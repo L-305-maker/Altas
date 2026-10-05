@@ -170,7 +170,7 @@ async def test_real_mcp_stdio_roundtrip():
     runtime = ToolRuntime()
     async with connect_tools(
         sys.executable,
-        ["-m", "agentflow.infrastructure.mcp.server"],
+        ["examples/tool_agent/server.py"],
         runtime,
         allowed={"fingerprint"},
         requires_approval=False,

@@ -1,12 +1,10 @@
-"""组合根：只有这里把应用协议与具体数据库、模型和工具实现连接起来。"""
+"""通用 runtime 组合：模型、工具和 Agent handler，不注册业务内容。"""
 
-import hashlib
 from pathlib import Path
 
 from agentflow.application.agents.runner import AgentRunner
 from agentflow.application.orchestration.worker import HandlerRegistry
 from agentflow.application.tools.runtime import Tool, ToolRuntime
-from agentflow.applications.living_guideline import GuidelineHandlers
 from agentflow.config import Settings
 from agentflow.infrastructure.models.deepseek import DeepSeekProvider
 from agentflow.infrastructure.models.mock import MockProvider
@@ -14,11 +12,7 @@ from agentflow.infrastructure.sandbox.docker import DockerSandbox
 from agentflow.infrastructure.tools.filesystem import read_text_tool
 
 
-def build_handlers(
-    settings: Settings, tools: ToolRuntime | None = None
-) -> HandlerRegistry:
-    registry = HandlerRegistry()
-    tools = tools or ToolRuntime()
+def build_provider(settings: Settings):
     provider = None
     if settings.provider == "deepseek":
         key = (
@@ -27,30 +21,15 @@ def build_handlers(
             else ""
         )
         provider = DeepSeekProvider(key, settings.model, settings.model_base_url)
-    guideline = GuidelineHandlers(provider)
-    registry.register("guideline.extract", guideline.extract)
-    registry.register("guideline.draft", guideline.draft)
-    registry.register("guideline.publish", guideline.publish)
+    return provider
 
-    async def echo(task):
-        return {"inputs": task.inputs, "dependencies": task.dependencies}
 
-    async def fingerprint(arguments):
-        return {"sha256": hashlib.sha256(arguments["text"].encode()).hexdigest()}
-
-    tools.register(
-        Tool(
-            "fingerprint",
-            "计算文本摘要",
-            {
-                "type": "object",
-                "properties": {"text": {"type": "string", "maxLength": 100_000}},
-                "required": ["text"],
-                "additionalProperties": False,
-            },
-            fingerprint,
-        )
-    )
+def build_handlers(
+    settings: Settings, tools: ToolRuntime | None = None
+) -> HandlerRegistry:
+    registry = HandlerRegistry()
+    tools = tools or ToolRuntime()
+    provider = build_provider(settings)
     if settings.tool_root:
         tools.register(read_text_tool(Path(settings.tool_root)))
     if settings.sandbox_enabled:
@@ -89,6 +68,5 @@ def build_handlers(
             prompt, allowed=set(allowed), approved=task.spec.requires_approval
         )
 
-    registry.register("echo", echo)
     registry.register("agent", agent)
     return registry

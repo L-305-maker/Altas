@@ -36,3 +36,12 @@
 证据输入当前支持 UTF-8 文本/Markdown，不包含 PDF/OCR、在线文献检索或临床质量
 判定。每次审批发布产生独立版本，不自动执行语义合并。V1.0 不承诺外部副作用
 exactly-once、多租户隔离或任意规模性能。
+
+## v1.0.0 之后：Framework / Application Boundary Separation
+
+本次只重构依赖边界，保留 1.0.0 包版本与持久执行语义，不增加产品功能。
+Living Guideline 的 schema、workflow、handlers、router 和组合入口迁到
+`src/applications/living_guideline/`；Core 不再注册业务内容。工作台和业务评测
+属于 reference application。启动业务服务改用 `living-guideline api/worker`，
+通用 `agentflow api/worker` 不包含 `/api/guidelines`。
+旧 `agentflow.applications` 导入路径移除，不提供反向依赖兼容 shim。

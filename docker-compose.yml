@@ -23,6 +23,7 @@ services:
       postgres: { condition: service_healthy }
   api:
     image: agentflow-api:1.0
+    command: ["living-guideline", "api", "--host", "0.0.0.0"]
     environment: &runtime
       AGENTFLOW_DATABASE_URL: ${AGENTFLOW_DATABASE_URL:?Set AGENTFLOW_DATABASE_URL}
       AGENTFLOW_API_TOKEN: ${AGENTFLOW_API_TOKEN:?Set AGENTFLOW_API_TOKEN}
@@ -45,7 +46,7 @@ services:
     restart: unless-stopped
   worker:
     image: agentflow-api:1.0
-    command: ["python", "-m", "agentflow.interfaces.cli.main", "worker"]
+    command: ["living-guideline", "worker"]
     environment: *runtime
     depends_on:
       migrate: { condition: service_completed_successfully }

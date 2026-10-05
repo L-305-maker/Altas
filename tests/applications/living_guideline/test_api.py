@@ -5,10 +5,9 @@ from fastapi.testclient import TestClient
 from pydantic import SecretStr
 
 from agentflow.application.orchestration.worker import Worker
-from agentflow.bootstrap import build_handlers
 from agentflow.config import Settings
 from agentflow.infrastructure.persistence.store import Store
-from agentflow.interfaces.api.app import create_app
+from applications.living_guideline.bootstrap import build_handlers, create_app
 
 TOKEN = "test-operator-token-not-a-secret"
 

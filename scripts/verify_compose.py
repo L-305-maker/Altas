@@ -1,4 +1,4 @@
-"""Verify the running Docker Compose production baseline end to end."""
+"""Verify the Living Guideline reference application through Docker Compose."""
 
 from __future__ import annotations
 

@@ -15,7 +15,9 @@ from agentflow.infrastructure.persistence.store import Store
 from agentflow.infrastructure.telemetry.tracing import local_tracing
 
 
-async def serve_worker(settings: Settings, *, once: bool = False) -> None:
+async def serve_worker(
+    settings: Settings, *, once: bool = False, handler_factory=build_handlers
+) -> None:
     store = Store(settings.database_url.get_secret_value())
     tracing = local_tracing() if settings.telemetry else None
     try:
@@ -32,7 +34,7 @@ async def serve_worker(settings: Settings, *, once: bool = False) -> None:
                 )
             worker = Worker(
                 store,
-                build_handlers(settings, tools),
+                handler_factory(settings, tools),
                 lease_seconds=settings.lease_seconds,
                 concurrency=settings.concurrency,
                 poll_seconds=settings.poll_seconds,
@@ -48,7 +50,11 @@ async def serve_worker(settings: Settings, *, once: bool = False) -> None:
             tracing.shutdown()
 
 
-def main() -> None:
+def main(
+    *,
+    api_factory="agentflow.interfaces.api.app:create_app",
+    handler_factory=build_handlers,
+) -> None:
     parser = argparse.ArgumentParser(description="AgentFlow 持久工作流引擎")
     commands = parser.add_subparsers(dest="command", required=True)
     commands.add_parser("init-db", help="仅用于本地演示；生产使用 alembic upgrade head")
@@ -67,7 +73,7 @@ def main() -> None:
             store.close()
     elif args.command == "api":
         uvicorn.run(
-            "agentflow.interfaces.api.app:create_app",
+            api_factory,
             factory=True,
             host=args.host,
             port=args.port,
@@ -75,7 +81,9 @@ def main() -> None:
         )
     else:
         try:
-            asyncio.run(serve_worker(settings, once=args.once))
+            asyncio.run(
+                serve_worker(settings, once=args.once, handler_factory=handler_factory)
+            )
         except KeyboardInterrupt:
             pass
 

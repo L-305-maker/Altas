@@ -7,51 +7,9 @@
 import hashlib
 import json
 
-from pydantic import BaseModel, ConfigDict, Field
-
 from agentflow.application.ports.model_provider import ModelProvider
 from agentflow.domain.execution.task import Task
-from agentflow.domain.workflow.spec import StepSpec, WorkflowSpec
-
-
-class Document(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-    title: str = Field(min_length=1, max_length=200)
-    text: str = Field(min_length=1, max_length=200_000)
-
-
-class GuidelineInput(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-    title: str = Field(min_length=1, max_length=200)
-    documents: list[Document] = Field(min_length=1, max_length=20)
-
-
-class Quote(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-    source_id: str
-    quote: str = Field(min_length=1, max_length=4000)
-
-
-class Extraction(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-    quotes: list[Quote] = Field(min_length=1, max_length=100)
-
-
-GUIDELINE = WorkflowSpec(
-    name="living_guideline",
-    version=1,
-    steps=(
-        StepSpec(id="extract", handler="guideline.extract", timeout=120),
-        StepSpec(id="draft", handler="guideline.draft", depends_on=("extract",)),
-        StepSpec(
-            id="publish",
-            handler="guideline.publish",
-            depends_on=("draft",),
-            requires_approval=True,
-            artifact=True,
-        ),
-    ),
-)
+from applications.living_guideline.schemas import Extraction, GuidelineInput, Quote
 
 
 class GuidelineHandlers:

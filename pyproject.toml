@@ -22,8 +22,12 @@ dependencies = [
 requires = ["uv_build>=0.12.12,<0.13"]
 build-backend = "uv_build"
 
+[tool.uv.build-backend]
+module-name = ["agentflow", "applications"]
+
 [project.scripts]
 agentflow = "agentflow.interfaces.cli.main:main"
+living-guideline = "applications.living_guideline.bootstrap:main"
 
 [tool.ruff]
 target-version = "py312"
