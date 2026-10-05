@@ -44,7 +44,9 @@ npm run dev
 
 通过环境配置 `AGENTFLOW_POSTGRES_PASSWORD`、`AGENTFLOW_DATABASE_URL`、
 `AGENTFLOW_API_TOKEN`。Compose 中数据库主机名是 `postgres`，数据库和用户名均为
-`agentflow`，驱动为 `postgresql+psycopg`；URL 中密码须正确编码。
+`agentflow`，驱动为 `postgresql+psycopg`；URL 中密码须正确编码。可通过
+`AGENTFLOW_CONCURRENCY`、`AGENTFLOW_LEASE_SECONDS`、`AGENTFLOW_POLL_SECONDS`
+调整 worker 基线参数。
 
 ```powershell
 docker compose up --build -d
@@ -78,13 +80,19 @@ uv run ruff format --check src tests scripts migrations evals
 uv run python scripts/verify_postgres.py --bin D:/PSQL/bin
 uv run python evals/run.py
 uv run python scripts/benchmark.py
+uv build
+docker compose config --quiet
 cd web
 npm run build
+npm audit --omit=dev --audit-level=high
 ```
 
 常规测试会明确跳过需独立 PostgreSQL 或 Docker 的测试。PostgreSQL 脚本会建立
 并关闭专用临时实例，不接触既有数据库。也可用 `AGENTFLOW_TEST_POSTGRES_URL`
 指定**可清空的专用测试库**。Docker 测试需显式配置 `AGENTFLOW_TEST_DOCKER=1`。
+CI 还会启动 PostgreSQL → Alembic → API → worker → Next.js 的完整 Compose 栈，
+并通过 `scripts/verify_compose.py` 从 Web 同源代理执行“创建草稿 → 等待审批 →
+批准 → 保存制品”的发布冒烟测试。
 
 ## 学习导航
 

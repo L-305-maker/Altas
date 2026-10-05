@@ -25,6 +25,7 @@ from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from pydantic import BaseModel, ConfigDict, Field, JsonValue
 from sqlalchemy.exc import SQLAlchemyError
 
+from agentflow import __version__
 from agentflow.applications.living_guideline import GUIDELINE, GuidelineInput
 from agentflow.bootstrap import build_handlers
 from agentflow.config import Settings
@@ -103,7 +104,7 @@ def create_app(settings: Settings | None = None, store: Store | None = None) -> 
         if owned_store:
             store.close()
 
-    app = FastAPI(title="AgentFlow", version="1.0.0", lifespan=lifespan)
+    app = FastAPI(title="AgentFlow", version=__version__, lifespan=lifespan)
     app.add_middleware(BodyLimit)
     bearer = HTTPBearer(auto_error=False)
 
@@ -146,7 +147,7 @@ def create_app(settings: Settings | None = None, store: Store | None = None) -> 
         return {
             "provider": settings.provider,
             "handlers": handlers.names(),
-            "version": "1.0.0",
+            "version": __version__,
         }
 
     @app.get("/api/workflows", dependencies=auth)

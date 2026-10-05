@@ -96,8 +96,20 @@ class Store:
                 session.add(row)
                 return row.id
         except IntegrityError:
-            # 两个部署进程同时注册同一版本时，唯一约束决定胜者，再读已提交定义。
-            return self.register(spec)
+            # 并发注册时唯一约束决定胜者；只在确实存在同名版本时读取胜者。
+            # 其他完整性错误必须原样暴露，避免递归掩盖数据库问题。
+            with Session(self.engine) as session:
+                existing = session.scalar(
+                    select(WorkflowRow).where(
+                        WorkflowRow.name == spec.name,
+                        WorkflowRow.version == spec.version,
+                    )
+                )
+                if existing is None:
+                    raise
+                if existing.spec != data:
+                    raise ConflictError("workflow version is immutable") from None
+                return existing.id
 
     def submit(self, workflow_id: str, inputs: dict, key: str | None = None) -> str:
         json_bytes(inputs)
