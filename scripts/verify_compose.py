@@ -94,7 +94,9 @@ def main() -> None:
         raise SystemExit("AGENTFLOW_API_TOKEN must contain at least 16 characters")
 
     meta = wait_for_api()
-    source_text = "Compose smoke evidence: every published quote must come from this text."
+    source_text = (
+        "Compose smoke evidence: every published quote must come from this text."
+    )
     created = api(
         "/guidelines",
         "POST",
