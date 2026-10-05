@@ -17,7 +17,7 @@ TOKEN = "test-operator-token-not-a-secret"
 def system(tmp_path):
     store = Store(f"sqlite:///{(tmp_path / 'api.db').as_posix()}")
     store.create_schema()
-    settings = Settings(api_token=SecretStr(TOKEN))
+    settings = Settings(api_token=SecretStr(TOKEN), provider="mock")
     worker = Worker(store, build_handlers(settings))
     with TestClient(create_app(settings, store)) as client:
         client.headers["Authorization"] = f"Bearer {TOKEN}"
@@ -112,3 +112,20 @@ def test_cancelling_waiting_run_closes_approval(system):
         ).status_code
         == 409
     )
+
+
+def test_websocket_authentication_and_replay(system):
+    from starlette.websockets import WebSocketDisconnect
+
+    client, _, store = system
+    workflow_id = client.get("/api/workflows").json()[0]["id"]
+    run_id = store.submit(workflow_id, {"title": "test", "documents": []})
+    store.cancel(run_id)
+    with client.websocket_connect(f"/api/runs/{run_id}/ws") as socket:
+        socket.send_json({"token": TOKEN, "after": 0})
+        assert socket.receive_json()["kind"] == "run.created"
+    with client.websocket_connect(f"/api/runs/{run_id}/ws") as socket:
+        socket.send_json({"token": "wrong"})
+        with pytest.raises(WebSocketDisconnect) as caught:
+            socket.receive_json()
+        assert caught.value.code == 1008

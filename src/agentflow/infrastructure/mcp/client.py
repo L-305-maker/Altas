@@ -33,9 +33,7 @@ async def connect_tools(
         async with asyncio.timeout(15):
             await session.initialize()
             result = await session.list_tools()
-        selected = {
-            tool.name: tool for tool in result.tools if tool.name in allowed
-        }
+        selected = {tool.name: tool for tool in result.tools if tool.name in allowed}
         if selected.keys() != allowed:
             raise ValueError("MCP allowlist contains unavailable tools")
         for name, info in selected.items():

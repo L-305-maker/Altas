@@ -10,7 +10,16 @@ import secrets
 from contextlib import asynccontextmanager
 from typing import Annotated
 
-from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request
+from fastapi import (
+    Depends,
+    FastAPI,
+    Header,
+    HTTPException,
+    Query,
+    Request,
+    WebSocket,
+    WebSocketDisconnect,
+)
 from fastapi.responses import JSONResponse, StreamingResponse
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from pydantic import BaseModel, ConfigDict, Field, JsonValue
@@ -98,7 +107,9 @@ def create_app(settings: Settings | None = None, store: Store | None = None) -> 
     app.add_middleware(BodyLimit)
     bearer = HTTPBearer(auto_error=False)
 
-    def authorize(credentials: Annotated[HTTPAuthorizationCredentials | None, Depends(bearer)]):
+    def authorize(
+        credentials: Annotated[HTTPAuthorizationCredentials | None, Depends(bearer)],
+    ):
         expected = settings.api_token.get_secret_value().encode()
         if credentials is None or not secrets.compare_digest(
             credentials.credentials.encode(), expected
@@ -211,7 +222,12 @@ def create_app(settings: Settings | None = None, store: Store | None = None) -> 
                 if len(batch) == 100:
                     continue
                 status = (await asyncio.to_thread(store.get_run, run_id))["status"]
-                if not follow or status in {"succeeded", "failed", "cancelled"}:
+                if not follow:
+                    return
+                if status in {"succeeded", "failed", "cancelled"}:
+                    # 最后一批查询与读取终态之间可能刚好发生提交；先补发尾部事件。
+                    if await asyncio.to_thread(store.events, run_id, cursor):
+                        continue
                     return
                 yield ": heartbeat\n\n"
                 await asyncio.sleep(1)
@@ -221,6 +237,51 @@ def create_app(settings: Settings | None = None, store: Store | None = None) -> 
             media_type="text/event-stream",
             headers={"Cache-Control": "no-cache"},
         )
+
+    @app.websocket("/api/runs/{run_id}/ws")
+    async def websocket_events(socket: WebSocket, run_id: str):
+        """可选 WebSocket 接口：首帧认证，token 不出现在 URL 或访问日志中。"""
+        await socket.accept()
+        try:
+            raw = await asyncio.wait_for(socket.receive_text(), 5)
+            if len(raw) > 4096:
+                await socket.close(code=1008)
+                return
+            credentials = json.loads(raw)
+            if not isinstance(credentials, dict):
+                raise ValueError("invalid authentication frame")
+            supplied = credentials.get("token", "")
+            cursor = credentials.get("after", 0)
+            if (
+                not isinstance(supplied, str)
+                or not isinstance(cursor, int)
+                or cursor < 0
+                or not secrets.compare_digest(
+                    supplied.encode(), settings.api_token.get_secret_value().encode()
+                )
+            ):
+                await socket.close(code=1008)
+                return
+            await asyncio.to_thread(store.get_run, run_id)
+            while True:
+                batch = await asyncio.to_thread(store.events, run_id, cursor)
+                for item in batch:
+                    cursor = item["id"]
+                    await socket.send_json(item)
+                if len(batch) == 100:
+                    continue
+                status = (await asyncio.to_thread(store.get_run, run_id))["status"]
+                if status in {"succeeded", "failed", "cancelled"}:
+                    if await asyncio.to_thread(store.events, run_id, cursor):
+                        continue
+                    await socket.close(code=1000)
+                    return
+                await socket.send_json({"kind": "heartbeat", "after": cursor})
+                await asyncio.sleep(1)
+        except WebSocketDisconnect:
+            return
+        except (ValueError, TimeoutError, NotFoundError):
+            await socket.close(code=1008)
 
     if settings.telemetry:
         from agentflow.infrastructure.telemetry.metrics import install_metrics

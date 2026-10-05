@@ -9,6 +9,8 @@ from collections.abc import Awaitable, Callable
 from contextlib import suppress
 from typing import Any
 
+from opentelemetry import trace
+
 from agentflow.application.ports.execution_store import ExecutionStore
 from agentflow.domain.execution.task import Task
 
@@ -45,10 +47,12 @@ class Worker:
         lease_seconds: float = 30,
         concurrency: int = 4,
         poll_seconds: float = 0.5,
+        tracer: trace.Tracer | None = None,
     ):
         if lease_seconds <= 0 or concurrency < 1 or poll_seconds <= 0:
             raise ValueError("invalid worker limits")
         self.store, self.handlers = store, handlers
+        self.tracer = tracer or trace.get_tracer("agentflow.worker")
         self.lease_seconds, self.concurrency, self.poll_seconds = (
             lease_seconds,
             concurrency,
@@ -62,8 +66,24 @@ class Worker:
             return False
 
         async def invoke():
-            async with asyncio.timeout(task.spec.timeout):
-                return await self.handlers.get(task.spec.handler)(task)
+            # 禁止自动记录异常消息/堆栈：它们可能含用户文档或上游凭据。
+            with self.tracer.start_as_current_span(
+                "step.execute",
+                record_exception=False,
+                set_status_on_exception=False,
+                attributes={
+                    "run.id": task.run_id,
+                    "step.id": task.step_id,
+                    "attempt": task.attempt,
+                },
+            ) as span:
+                try:
+                    async with asyncio.timeout(task.spec.timeout):
+                        return await self.handlers.get(task.spec.handler)(task)
+                except Exception as error:
+                    span.set_attribute("error.type", type(error).__name__)
+                    span.set_status(trace.StatusCode.ERROR)
+                    raise
 
         job = asyncio.create_task(invoke())
 

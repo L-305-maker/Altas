@@ -161,6 +161,14 @@ class Store:
             raise NotFoundError("run not found")
         return run
 
+    def _now(self, session: Session) -> float:
+        """生产租约使用数据库时钟，避免不同 worker 的系统时钟偏差。"""
+        if self.engine.dialect.name == "postgresql":
+            return float(
+                session.scalar(text("SELECT EXTRACT(EPOCH FROM clock_timestamp())"))
+            )
+        return time.time()
+
     def _event(self, session: Session, run_id: str, kind: str, data: dict) -> None:
         # 事件只保存状态元数据，不写输入正文、凭据、模型提示词或异常消息。
         session.add(
@@ -215,19 +223,19 @@ class Store:
 
     def claim(self, lease_seconds: float = 30) -> Task | None:
         """短事务领取一项工作，同时恢复该 run 中过期的执行租约。"""
-        now = time.time()
-        eligible = (
-            select(StepRow.id)
-            .where(
-                StepRow.run_id == RunRow.id,
-                or_(
-                    and_(StepRow.status == "ready", StepRow.available_at <= now),
-                    and_(StepRow.status == "running", StepRow.lease_until <= now),
-                ),
-            )
-            .exists()
-        )
         with self.transaction() as session:
+            now = self._now(session)
+            eligible = (
+                select(StepRow.id)
+                .where(
+                    StepRow.run_id == RunRow.id,
+                    or_(
+                        and_(StepRow.status == "ready", StepRow.available_at <= now),
+                        and_(StepRow.status == "running", StepRow.lease_until <= now),
+                    ),
+                )
+                .exists()
+            )
             run = session.scalar(
                 select(RunRow)
                 .where(
@@ -285,7 +293,7 @@ class Store:
             or row is None
             or row.status != "running"
             or row.token != task.token
-            or row.lease_until <= time.time()
+            or row.lease_until <= self._now(session)
         ):
             return None
         return run, row
@@ -295,7 +303,7 @@ class Store:
             owned = self._owned(session, task)
             if not owned:
                 return False
-            owned[1].lease_until = time.time() + lease_seconds
+            owned[1].lease_until = self._now(session) + lease_seconds
             return True
 
     def complete(self, task: Task, output: Any) -> bool:
@@ -348,7 +356,12 @@ class Store:
             run, row = owned
             # 异常消息可能包含 HTTP Authorization 或输入片段，持久化仅保留类型。
             self._fail(
-                session, run, row, task.spec, type(error).__name__[:160], time.time()
+                session,
+                run,
+                row,
+                task.spec,
+                type(error).__name__[:160],
+                self._now(session),
             )
             session.flush()
             self._schedule(session, run)

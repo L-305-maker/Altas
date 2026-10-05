@@ -115,6 +115,8 @@ class GuidelineHandlers:
         }
 
     async def publish(self, task: Task) -> dict:
+        if not task.spec.requires_approval:
+            raise PermissionError("guideline publication requires an approved step")
         # 此函数不直接写数据库：制品与成功状态由 Store.complete 在一个事务中提交。
         return {
             **task.dependencies["draft"],

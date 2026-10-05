@@ -12,10 +12,12 @@ from agentflow.bootstrap import build_handlers
 from agentflow.config import Settings
 from agentflow.infrastructure.mcp.client import connect_tools
 from agentflow.infrastructure.persistence.store import Store
+from agentflow.infrastructure.telemetry.tracing import local_tracing
 
 
 async def serve_worker(settings: Settings, *, once: bool = False) -> None:
     store = Store(settings.database_url.get_secret_value())
+    tracing = local_tracing() if settings.telemetry else None
     try:
         async with AsyncExitStack() as stack:
             tools = ToolRuntime()
@@ -34,6 +36,7 @@ async def serve_worker(settings: Settings, *, once: bool = False) -> None:
                 lease_seconds=settings.lease_seconds,
                 concurrency=settings.concurrency,
                 poll_seconds=settings.poll_seconds,
+                tracer=tracing.get_tracer("agentflow.worker") if tracing else None,
             )
             if once:
                 await worker.tick()
@@ -41,6 +44,8 @@ async def serve_worker(settings: Settings, *, once: bool = False) -> None:
                 await worker.serve(asyncio.Event())
     finally:
         store.close()
+        if tracing:
+            tracing.shutdown()
 
 
 def main() -> None:
@@ -66,6 +71,7 @@ def main() -> None:
             factory=True,
             host=args.host,
             port=args.port,
+            ws_max_size=16384,
         )
     else:
         try:

@@ -12,8 +12,26 @@ async function proxy(request: NextRequest, context: { params: Promise<{ path: st
     const value = request.headers.get(key);
     if (value) headers.set(key, value);
   }
-  const body = request.method === "POST" ? await request.arrayBuffer() : undefined;
-  if (body && body.byteLength > 2_000_000) return Response.json({ detail: "请求超过 2 MB" }, { status: 413 });
+  let body: ArrayBuffer | undefined;
+  if (request.method === "POST" && request.body) {
+    const reader = request.body.getReader();
+    const chunks: Uint8Array[] = [];
+    let size = 0;
+    while (true) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      size += value.byteLength;
+      if (size > 2_000_000) {
+        await reader.cancel();
+        return Response.json({ detail: "请求超过 2 MB" }, { status: 413 });
+      }
+      chunks.push(value);
+    }
+    const combined = new Uint8Array(size);
+    let offset = 0;
+    for (const chunk of chunks) { combined.set(chunk, offset); offset += chunk.byteLength; }
+    body = combined.buffer;
+  }
   try {
     const response = await fetch(target, { method: request.method, headers, body, cache: "no-store", redirect: "manual", signal: request.signal });
     return new Response(response.body, { status: response.status, headers: {
