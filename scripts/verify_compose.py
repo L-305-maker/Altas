@@ -47,8 +47,9 @@ def api(
         raise RuntimeError(
             f"{method} {path} returned {error.code}: {detail[:500]}"
         ) from None
-    except URLError as error:
-        raise RuntimeError(f"{method} {path} failed: {error.reason}") from None
+    except (URLError, OSError) as error:
+        reason = getattr(error, "reason", error)
+        raise RuntimeError(f"{method} {path} failed: {reason}") from None
     if not raw:
         return None
     try:
