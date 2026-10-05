@@ -52,8 +52,11 @@ Grafana 数据源已预配置，示例查询：`rate(agentflow_http_requests_tot
 迁移前先备份，在独立数据库验证升级及回退。回退初始迁移会删除数据，只能用于
 专用测试数据库，不应作为生产数据恢复手段。
 
-## 尚需环境联调的部分
+## 环境验收边界
 
-Docker daemon 未启动时，容器执行测试会明确跳过，不能由命令构造测试替代。
-真实模型联调由用户之后提供 DeepSeek 环境配置再进行。
-CI 配置的 Linux/Python 3.13 检查需在 CI 执行后才能声称通过。
+GitHub Actions 已在 Linux/Python 3.12/3.13 上执行真实 PostgreSQL、Docker sandbox
+和完整 Compose 业务冒烟，因此这些项目不再只是配置或 mock 验证。真实 DeepSeek
+联调仍需在目标账户、网络与配额环境中单独进行。
+
+正式上线还必须针对目标基础设施演练数据库备份恢复，并由外层网关提供 TLS、访问控制
+与限流；这些环境责任不能由仓库 CI 代替。
