@@ -15,8 +15,8 @@ from applications.living_guideline.handlers import GuidelineHandlers
 from applications.living_guideline.workflow import GUIDELINE
 
 
-def build_handlers(settings, tools=None):
-    handlers = build_core_handlers(settings, tools)
+def build_handlers(settings, tools=None, *, store=None):
+    handlers = build_core_handlers(settings, tools, store=store)
     guideline = GuidelineHandlers(build_provider(settings))
     handlers.register("guideline.extract", guideline.extract)
     handlers.register("guideline.draft", guideline.draft)

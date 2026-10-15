@@ -1,9 +1,17 @@
+import asyncio
 import os
 
 import pytest
 from sqlalchemy import select
 
 from agentflow.application.agents.durable_runner import DurableAgentRunner
+from agentflow.application.orchestration.worker import HandlerRegistry, Worker
+from agentflow.application.ports.agent_store import (
+    AgentStoreUnavailable,
+    LostLease,
+    StateConflict,
+)
+from agentflow.application.ports.handler_result import CommittedAgentResult
 from agentflow.application.ports.model_provider import (
     ModelOutcomeUnknown,
     ModelResponse,
@@ -299,3 +307,87 @@ async def test_retry_budget_is_bounded(store):
     assert persisted(store)["budget"]["model_attempts"] == 2
     assert persisted(store)["status"] == "exhausted"
     assert store.get_run(run)["status"] == "failed"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "kind",
+    ["success", "unknown_tool", "unknown_model", "tool_timeout", "model_timeout"],
+)
+async def test_worker_honors_durable_result_without_double_commit(
+    store, monkeypatch, kind
+):
+    submit(store)
+
+    async def invoke(args):
+        if kind == "tool_timeout":
+            await asyncio.sleep(1)
+        raise TimeoutError("private")
+
+    provider = MockProvider(
+        [proposal()]
+        if "tool" in kind
+        else [ModelOutcomeUnknown()]
+        if kind == "unknown_model"
+        else [final()]
+    )
+    if kind == "model_timeout":
+
+        async def respond(*args):
+            await asyncio.sleep(1)
+
+        provider.respond = respond
+    runner = DurableAgentRunner(SQLAgentStore(store), provider, tools(invoke))
+    handlers = HandlerRegistry()
+
+    async def handler(task):
+        async with asyncio.timeout(0.1 if "timeout" in kind else 10):
+            return await runner.run(task, "goal", allowed={"echo"})
+
+    handlers.register("agent", handler)
+    attempts = []
+    monkeypatch.setattr(store, "complete", lambda *args: attempts.append("complete"))
+    monkeypatch.setattr(store, "fail", lambda *args: attempts.append("fail"))
+    assert await Worker(store, handlers).tick()
+    assert attempts == []
+    assert persisted(store)["status"] == (
+        "waiting_reconciliation"
+        if "tool" in kind
+        else "failed"
+        if "model" in kind
+        else "succeeded"
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("error", [LostLease, StateConflict, AgentStoreUnavailable])
+async def test_worker_does_not_fail_uncertain_or_lost_execution(
+    store, monkeypatch, error
+):
+    submit(store)
+    handlers = HandlerRegistry()
+
+    async def handler(task):
+        raise error()
+
+    handlers.register("agent", handler)
+    failures = []
+    monkeypatch.setattr(store, "fail", lambda *args: failures.append(args))
+    await Worker(store, handlers).tick()
+    assert not failures
+
+
+@pytest.mark.asyncio
+async def test_worker_rejects_result_for_another_task(store):
+    run = submit(store)
+    handlers = HandlerRegistry()
+
+    async def handler(task):
+        return CommittedAgentResult(
+            "wrong-run", task.step_id, task.token, "succeeded", 1
+        )
+
+    handlers.register("agent", handler)
+    await Worker(store, handlers).tick()
+    assert store.get_run(run)["steps"][0]["output"] is None
+    assert store.get_run(run)["steps"][0]["error"] == "ValueError"

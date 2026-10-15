@@ -13,3 +13,21 @@ class CommittedAgentResult:
         "succeeded", "failed", "exhausted", "waiting_approval", "waiting_reconciliation"
     ]
     revision: int
+
+    def __post_init__(self):
+        if (
+            self.status
+            not in {
+                "succeeded",
+                "failed",
+                "exhausted",
+                "waiting_approval",
+                "waiting_reconciliation",
+            }
+            or type(self.revision) is not int
+            or self.revision < 1
+            or not self.run_id
+            or not self.step_id
+            or not self.token
+        ):
+            raise ValueError("invalid committed agent result")

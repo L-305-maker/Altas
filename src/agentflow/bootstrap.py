@@ -2,12 +2,15 @@
 
 from pathlib import Path
 
+from agentflow.application.agents.durable_runner import DurableAgentRunner
 from agentflow.application.agents.runner import AgentRunner
 from agentflow.application.orchestration.worker import HandlerRegistry
 from agentflow.application.tools.runtime import Tool, ToolRuntime
 from agentflow.config import Settings
 from agentflow.infrastructure.models.deepseek import DeepSeekProvider
 from agentflow.infrastructure.models.mock import MockProvider
+from agentflow.infrastructure.persistence.agent_store import SQLAgentStore
+from agentflow.infrastructure.persistence.store import Store
 from agentflow.infrastructure.sandbox.docker import DockerSandbox
 from agentflow.infrastructure.tools.filesystem import read_text_tool
 
@@ -25,11 +28,12 @@ def build_provider(settings: Settings):
 
 
 def build_handlers(
-    settings: Settings, tools: ToolRuntime | None = None
+    settings: Settings, tools: ToolRuntime | None = None, *, store: Store | None = None
 ) -> HandlerRegistry:
     registry = HandlerRegistry()
     tools = tools or ToolRuntime()
     provider = build_provider(settings)
+    agent_store = SQLAgentStore(store) if store is not None else None
     if settings.tool_root:
         tools.register(read_text_tool(Path(settings.tool_root)))
     if settings.sandbox_enabled:
@@ -62,6 +66,15 @@ def build_handlers(
             or not all(isinstance(x, str) for x in allowed)
         ):
             raise ValueError("invalid agent prompt or tool allowlist")
+        mode = task.spec.parameters.get("agent", {}).get("mode")
+        if mode == "durable_v1":
+            if agent_store is None:
+                raise ValueError("durable mode requires the worker Store")
+            return await DurableAgentRunner(
+                agent_store, provider or MockProvider(), tools
+            ).run(task, prompt, allowed=set(allowed))
+        if mode is not None:
+            raise ValueError("unknown agent mode")
         # MockProvider 每次新建，避免不同运行共享测试响应序列。
         runner = AgentRunner(provider or MockProvider(), tools)
         return await runner.run(
