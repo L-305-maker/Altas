@@ -3,6 +3,7 @@
 import asyncio
 import hashlib
 import json
+from collections.abc import Awaitable
 from typing import Literal
 from uuid import uuid4
 
@@ -47,6 +48,18 @@ from agentflow.domain.agent.budget import (
 from agentflow.domain.agent.run import AgentSnapshot
 from agentflow.domain.agent.status import ActionStatus, AgentStatus
 from agentflow.domain.execution.task import Task
+
+_CANCEL_CLEANUP_TIMEOUT = 5.0
+
+
+async def _cancel_cleanup(operation: Awaitable[object]) -> None:
+    """限制取消后的等待，不创建后台 asyncio Task；结果不确定时留给租约恢复。"""
+    try:
+        async with asyncio.timeout(_CANCEL_CLEANUP_TIMEOUT):
+            await operation
+    except (Exception, asyncio.CancelledError):
+        # 清理异常/二次取消不能覆盖调用者的原始取消，也不能解释成已提交成功。
+        pass
 
 
 class DurableAgentConfig(BaseModel):
@@ -229,9 +242,10 @@ class DurableAgentRunner:
                 model_status="failed",
             )
         except asyncio.CancelledError:
-            return state, await self._fail(
-                task, state, "ModelOutcomeUnknown", model_status="unknown"
+            await _cancel_cleanup(
+                self._fail(task, state, "ModelOutcomeUnknown", model_status="unknown")
             )
+            raise
         except Exception:  # noqa: BLE001 - unclassified provider outcomes are never retried
             return state, await self._fail(
                 task, state, "ModelOutcomeUnknown", model_status="unknown"
@@ -479,9 +493,16 @@ class DurableAgentRunner:
                 task, state, inflight, ActionStatus.FAILED, code=error.code
             )
         except asyncio.CancelledError:
-            return await self._observe(
-                task, state, inflight, ActionStatus.UNKNOWN, code="ToolOutcomeUnknown"
+            await _cancel_cleanup(
+                self._observe(
+                    task,
+                    state,
+                    inflight,
+                    ActionStatus.UNKNOWN,
+                    code="ToolOutcomeUnknown",
+                )
             )
+            raise
         except Exception:  # noqa: BLE001 - dispatch may have happened, including invalid results
             return await self._observe(
                 task, state, inflight, ActionStatus.UNKNOWN, code="ToolOutcomeUnknown"
