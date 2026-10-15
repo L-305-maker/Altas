@@ -18,6 +18,9 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 from sqlalchemy.pool import StaticPool
 
+from agentflow.application.ports.agent_store import StateConflict
+from agentflow.application.ports.handler_result import CommittedAgentResult
+from agentflow.domain.agent.run import AgentSnapshot
 from agentflow.domain.execution.task import Task
 from agentflow.domain.workflow.spec import WorkflowSpec
 from agentflow.infrastructure.persistence.models import (
@@ -328,6 +331,35 @@ class Store:
                 return False
             owned[1].lease_until = self._now(session) + lease_seconds
             return True
+
+    def validate_agent_result(self, task: Task, result: CommittedAgentResult) -> None:
+        """单次一致性读取确认 Handler 声称的提交；此处不重新授予执行权。"""
+        with Session(self.engine) as session:
+            rows = session.execute(
+                select(StepRow, AgentSessionRow)
+                .join(AgentSessionRow, AgentSessionRow.step_row_id == StepRow.id)
+                .where(StepRow.run_id == task.run_id, StepRow.key == task.step_id)
+            ).first()
+            if rows is None:
+                raise ValueError("handler returned an uncommitted agent result")
+            step, agent = rows
+            snapshot = AgentSnapshot.model_validate(agent.snapshot)
+            expected = {
+                "succeeded": "succeeded",
+                "failed": "failed",
+                "exhausted": "failed",
+                "waiting_approval": "waiting",
+                "waiting_reconciliation": "waiting",
+            }
+            if (
+                snapshot.revision != result.revision
+                or agent.revision != result.revision
+                or snapshot.status.value != result.status
+                or step.status != expected[result.status]
+                or step.token is not None
+                or step.lease_until is not None
+            ):
+                raise StateConflict("agent result differs from committed step state")
 
     def complete(self, task: Task, output: Any) -> bool:
         encoded = json_bytes(output)

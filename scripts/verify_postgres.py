@@ -82,6 +82,8 @@ def main():
                     "tests/integration/test_postgres.py",
                     "tests/integration/test_agent_store.py",
                     "tests/integration/test_agent_migrations.py",
+                    "tests/integration/test_durable_agent_runner.py",
+                    "tests/chaos/test_durable_runner_crash.py",
                     "-q",
                 ],
                 env=environment,

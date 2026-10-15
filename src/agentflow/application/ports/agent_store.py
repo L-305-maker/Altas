@@ -9,7 +9,7 @@ from typing import Annotated, Literal, Protocol
 
 from pydantic import BaseModel, ConfigDict, Field, JsonValue
 
-from agentflow.domain.agent.action import Action, Identifier
+from agentflow.domain.agent.action import Action, ErrorCode, Identifier
 from agentflow.domain.agent.budget import Counter
 from agentflow.domain.agent.run import AgentSnapshot
 from agentflow.domain.execution.task import Task
@@ -86,6 +86,7 @@ class AgentTransition(BaseModel):
     model_result: ModelCallResult | None = None
     arguments: tuple[ActionArguments, ...] = ()
     observations: tuple[ActionObservation, ...] = ()
+    error_code: ErrorCode | None = None
 
 
 class AgentSession(BaseModel):

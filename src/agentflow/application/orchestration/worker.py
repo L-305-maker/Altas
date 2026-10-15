@@ -11,7 +11,13 @@ from typing import Any
 
 from opentelemetry import trace
 
+from agentflow.application.ports.agent_store import (
+    AgentStoreUnavailable,
+    LostLease,
+    StateConflict,
+)
 from agentflow.application.ports.execution_store import ExecutionStore
+from agentflow.application.ports.handler_result import CommittedAgentResult
 from agentflow.domain.execution.task import Task
 
 Handler = Callable[[Task], Awaitable[Any]]
@@ -102,11 +108,23 @@ class Worker:
         heartbeat = asyncio.create_task(renew())
         try:
             output = await job
-            await asyncio.to_thread(self.store.complete, task, output)
+            if isinstance(output, CommittedAgentResult):
+                if (output.run_id, output.step_id, output.token) != (
+                    task.run_id,
+                    task.step_id,
+                    task.token,
+                ):
+                    raise ValueError("committed result does not belong to this task")
+                await asyncio.to_thread(self.store.validate_agent_result, task, output)
+            else:
+                await asyncio.to_thread(self.store.complete, task, output)
         except asyncio.CancelledError:
             # 进程停止/租约丢失不提交失败；由租约过期恢复。外部取消继续向上传播。
             if asyncio.current_task().cancelling():
                 raise
+        except (LostLease, StateConflict, AgentStoreUnavailable):
+            # 所有权/提交结果不确定时停止；不能经普通 fail 触发整步重试或覆盖新 Worker。
+            pass
         except Exception as error:  # noqa: BLE001 - isolate user handlers at the worker boundary
             await asyncio.to_thread(self.store.fail, task, error)
         finally:

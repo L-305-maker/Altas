@@ -4,6 +4,7 @@ import asyncio
 from pathlib import Path
 
 from agentflow.application.tools.runtime import Tool
+from agentflow.domain.agent.status import ToolSideEffect
 
 
 def read_text_tool(root: Path) -> Tool:
@@ -34,4 +35,5 @@ def read_text_tool(root: Path) -> Tool:
             "additionalProperties": False,
         },
         read,
+        side_effect=ToolSideEffect.READ_ONLY,
     )
