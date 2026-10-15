@@ -40,3 +40,60 @@ DockerSandbox 取消时会删除对应容器。
 每个工作流最多 500 步，每个 JSON 输入/输出最多 2 MB。
 本版在事务中扫描单个 run 的步骤，适合学习和中小规模工作流；大量超宽 DAG
 应通过基准分析后再做增量依赖计数。没有实现跨地区共识、自动分片或分布式事务。
+
+## Durable AgentStore（PR2）
+
+先运行 Alembic `upgrade head`，再部署本版代码；迁移 `0002` 仅新增四张 Agent 表，
+不会改变 `0001` 的 Workflow/Step 数据。回退至 `0001` 会删除 Agent 数据，旧工作流数据保留。
+本轮不让现有 AgentRunner 启用持久执行，也不提供等待步骤的通用恢复入口。
+
+应用依赖 `application.ports.agent_store.AgentStore`；实现为
+`SQLAgentStore(existing_store)`，复用同一 Engine、事务和数据库时钟。
+Task 的 `step_id` 是步骤 key，Store 先按 `(run_id, key)` 找到真实 StepRow UUID，
+Session 的唯一外键绑定该 UUID。锁顺序为 Run → Step → AgentSession → 模型记录 → Action。
+同一 Run 的事务会串行化，这是当前可靠性边界，尚未针对超宽并行 Agent 做吞吐优化。
+
+- `open(task, initial_snapshot, messages=...)`：只接受未使用的 READY_MODEL 快照；
+  同一 Step、相同初始化幂等返回现状，冲突初始化不会覆盖历史。
+- `load(task)`：校验当前租约后恢复快照、全部有序消息、全部逻辑模型调用和历史 Action。
+- `commit_transition(task, AgentTransition(...))`：校验旧快照和修订号，调用 `old.advance(candidate)`，
+  再用独立 revision 列执行 CAS；消息、模型调用、Action 和快照在同一事务写入。
+- `complete_agent_step(task, transition, output)`：SUCCEEDED、Step 输出、Artifact 及下游调度原子提交。
+- `fail_agent_step(task, transition)`：FAILED/EXHAUSTED 与 Step failed 原子提交，不重开终态 Agent。
+- `suspend_agent_step(task, transition)`：等待快照与 Step waiting 原子提交并释放 token/租约。
+  现有 Workflow 审批入口不能任意恢复 Agent 等待步骤；授权恢复由后续 PR 设计。
+
+每次模型请求先提交 READY_MODEL → MODEL_INFLIGHT，逻辑调用 ID 与轮次固定；
+确认失败的重试复用 ID 并使 attempts 恰好加一。未知模型结果不能直接预约重试。
+成功模型结果必须附带一条 assistant 消息，其 `payload.action_ids` 与有序批次完全一致。
+ActionArguments 必须逐个匹配新批次；规范 JSON SHA-256 必须与领域摘要相符。
+`arguments_digest` 用于一致性校验，**不是加密，也不是数据脱敏**。参数、消息和结果仍是敏感存储数据。
+
+ActionObservation 指定追加 sequence 和 result（可为 JSON null），Store 根据 Action 生成
+`tool` 消息：`action_id/status/error_code/result`。状态、结果和观察不可分开提交。
+序号从 0 开始连续追加，不允许覆盖已有消息；历史 Action 不因下一模型轮次清空当前批次而删除。
+幂等键由 Session/Action ID 确定，跨恢复保持稳定，但是否去重仍取决于外部工具。
+模型 usage 是当前逻辑调用最近一次结果的供应商无关 JSON；资源预算由调用方按固定单位累积，
+本层不推断实际 token、费用或失败请求是否被供应商计费。
+
+所有 Task 写入在开始和提交前检查租约；租约或 token 失效抛 LostLease，修订号/状态/记录冲突抛
+StateConflict，非法或超大 JSON 抛 AgentDataError。数据库驱动故障抛 AgentStoreUnavailable，
+提交结果可能未知，必须恢复租约后重读，不能直接执行外部调用。不会静默覆盖，异常不携带原始参数输出。
+消息、工具参数、单个结果及 usage 各限 100 KB；快照和单次提交限 2 MB；累计会话 JSON 限 8 MB。
+活动会话还预留取消/崩溃时记录 UNKNOWN 与观察的容量，防止历史填满后无法安全停止。
+只保存有限 JSON，不使用 pickle，拒绝 NaN/Infinity。事件只包含步骤 key、状态、修订号和安全错误码。
+
+普通非 Agent Handler 的 Step 重试/失败行为保留。已有 Session 时：
+
+- 进程在模型预约后退出：新 Worker 接管同一 Session，模型记录为 UNKNOWN，预算/ID 不重置；
+  未来 Runner 需先确认结果，才能继续或重试。
+- 工具派发后结果未持久化便失去租约：全部 INFLIGHT 转 UNKNOWN，Agent/Step 原子等待对账，
+  不自动再次派发。WAITING_RECONCILIATION 不允许任何 INFLIGHT；先对账返回 ACTIONS_PENDING 才能派发。
+- Workflow 取消：活动 Agent 转 CANCELLED，未确认工具结果先记 UNKNOWN，释放执行所有权。
+- Handler 抛异常或 Step 恢复尝试耗尽：Agent/Step 终态失败，保留未知结果，不套用会重开 Agent 的普通重试。
+
+终态 Agent 快照不可修改；后续到达的结果只能由未来审计/对账服务另存证据。
+本 PR 不提供该服务，也不声称仅凭数据库可保证所有外部工具 exactly-once。
+
+验证使用 SQLite 与专用临时 PostgreSQL 的同一组 AgentStore 测试。`scripts/verify_postgres.py`
+会运行普通 PostgreSQL、AgentStore 并发/fencing/回滚以及 0001↔0002 迁移测试；SQLite 不模拟行锁。

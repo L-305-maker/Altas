@@ -87,3 +87,36 @@ def test_postgres_migrations_roundtrip(monkeypatch):
     command.downgrade(config, "base")
     assert "steps" not in inspect(store.engine).get_table_names()
     store.close()
+
+
+def test_postgres_agent_lease_uses_database_clock(pgstore, monkeypatch):
+    import agentflow.infrastructure.persistence.store as store_module
+    from agentflow.domain.agent.budget import AgentBudget
+    from agentflow.domain.agent.run import AgentSnapshot
+    from agentflow.infrastructure.persistence.agent_store import SQLAgentStore
+
+    run = pgstore.submit(
+        pgstore.register(
+            WorkflowSpec(
+                name="agent-clock",
+                steps=(StepSpec(id="work", handler="agent"),),
+            )
+        ),
+        {},
+    )
+    task = pgstore.claim(300)
+    agents = SQLAgentStore(pgstore)
+    initial = AgentSnapshot(
+        id="clock-agent",
+        budget=AgentBudget(
+            max_model_rounds=1,
+            max_model_attempts=1,
+            max_tool_calls=1,
+            max_resource_units=100,
+        ),
+    )
+    agents.open(task, initial)
+    monkeypatch.setattr(store_module.time, "time", lambda: 10**15)
+    assert agents.load(task).snapshot == initial
+    assert pgstore.heartbeat(task, 300)
+    assert pgstore.get_run(run)["status"] == "running"

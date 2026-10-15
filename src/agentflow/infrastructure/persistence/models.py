@@ -6,7 +6,17 @@ Python 函数或异常实例。队列直接复用 steps 表，避免“状态成
 
 from typing import Any
 
-from sqlalchemy import JSON, Float, ForeignKey, Index, Integer, String, UniqueConstraint
+from sqlalchemy import (
+    JSON,
+    CheckConstraint,
+    Float,
+    ForeignKey,
+    ForeignKeyConstraint,
+    Index,
+    Integer,
+    String,
+    UniqueConstraint,
+)
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
 
@@ -80,3 +90,95 @@ class ArtifactRow(Base):
     digest: Mapped[str] = mapped_column(String(64))
     content: Mapped[Any] = mapped_column(JSON)
     created_at: Mapped[float] = mapped_column(Float)
+
+
+class AgentSessionRow(Base):
+    __tablename__ = "agent_sessions"
+    __table_args__ = (CheckConstraint("revision >= 0", name="ck_agent_revision"),)
+    id: Mapped[str] = mapped_column(String(128), primary_key=True)
+    step_row_id: Mapped[str] = mapped_column(ForeignKey("steps.id"), unique=True)
+    initial_snapshot: Mapped[dict[str, Any]] = mapped_column(JSON)
+    snapshot: Mapped[dict[str, Any]] = mapped_column(JSON)
+    revision: Mapped[int] = mapped_column(Integer)
+    created_at: Mapped[float] = mapped_column(Float)
+    updated_at: Mapped[float] = mapped_column(Float)
+
+
+class AgentModelCallRow(Base):
+    __tablename__ = "agent_model_calls"
+    __table_args__ = (
+        UniqueConstraint("session_id", "model_call_id"),
+        UniqueConstraint("session_id", "round_index"),
+        CheckConstraint(
+            "round_index >= 1 AND attempts >= 1", name="ck_agent_model_counts"
+        ),
+        CheckConstraint(
+            "status IN ('inflight', 'succeeded', 'failed', 'unknown')",
+            name="ck_agent_model_status",
+        ),
+    )
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    session_id: Mapped[str] = mapped_column(ForeignKey("agent_sessions.id"))
+    model_call_id: Mapped[str] = mapped_column(String(128))
+    round_index: Mapped[int] = mapped_column(Integer)
+    status: Mapped[str] = mapped_column(String(16))
+    attempts: Mapped[int] = mapped_column(Integer)
+    usage: Mapped[dict[str, Any] | None] = mapped_column(JSON)
+    created_at: Mapped[float] = mapped_column(Float)
+    updated_at: Mapped[float] = mapped_column(Float)
+
+
+class AgentMessageRow(Base):
+    __tablename__ = "agent_messages"
+    __table_args__ = (
+        UniqueConstraint("session_id", "sequence"),
+        ForeignKeyConstraint(
+            ["session_id", "model_call_id"],
+            ["agent_model_calls.session_id", "agent_model_calls.model_call_id"],
+        ),
+        CheckConstraint("sequence >= 0", name="ck_agent_message_sequence"),
+        CheckConstraint(
+            "role IN ('system', 'user', 'assistant', 'tool')",
+            name="ck_agent_message_role",
+        ),
+    )
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    session_id: Mapped[str] = mapped_column(ForeignKey("agent_sessions.id"))
+    sequence: Mapped[int] = mapped_column(Integer)
+    role: Mapped[str] = mapped_column(String(16))
+    payload: Mapped[dict[str, Any]] = mapped_column(JSON)
+    model_call_id: Mapped[str | None] = mapped_column(String(128))
+    created_at: Mapped[float] = mapped_column(Float)
+
+
+class AgentActionRow(Base):
+    __tablename__ = "agent_actions"
+    __table_args__ = (
+        UniqueConstraint("session_id", "model_call_id", "call_index"),
+        UniqueConstraint("session_id", "idempotency_key"),
+        ForeignKeyConstraint(
+            ["session_id", "model_call_id"],
+            ["agent_model_calls.session_id", "agent_model_calls.model_call_id"],
+        ),
+        CheckConstraint("call_index >= 0", name="ck_agent_action_index"),
+        CheckConstraint(
+            "status IN ('proposed', 'inflight', 'succeeded', 'failed', 'unknown', 'denied')",
+            name="ck_agent_action_status",
+        ),
+    )
+    session_id: Mapped[str] = mapped_column(
+        ForeignKey("agent_sessions.id"), primary_key=True
+    )
+    id: Mapped[str] = mapped_column(String(128), primary_key=True)
+    model_call_id: Mapped[str] = mapped_column(String(128))
+    call_index: Mapped[int] = mapped_column(Integer)
+    tool_name: Mapped[str] = mapped_column(String(80))
+    arguments_digest: Mapped[str] = mapped_column(String(64))
+    arguments: Mapped[dict[str, Any]] = mapped_column(JSON)
+    side_effect: Mapped[str] = mapped_column(String(16))
+    status: Mapped[str] = mapped_column(String(16))
+    idempotency_key: Mapped[str] = mapped_column(String(256))
+    result: Mapped[Any | None] = mapped_column(JSON)
+    error_code: Mapped[str | None] = mapped_column(String(80))
+    created_at: Mapped[float] = mapped_column(Float)
+    updated_at: Mapped[float] = mapped_column(Float)

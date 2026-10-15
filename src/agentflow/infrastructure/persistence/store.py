@@ -7,6 +7,7 @@
 
 import hashlib
 import json
+import math
 import time
 from contextlib import contextmanager
 from typing import Any
@@ -20,6 +21,7 @@ from sqlalchemy.pool import StaticPool
 from agentflow.domain.execution.task import Task
 from agentflow.domain.workflow.spec import WorkflowSpec
 from agentflow.infrastructure.persistence.models import (
+    AgentSessionRow,
     ApprovalRow,
     ArtifactRow,
     Base,
@@ -262,7 +264,12 @@ class Store:
                 return None
             specs = {s.id: s for s in WorkflowSpec.model_validate(run.spec).steps}
             rows = list(
-                session.scalars(select(StepRow).where(StepRow.run_id == run.id))
+                session.scalars(
+                    select(StepRow)
+                    .where(StepRow.run_id == run.id)
+                    .order_by(StepRow.id)
+                    .with_for_update()
+                )
             )
             for row in rows:
                 if row.status == "running" and row.lease_until <= now:
@@ -298,13 +305,17 @@ class Store:
     def _owned(self, session: Session, task: Task) -> tuple[RunRow, StepRow] | None:
         run = self._locked_run(session, task.run_id)
         row = session.scalar(
-            select(StepRow).where(StepRow.run_id == run.id, StepRow.key == task.step_id)
+            select(StepRow)
+            .where(StepRow.run_id == run.id, StepRow.key == task.step_id)
+            .with_for_update()
         )
         if (
             run.status in TERMINAL
             or row is None
             or row.status != "running"
             or row.token != task.token
+            or row.lease_until is None
+            or not math.isfinite(row.lease_until)
             or row.lease_until <= self._now(session)
         ):
             return None
@@ -325,25 +336,36 @@ class Store:
             if not owned:
                 return False
             run, row = owned
-            row.status, row.output, row.error = "succeeded", output, None
-            row.token, row.lease_until = None, None
-            if task.spec.artifact:
-                session.add(
-                    ArtifactRow(
-                        id=str(uuid4()),
-                        run_id=run.id,
-                        step_id=row.id,
-                        content=output,
-                        digest=hashlib.sha256(encoded).hexdigest(),
-                        created_at=time.time(),
-                    )
-                )
-            self._event(session, run.id, "step.succeeded", {"step": row.key})
-            session.flush()
-            self._schedule(session, run)
+            if session.scalar(
+                select(AgentSessionRow.id).where(AgentSessionRow.step_row_id == row.id)
+            ):
+                raise ConflictError("agent steps must complete through AgentStore")
+            self._complete_step(session, run, row, output, encoded, task.spec.artifact)
             return True
 
+    def _complete_step(self, session, run, row, output, encoded, artifact):
+        row.status, row.output, row.error = "succeeded", output, None
+        row.token, row.lease_until = None, None
+        if artifact:
+            session.add(
+                ArtifactRow(
+                    id=str(uuid4()),
+                    run_id=run.id,
+                    step_id=row.id,
+                    content=output,
+                    digest=hashlib.sha256(encoded).hexdigest(),
+                    created_at=time.time(),
+                )
+            )
+        self._event(session, run.id, "step.succeeded", {"step": row.key})
+        session.flush()
+        self._schedule(session, run)
+
     def _fail(self, session, run, row, spec, error: str, now: float):
+        from agentflow.infrastructure.persistence.agent_store import SQLAgentStore
+
+        if SQLAgentStore(self)._step_failure(session, run, row, spec, error):
+            return
         row.error, row.token, row.lease_until = error, None, None
         if row.attempts < spec.max_attempts:
             row.status = "ready"
@@ -380,13 +402,21 @@ class Store:
             return True
 
     def cancel(self, run_id: str) -> None:
+        from agentflow.infrastructure.persistence.agent_store import SQLAgentStore
+
         with self.transaction() as session:
             run = self._locked_run(session, run_id)
             if run.status in TERMINAL:
                 return
             run.status = "cancelled"
-            for row in session.scalars(select(StepRow).where(StepRow.run_id == run_id)):
+            for row in session.scalars(
+                select(StepRow)
+                .where(StepRow.run_id == run_id)
+                .order_by(StepRow.id)
+                .with_for_update()
+            ):
                 if row.status not in TERMINAL:
+                    SQLAgentStore(self)._cancel_step(session, run, row)
                     row.status, row.token, row.lease_until = "cancelled", None, None
             for row in session.scalars(
                 select(ApprovalRow).where(ApprovalRow.run_id == run_id)
@@ -412,7 +442,15 @@ class Store:
             if approval.decision != "pending" or run.status in TERMINAL:
                 raise ConflictError("approval is no longer pending")
             approval.decision, approval.actor, approval.reason = decision, actor, reason
-            row = session.get(StepRow, approval.step_id)
+            row = session.scalar(
+                select(StepRow).where(StepRow.id == approval.step_id).with_for_update()
+            )
+            if session.scalar(
+                select(AgentSessionRow.id).where(AgentSessionRow.step_row_id == row.id)
+            ):
+                raise ConflictError(
+                    "agent waiting states require a dedicated approval operation"
+                )
             row.status = "ready" if approve else "failed"
             row.error = None if approve else "ApprovalRejected"
             self._event(

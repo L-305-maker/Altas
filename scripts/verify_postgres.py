@@ -80,6 +80,8 @@ def main():
                     "-m",
                     "pytest",
                     "tests/integration/test_postgres.py",
+                    "tests/integration/test_agent_store.py",
+                    "tests/integration/test_agent_migrations.py",
                     "-q",
                 ],
                 env=environment,
