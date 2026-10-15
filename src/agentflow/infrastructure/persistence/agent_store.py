@@ -560,6 +560,7 @@ class SQLAgentStore:
                 "step": step.key,
                 "state": candidate.status.value,
                 "revision": candidate.revision,
+                "error_code": transition.error_code,
             },
         )
         db.flush()
@@ -690,7 +691,7 @@ class SQLAgentStore:
                 self.store._complete_step(db, run, step, output, encoded, spec.artifact)
             elif mode in {"fail", "suspend"}:
                 step.status = "failed" if mode == "fail" else "waiting"
-                step.error = (
+                step.error = transition.error_code or (
                     "AgentExhausted"
                     if status == AgentStatus.EXHAUSTED
                     else ("AgentFailed" if mode == "fail" else None)
