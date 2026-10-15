@@ -3,12 +3,17 @@
 import asyncio
 import hashlib
 import json
+from typing import Literal
 from uuid import uuid4
 
 from jsonschema import ValidationError as SchemaError
 from pydantic import BaseModel, ConfigDict, ValidationError
 
-from agentflow.application.agents.context import AgentContextBuilder
+from agentflow.application.agents.context import (
+    AgentContextBuilder,
+    mapped_calls,
+    parse_tool_arguments,
+)
 from agentflow.application.ports.agent_store import (
     ActionArguments,
     ActionObservation,
@@ -49,8 +54,8 @@ class DurableAgentConfig(BaseModel):
     max_model_rounds: Counter = 8
     max_model_attempts: Counter = 12
     max_tool_calls: Counter = 32
-    # PR3 不估算费用或未知 token；resource_units 不与请求次数绑定。
-    max_resource_units: Counter = 0
+    # 本版只强制调用次数预算；资源计价需要独立策略，拒绝伪装成已强制执行。
+    max_resource_units: Literal[0] = 0
 
 
 def successor(snapshot: AgentSnapshot, **changes) -> AgentSnapshot:
@@ -185,7 +190,12 @@ class DurableAgentRunner:
                 budget=budget,
             )
         )
-        state = await asyncio.to_thread(self.store.commit_transition, task, reservation)
+        try:
+            state = await asyncio.to_thread(
+                self.store.commit_transition, task, reservation
+            )
+        except AgentDataError:
+            return state, await self._fail(task, state, "AgentStorageLimit")
         await asyncio.to_thread(self.store.load, task)
         try:
             response = await self.provider.respond(context, schemas)
@@ -264,12 +274,17 @@ class DurableAgentRunner:
                 usage=response.usage,
             ),
         )
-        saved = await asyncio.to_thread(
-            self.store.complete_agent_step,
-            task,
-            transition,
-            {"text": message.content, "rounds": state.snapshot.budget.model_rounds},
-        )
+        try:
+            saved = await asyncio.to_thread(
+                self.store.complete_agent_step,
+                task,
+                transition,
+                {"text": message.content, "rounds": state.snapshot.budget.model_rounds},
+            )
+        except AgentDataError:
+            return state, await self._fail(
+                task, state, "AgentStorageLimit", model_status="failed"
+            )
         return saved, self._result(task, saved)
 
     def _assistant(self, state, response, ids, invalid=()):
@@ -294,9 +309,7 @@ class DurableAgentRunner:
         for call in response.assistant_message.tool_calls:
             action_id = uuid4().hex
             try:
-                values = finite_json(json.loads(call.function.arguments))
-                if not isinstance(values, dict):
-                    raise ValueError
+                values = parse_tool_arguments(call.function.arguments)
             except (ValueError, AgentDataError):
                 # 原始格式仍保存在 assistant.message；空参数仅是拒绝记录的占位。
                 # invalid_arguments 标记使此 Action 无法派发，不能把占位当作修复。
@@ -331,11 +344,18 @@ class DurableAgentRunner:
         )
 
     async def _observe(self, task, state, action, status, *, code=None, result=None):
+        waiting = status == ActionStatus.UNKNOWN
+        changed = {action.id}
+        if waiting:
+            changed.update(
+                a.id
+                for a in state.snapshot.actions
+                if a.status == ActionStatus.INFLIGHT
+            )
         actions = tuple(
-            a.transition(status, error_code=code) if a.id == action.id else a
+            a.transition(status, error_code=code) if a.id in changed else a
             for a in state.snapshot.actions
         )
-        waiting = status == ActionStatus.UNKNOWN
         transition = AgentTransition(
             snapshot=successor(
                 state.snapshot,
@@ -344,17 +364,29 @@ class DurableAgentRunner:
                 if waiting
                 else AgentStatus.ACTIONS_PENDING,
             ),
-            observations=(
+            observations=tuple(
                 ActionObservation(
-                    sequence=len(state.messages), action_id=action.id, result=result
-                ),
+                    sequence=len(state.messages) + index,
+                    action_id=a.id,
+                    result=result if a.id == action.id else None,
+                )
+                for index, a in enumerate(a for a in actions if a.id in changed)
             ),
             error_code=code,
         )
         method = (
             self.store.suspend_agent_step if waiting else self.store.commit_transition
         )
-        saved = await asyncio.to_thread(method, task, transition)
+        try:
+            saved = await asyncio.to_thread(method, task, transition)
+        except AgentDataError:
+            if waiting:
+                raise
+            if action.status == ActionStatus.INFLIGHT:
+                return await self._observe(
+                    task, state, action, ActionStatus.UNKNOWN, code="ToolOutcomeUnknown"
+                )
+            return state, await self._fail(task, state, "AgentStorageLimit")
         return saved, self._result(task, saved) if waiting else None
 
     async def _actions(self, task, state, allowed):
@@ -380,15 +412,18 @@ class DurableAgentRunner:
             )
             return saved, None
         stored = next(a for a in state.actions if a.action.id == proposed.id)
-        reply = next(
-            m
-            for m in state.messages
-            if m.role == "assistant" and m.model_call_id == proposed.model_call_id
-        )
+        call = mapped_calls(state)[proposed.id]
         code = None
-        if proposed.id in reply.payload.get("invalid_arguments", []):
+        try:
+            if parse_tool_arguments(call.function.arguments) != stored.arguments:
+                raise StateConflict("stored arguments differ from the model proposal")
+        except ValueError:
+            if stored.arguments:
+                raise StateConflict(
+                    "invalid arguments cannot authorize dispatch"
+                ) from None
             code = "ToolArgumentsInvalid"
-        else:
+        if code is None:
             try:
                 self.tools.prepare(
                     proposed.tool_name,

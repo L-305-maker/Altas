@@ -5,6 +5,7 @@ from agentflow.application.ports.agent_store import (
     AgentMessage,
     AgentSession,
     ModelCallRecord,
+    StateConflict,
     StoredAction,
 )
 from agentflow.domain.agent.action import Action, digest_arguments
@@ -158,3 +159,13 @@ def test_order_mapping_and_restore_with_reused_provider_ids():
 def test_one_completed_one_unknown_blocks_model():
     with pytest.raises(UnresolvedActions):
         AgentContextBuilder().build(session(("succeeded", "unknown")))
+
+
+def test_call_arguments_must_match_persisted_action():
+    state = session()
+    data = state.model_dump()
+    data["messages"][1]["payload"]["message"]["tool_calls"][0]["function"][
+        "arguments"
+    ] = '{"forged": true}'
+    with pytest.raises(StateConflict):
+        AgentContextBuilder().build(AgentSession.model_validate(data))

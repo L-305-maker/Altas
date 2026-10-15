@@ -115,6 +115,7 @@ class Worker:
                     task.token,
                 ):
                     raise ValueError("committed result does not belong to this task")
+                await asyncio.to_thread(self.store.validate_agent_result, task, output)
             else:
                 await asyncio.to_thread(self.store.complete, task, output)
         except asyncio.CancelledError:

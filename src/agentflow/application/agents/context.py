@@ -5,7 +5,78 @@ import json
 from pydantic import ValidationError
 
 from agentflow.application.ports.agent_store import AgentSession, StateConflict
-from agentflow.application.ports.model_provider import AssistantMessage
+from agentflow.application.ports.model_provider import AssistantMessage, ModelToolCall
+
+
+def parse_tool_arguments(text: str) -> dict:
+    def unique(pairs):
+        result = {}
+        for key, value in pairs:
+            if key in result:
+                raise ValueError
+            result[key] = value
+        return result
+
+    try:
+        value = json.loads(text, object_pairs_hook=unique)
+        if (
+            not isinstance(value, dict)
+            or len(json.dumps(value, allow_nan=False).encode()) > 100_000
+        ):
+            raise ValueError
+        return value
+    except (ValueError, TypeError, RecursionError):
+        raise ValueError("invalid tool arguments") from None
+
+
+def mapped_calls(session: AgentSession) -> dict[str, ModelToolCall]:
+    """只接受持久化的有序映射，不能从供应商 ID 猜测核心 Action 身份。"""
+    result = {}
+    try:
+        for entry in session.messages:
+            if entry.role != "assistant":
+                continue
+            message = AssistantMessage.model_validate(entry.payload["message"])
+            batch = [
+                a
+                for a in session.actions
+                if a.action.model_call_id == entry.model_call_id
+            ]
+            if entry.payload["action_ids"] != [a.action.id for a in batch] or len(
+                batch
+            ) != len(message.tool_calls):
+                raise ValueError
+            for index, (stored, call) in enumerate(
+                zip(batch, message.tool_calls, strict=True)
+            ):
+                if (
+                    stored.call_index != index
+                    or stored.action.tool_name != call.function.name
+                    or stored.action.id in result
+                ):
+                    raise ValueError
+                try:
+                    arguments = parse_tool_arguments(call.function.arguments)
+                except ValueError:
+                    if stored.arguments or stored.action.status not in {
+                        "proposed",
+                        "denied",
+                    }:
+                        raise ValueError from None
+                    if (
+                        stored.action.status == "denied"
+                        and stored.action.error_code != "ToolArgumentsInvalid"
+                    ):
+                        raise ValueError from None
+                else:
+                    if arguments != stored.arguments:
+                        raise ValueError
+                result[stored.action.id] = call
+        if result.keys() != {a.action.id for a in session.actions}:
+            raise ValueError
+    except (ValueError, KeyError, TypeError):
+        raise StateConflict("agent tool call mapping is inconsistent") from None
+    return result
 
 
 class UnresolvedActions(Exception):
@@ -14,6 +85,7 @@ class UnresolvedActions(Exception):
 
 class AgentContextBuilder:
     def build(self, session: AgentSession) -> list[dict]:
+        mapped_calls(session)
         if any(not a.action.status.is_terminal for a in session.actions):
             raise UnresolvedActions(
                 "tool outcomes must be resolved before model execution"

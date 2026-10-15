@@ -90,11 +90,45 @@ def wait_for_status(run_id: str, expected: set[str]) -> dict[str, Any]:
     )
 
 
+def verify_durable_agent() -> None:
+    workflow = api(
+        "/workflows",
+        "POST",
+        {
+            "name": f"durable-smoke-{uuid4().hex}",
+            "steps": [
+                {
+                    "id": "answer",
+                    "handler": "agent",
+                    "artifact": True,
+                    "parameters": {
+                        "prompt": "Return an offline verification answer",
+                        "agent": {"mode": "durable_v1"},
+                    },
+                }
+            ],
+        },
+    )
+    run = api("/runs", "POST", {"workflow_id": workflow["id"], "inputs": {}})
+    result = wait_for_status(run["id"], {"succeeded"})
+    output = result["steps"][0].get("output")
+    artifacts = result.get("artifacts", [])
+    if (
+        not isinstance(output, dict)
+        or not output.get("text")
+        or output.get("rounds") != 1
+        or len(artifacts) != 1
+        or artifacts[0].get("content") != output
+    ):
+        raise RuntimeError("durable Agent/Step/Artifact smoke verification failed")
+
+
 def main() -> None:
     if len(TOKEN) < 16:
         raise SystemExit("AGENTFLOW_API_TOKEN must contain at least 16 characters")
 
     meta = wait_for_api()
+    verify_durable_agent()
     source_text = (
         "Compose smoke evidence: every published quote must come from this text."
     )
