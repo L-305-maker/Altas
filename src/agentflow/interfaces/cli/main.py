@@ -2,6 +2,7 @@
 
 import argparse
 import asyncio
+import inspect
 from contextlib import AsyncExitStack
 
 import uvicorn
@@ -32,9 +33,18 @@ async def serve_worker(
                         allowed=set(settings.mcp_tools),
                     )
                 )
+            parameters = inspect.signature(handler_factory).parameters
+            accepts_store = "store" in parameters or any(
+                p.kind == inspect.Parameter.VAR_KEYWORD for p in parameters.values()
+            )
+            handlers = (
+                handler_factory(settings, tools, store=store)
+                if accepts_store
+                else handler_factory(settings, tools)
+            )
             worker = Worker(
                 store,
-                handler_factory(settings, tools),
+                handlers,
                 lease_seconds=settings.lease_seconds,
                 concurrency=settings.concurrency,
                 poll_seconds=settings.poll_seconds,

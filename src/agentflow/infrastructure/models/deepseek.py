@@ -8,9 +8,14 @@ from urllib.parse import urlparse
 
 import httpx
 
-
-class ModelError(Exception):
-    pass
+from agentflow.application.ports.model_provider import (
+    ModelConfigurationError,
+    ModelError,
+    ModelOutcomeUnknown,
+    ModelProtocolError,
+    ModelResponse,
+    ModelRetryableError,
+)
 
 
 class DeepSeekProvider:
@@ -44,6 +49,32 @@ class DeepSeekProvider:
     async def complete(
         self, messages: list[dict], tools: list[dict] | None = None
     ) -> dict:
+        data = await self._request(messages, tools)
+        try:
+            message = data["choices"][0]["message"]
+            if message.get("role") != "assistant":
+                raise ValueError
+            return message
+        except (ValueError, KeyError, IndexError, TypeError, AttributeError):
+            raise ModelProtocolError() from None
+
+    async def respond(
+        self, messages: list[dict], tools: list[dict] | None = None
+    ) -> ModelResponse:
+        data = await self._request(messages, tools)
+        try:
+            choice = data["choices"][0]
+            return ModelResponse(
+                assistant_message=choice["message"],
+                finish_reason=choice["finish_reason"],
+                usage=data.get("usage"),
+                model=data.get("model"),
+                request_id=data.get("id"),
+            )
+        except (ValueError, KeyError, IndexError, TypeError, AttributeError):
+            raise ModelProtocolError() from None
+
+    async def _request(self, messages, tools):
         payload = {
             "model": self.model,
             "messages": messages,
@@ -61,14 +92,18 @@ class DeepSeekProvider:
                     json=payload,
                     headers={"Authorization": f"Bearer {self._key}"},
                 )
-                response.raise_for_status()
-                message = response.json()["choices"][0]["message"]
-                if message.get("role") != "assistant":
-                    raise ValueError("invalid assistant message")
-                # reasoning_content 等字段需回传时，保留原始消息结构而非仅取 content。
-                return message
-        except (httpx.HTTPError, ValueError, KeyError, IndexError, TypeError):
-            # 不将请求对象或供应商响应正文放进异常，避免凭据/原文被日志捕获。
-            raise ModelError(
-                "model request failed or returned an invalid response"
-            ) from None
+                if response.status_code == 429:
+                    raise ModelRetryableError()
+                if 400 <= response.status_code < 500:
+                    raise ModelConfigurationError()
+                if not response.is_success:
+                    raise ModelOutcomeUnknown()
+                return response.json()
+        except ModelError:
+            raise
+        except (httpx.ConnectError, httpx.ConnectTimeout, httpx.PoolTimeout):
+            raise ModelRetryableError() from None
+        except httpx.HTTPError:
+            raise ModelOutcomeUnknown() from None
+        except ValueError:
+            raise ModelProtocolError() from None

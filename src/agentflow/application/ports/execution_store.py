@@ -2,6 +2,7 @@
 
 from typing import Any, Protocol
 
+from agentflow.application.ports.handler_result import CommittedAgentResult
 from agentflow.domain.execution.task import Task
 
 
@@ -10,3 +11,6 @@ class ExecutionStore(Protocol):
     def heartbeat(self, task: Task, lease_seconds: float) -> bool: ...
     def complete(self, task: Task, output: Any) -> bool: ...
     def fail(self, task: Task, error: Exception) -> bool: ...
+    def validate_agent_result(
+        self, task: Task, result: CommittedAgentResult
+    ) -> None: ...
