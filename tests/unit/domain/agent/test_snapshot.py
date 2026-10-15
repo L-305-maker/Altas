@@ -600,3 +600,98 @@ def test_stopping_records_unknown_before_freezing_terminal_snapshot(batch, statu
                 actions=(outcomes[0], outcomes[1].reconcile(ActionStatus.SUCCEEDED)),
             )
         )
+
+
+@pytest.fixture
+def waiting_batch(batch):
+    inflight = batch.advance(
+        successor(
+            batch,
+            actions=(
+                batch.actions[0].transition(ActionStatus.INFLIGHT),
+                batch.actions[1],
+            ),
+            budget=batch.budget.consume(tool_calls=1),
+        )
+    )
+    return inflight.advance(
+        successor(
+            inflight,
+            status=AgentStatus.WAITING_RECONCILIATION,
+            actions=(
+                inflight.actions[0].transition(
+                    ActionStatus.UNKNOWN, error_code="LeaseExpired"
+                ),
+                inflight.actions[1],
+            ),
+        )
+    )
+
+
+def test_reconciliation_snapshot_cannot_contain_unknown_and_inflight(waiting_batch):
+    with pytest.raises(ValidationError, match="reconciliation"):
+        AgentSnapshot.model_validate(
+            {
+                **waiting_batch.model_dump(),
+                "actions": (
+                    waiting_batch.actions[0],
+                    waiting_batch.actions[1].transition(ActionStatus.INFLIGHT),
+                ),
+                "budget": waiting_batch.budget.consume(tool_calls=1),
+            }
+        )
+
+
+@pytest.mark.parametrize("resume", [False, True])
+def test_reconciliation_cannot_dispatch_proposed_actions(waiting_batch, resume):
+    first, proposed = waiting_batch.actions
+    with pytest.raises(ValueError, match="reconciliation"):
+        waiting_batch.advance(
+            successor(
+                waiting_batch,
+                status=(
+                    AgentStatus.ACTIONS_PENDING
+                    if resume
+                    else AgentStatus.WAITING_RECONCILIATION
+                ),
+                actions=(
+                    first.reconcile(ActionStatus.SUCCEEDED) if resume else first,
+                    proposed.transition(ActionStatus.INFLIGHT),
+                ),
+                budget=waiting_batch.budget.consume(tool_calls=1),
+            )
+        )
+    assert waiting_batch.actions[1].status == ActionStatus.PROPOSED
+    assert waiting_batch.budget.tool_calls == 1
+
+
+def test_proposed_action_can_dispatch_after_reconciliation_returns_to_pending(
+    waiting_batch,
+):
+    resolved = waiting_batch.advance(
+        successor(
+            waiting_batch,
+            status=AgentStatus.ACTIONS_PENDING,
+            actions=(
+                waiting_batch.actions[0].reconcile(ActionStatus.SUCCEEDED),
+                waiting_batch.actions[1],
+            ),
+        )
+    )
+    restored = AgentSnapshot.model_validate_json(resolved.model_dump_json())
+    dispatched = restored.advance(
+        successor(
+            restored,
+            actions=(
+                restored.actions[0],
+                restored.actions[1].transition(ActionStatus.INFLIGHT),
+            ),
+            budget=restored.budget.consume(tool_calls=1),
+        )
+    )
+    assert dispatched.status == AgentStatus.ACTIONS_PENDING
+    assert tuple(a.id for a in dispatched.actions) == tuple(
+        a.id for a in waiting_batch.actions
+    )
+    assert dispatched.actions[1].status == ActionStatus.INFLIGHT
+    assert dispatched.budget == waiting_batch.budget.consume(tool_calls=1)

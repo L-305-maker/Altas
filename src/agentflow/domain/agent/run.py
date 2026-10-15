@@ -69,8 +69,11 @@ class AgentSnapshot(BaseModel):
             self.status.is_terminal or self.status == AgentStatus.WAITING_RECONCILIATION
         ):
             raise ValueError("unknown actions require reconciliation")
-        if self.status == AgentStatus.WAITING_RECONCILIATION and not unknown:
-            raise ValueError("reconciliation requires an unknown action")
+        if self.status == AgentStatus.WAITING_RECONCILIATION:
+            if not unknown:
+                raise ValueError("reconciliation requires an unknown action")
+            if any(action.status == ActionStatus.INFLIGHT for action in self.actions):
+                raise ValueError("reconciliation cannot retain inflight actions")
         if self.status == AgentStatus.WAITING_APPROVAL:
             statuses = {action.status for action in self.actions}
             if (
@@ -85,6 +88,7 @@ class AgentSnapshot(BaseModel):
 
         创建/恢复时的结构校验不能证明历史合法性，写入前还须调用此方法。
         UNKNOWN 的结果变更是显式对账；此方法不判断外部证据是否充分。
+        等待对账时不能派发 Action，须先返回 ACTIONS_PENDING。
         """
         if self.status.is_terminal or candidate.status != self.status:
             transition_agent(self.status, candidate.status)
@@ -148,6 +152,8 @@ class AgentSnapshot(BaseModel):
                     raise ValueError(
                         "action identity and invocation metadata are immutable"
                     )
+        if self.status == AgentStatus.WAITING_RECONCILIATION and dispatched:
+            raise ValueError("cannot dispatch actions while waiting for reconciliation")
         if charges["tool_calls"] != dispatched:
             raise ValueError("tool calls must equal new action dispatches")
         return candidate
