@@ -14,6 +14,8 @@ class AgentSnapshot(BaseModel):
 
     advance 要求候选 revision 恰好加一；Store 用旧 revision 执行 CAS，
     在同一事务检查有效租约及 fencing token。快照本身不授予执行所有权。
+    终态不得残留 INFLIGHT；无法确认的结果先记为 UNKNOWN。终态中的 UNKNOWN
+    保留停止时事实，后续对账证据由 Store 另行审计保存，不修改终态快照。
     """
 
     model_config = ConfigDict(extra="forbid", frozen=True)
@@ -41,6 +43,10 @@ class AgentSnapshot(BaseModel):
         )
         if executed > self.budget.tool_calls:
             raise ValueError("executed actions require charged tool calls")
+        if self.status.is_terminal and any(
+            action.status == ActionStatus.INFLIGHT for action in self.actions
+        ):
+            raise ValueError("terminal agents cannot retain inflight actions")
         if self.status in {AgentStatus.MODEL_INFLIGHT, AgentStatus.SUCCEEDED}:
             if self.model_call_id is None or self.actions:
                 raise ValueError("model execution requires a call id and no actions")
@@ -75,7 +81,7 @@ class AgentSnapshot(BaseModel):
         return self
 
     def advance(self, candidate: Self) -> Self:
-        """校验完整候选快照；同状态写入用于 Action 进展及预算预留。
+        """校验完整候选快照；同状态写入用于 Action 进展及资源结算。
 
         创建/恢复时的结构校验不能证明历史合法性，写入前还须调用此方法。
         UNKNOWN 的结果变更是显式对账；此方法不判断外部证据是否充分。
@@ -100,44 +106,48 @@ class AgentSnapshot(BaseModel):
             self.status == AgentStatus.READY_MODEL
             and candidate.status == AgentStatus.MODEL_INFLIGHT
         )
-        if self.model_call_id != candidate.model_call_id:
+        if charges["model_attempts"] != int(starts_model):
+            raise ValueError("model attempts must equal model request reservations")
+        new_model_call = self.model_call_id != candidate.model_call_id
+        if new_model_call:
             if not starts_model or charges["model_rounds"] != 1:
                 raise ValueError("a new model call requires a new model round")
-            if charges["model_attempts"] < 1:
-                raise ValueError("a new model call requires an attempt")
-            return candidate
-        if charges["model_rounds"]:
+        elif charges["model_rounds"]:
             raise ValueError("a new model round requires a new call id")
-        if starts_model and charges["model_attempts"] < 1:
-            raise ValueError("a model retry requires a charged attempt")
+        dispatched = 0
         if (
             self.status == AgentStatus.MODEL_INFLIGHT
             and candidate.status == AgentStatus.ACTIONS_PENDING
         ):
             if any(a.status != ActionStatus.PROPOSED for a in candidate.actions):
                 raise ValueError("model responses may only propose actions")
-            return candidate
-        previous = {action.id: action for action in self.actions}
-        if previous.keys() != {action.id for action in candidate.actions}:
-            raise ValueError("actions cannot be added or removed within a model batch")
-        dispatched = 0
-        for action in candidate.actions:
-            old = previous[action.id]
-            if old == action:
-                continue
-            if (
-                old.status == ActionStatus.PROPOSED
-                and action.status == ActionStatus.INFLIGHT
+        elif not new_model_call:
+            if tuple(a.id for a in self.actions) != tuple(
+                a.id for a in candidate.actions
             ):
-                dispatched += 1
-            if old.status == ActionStatus.UNKNOWN:
-                expected = old.reconcile(action.status, error_code=action.error_code)
-            else:
-                expected = old.transition(action.status, error_code=action.error_code)
-            if action != expected:
                 raise ValueError(
-                    "action identity and invocation metadata are immutable"
+                    "action ids and order cannot change within a model batch"
                 )
-        if charges["tool_calls"] < dispatched:
-            raise ValueError("each new action dispatch requires a charged tool call")
+            for old, action in zip(self.actions, candidate.actions, strict=True):
+                if old == action:
+                    continue
+                if (
+                    old.status == ActionStatus.PROPOSED
+                    and action.status == ActionStatus.INFLIGHT
+                ):
+                    dispatched += 1
+                if old.status == ActionStatus.UNKNOWN:
+                    expected = old.reconcile(
+                        action.status, error_code=action.error_code
+                    )
+                else:
+                    expected = old.transition(
+                        action.status, error_code=action.error_code
+                    )
+                if action != expected:
+                    raise ValueError(
+                        "action identity and invocation metadata are immutable"
+                    )
+        if charges["tool_calls"] != dispatched:
+            raise ValueError("tool calls must equal new action dispatches")
         return candidate

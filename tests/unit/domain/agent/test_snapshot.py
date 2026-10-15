@@ -404,3 +404,199 @@ def test_previous_tool_usage_cannot_pay_for_new_dispatches(pending):
         budget=previous_rounds.budget.consume(tool_calls=1),
     )
     assert previous_rounds.advance(charged).budget.tool_calls == 2
+
+
+@pytest.fixture
+def batch(pending):
+    second = Action.model_validate(
+        {**pending.actions[0].model_dump(), "id": "action-2"}
+    )
+    return successor(pending, actions=(*pending.actions, second))
+
+
+@pytest.mark.parametrize("dispatch", [False, True])
+def test_batch_reordering_is_rejected_even_with_valid_action_progress(batch, dispatch):
+    actions = list(reversed(batch.actions))
+    if dispatch:
+        actions[0] = actions[0].transition(ActionStatus.INFLIGHT)
+    candidate = successor(
+        batch,
+        actions=tuple(actions),
+        budget=batch.budget.consume(tool_calls=int(dispatch)),
+    )
+    with pytest.raises(ValueError, match="order"):
+        batch.advance(candidate)
+
+
+@pytest.mark.parametrize(
+    "status",
+    [AgentStatus.READY_MODEL, AgentStatus.MODEL_INFLIGHT, AgentStatus.ACTIONS_PENDING],
+)
+@pytest.mark.parametrize("resource", ["model_attempts", "tool_calls"])
+def test_call_counts_cannot_increase_without_a_reservation(pending, status, resource):
+    source = successor(
+        pending,
+        status=status,
+        actions=pending.actions if status == AgentStatus.ACTIONS_PENDING else (),
+    )
+    with pytest.raises(ValueError):
+        source.advance(successor(source, budget=source.budget.consume(**{resource: 1})))
+
+
+@pytest.mark.parametrize("retry", [False, True])
+def test_model_reservation_cannot_charge_two_attempts(snapshot, retry):
+    ready = snapshot
+    if retry:
+        model = snapshot.advance(
+            successor(
+                snapshot,
+                status=AgentStatus.MODEL_INFLIGHT,
+                model_call_id="model-1",
+                budget=snapshot.budget.consume(model_rounds=1, model_attempts=1),
+            )
+        )
+        ready = model.advance(successor(model, status=AgentStatus.READY_MODEL))
+    candidate = successor(
+        ready,
+        status=AgentStatus.MODEL_INFLIGHT,
+        model_call_id="model-1",
+        budget=ready.budget.consume(model_rounds=0 if retry else 1, model_attempts=2),
+    )
+    with pytest.raises(ValueError):
+        ready.advance(candidate)
+
+
+def test_model_reservation_cannot_charge_tool_calls(snapshot):
+    candidate = successor(
+        snapshot,
+        status=AgentStatus.MODEL_INFLIGHT,
+        model_call_id="model-1",
+        budget=snapshot.budget.consume(model_rounds=1, model_attempts=1, tool_calls=1),
+    )
+    with pytest.raises(ValueError):
+        snapshot.advance(candidate)
+
+
+def test_model_proposals_cannot_charge_tool_calls(pending):
+    model = successor(pending, status=AgentStatus.MODEL_INFLIGHT, actions=())
+    candidate = successor(
+        model,
+        status=AgentStatus.ACTIONS_PENDING,
+        actions=pending.actions,
+        budget=model.budget.consume(tool_calls=1),
+    )
+    with pytest.raises(ValueError):
+        model.advance(candidate)
+
+
+@pytest.mark.parametrize("dispatch_count", [1, 2])
+@pytest.mark.parametrize("charge", [0, 1, 2, 3])
+def test_tool_charge_must_equal_dispatch_count(batch, dispatch_count, charge):
+    actions = tuple(
+        action.transition(ActionStatus.INFLIGHT) if i < dispatch_count else action
+        for i, action in enumerate(batch.actions)
+    )
+    if charge == dispatch_count:
+        result = batch.advance(
+            successor(
+                batch, actions=actions, budget=batch.budget.consume(tool_calls=charge)
+            )
+        )
+        assert result.budget.tool_calls == dispatch_count
+    else:
+        with pytest.raises(ValueError):
+            batch.advance(
+                successor(
+                    batch,
+                    actions=actions,
+                    budget=batch.budget.consume(tool_calls=charge),
+                )
+            )
+
+
+def test_same_order_progress_and_resource_settlement_survive_recovery(batch):
+    inflight = batch.advance(
+        successor(
+            batch,
+            actions=tuple(a.transition(ActionStatus.INFLIGHT) for a in batch.actions),
+            budget=batch.budget.consume(tool_calls=2),
+        )
+    )
+    restored = AgentSnapshot.model_validate_json(inflight.model_dump_json())
+    with pytest.raises(ValueError):
+        restored.advance(
+            successor(restored, budget=restored.budget.consume(tool_calls=1))
+        )
+    settled = restored.advance(
+        successor(restored, budget=restored.budget.consume(resource_units=10))
+    )
+    completed = settled.advance(
+        successor(
+            settled,
+            actions=tuple(
+                a.transition(ActionStatus.SUCCEEDED) for a in settled.actions
+            ),
+            budget=settled.budget.consume(resource_units=5),
+        )
+    )
+    assert tuple(a.id for a in completed.actions) == tuple(a.id for a in batch.actions)
+    ready = completed.advance(successor(completed, status=AgentStatus.READY_MODEL))
+    model = ready.advance(
+        successor(
+            ready,
+            status=AgentStatus.MODEL_INFLIGHT,
+            model_call_id="model-2",
+            actions=(),
+            budget=ready.budget.consume(model_rounds=1, model_attempts=1),
+        )
+    )
+    assert model.actions == ()
+    assert (model.budget.model_rounds, model.budget.model_attempts) == (2, 2)
+    assert (model.budget.tool_calls, model.budget.resource_units) == (2, 15)
+
+
+@pytest.mark.parametrize(
+    "status", [AgentStatus.FAILED, AgentStatus.EXHAUSTED, AgentStatus.CANCELLED]
+)
+def test_terminal_snapshot_rejects_unresolved_inflight_actions(pending, status):
+    inflight = pending.advance(
+        successor(
+            pending,
+            actions=(pending.actions[0].transition(ActionStatus.INFLIGHT),),
+            budget=pending.budget.consume(tool_calls=1),
+        )
+    )
+    with pytest.raises(ValidationError, match="inflight"):
+        successor(inflight, status=status)
+
+
+@pytest.mark.parametrize(
+    "status", [AgentStatus.FAILED, AgentStatus.EXHAUSTED, AgentStatus.CANCELLED]
+)
+def test_stopping_records_unknown_before_freezing_terminal_snapshot(batch, status):
+    inflight = batch.advance(
+        successor(
+            batch,
+            actions=tuple(a.transition(ActionStatus.INFLIGHT) for a in batch.actions),
+            budget=batch.budget.consume(tool_calls=2),
+        )
+    )
+    outcomes = (
+        inflight.actions[0].transition(ActionStatus.SUCCEEDED),
+        inflight.actions[1].transition(
+            ActionStatus.UNKNOWN, error_code="ExecutionStopped"
+        ),
+    )
+    final = inflight.advance(successor(inflight, status=status, actions=outcomes))
+    restored = AgentSnapshot.model_validate_json(final.model_dump_json())
+    assert restored.actions == outcomes
+    assert restored.budget == inflight.budget
+    with pytest.raises(InvalidStateTransitionError):
+        restored.advance(successor(restored))
+    with pytest.raises(InvalidStateTransitionError):
+        restored.advance(
+            successor(
+                restored,
+                actions=(outcomes[0], outcomes[1].reconcile(ActionStatus.SUCCEEDED)),
+            )
+        )
