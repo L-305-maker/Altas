@@ -8,6 +8,7 @@ from typing import Any
 
 from sqlalchemy import (
     JSON,
+    Boolean,
     CheckConstraint,
     Float,
     ForeignKey,
@@ -16,6 +17,7 @@ from sqlalchemy import (
     Integer,
     String,
     UniqueConstraint,
+    text,
 )
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
@@ -182,3 +184,74 @@ class AgentActionRow(Base):
     error_code: Mapped[str | None] = mapped_column(String(80))
     created_at: Mapped[float] = mapped_column(Float)
     updated_at: Mapped[float] = mapped_column(Float)
+    tool_binding: Mapped[dict[str, Any] | None] = mapped_column(JSON)
+
+
+class AgentActionApprovalRow(Base):
+    __tablename__ = "agent_action_approvals"
+    __table_args__ = (
+        ForeignKeyConstraint(
+            ["session_id", "action_id"],
+            ["agent_actions.session_id", "agent_actions.id"],
+        ),
+        UniqueConstraint("session_id", "action_id"),
+        Index(
+            "uq_agent_pending_approval",
+            "session_id",
+            unique=True,
+            sqlite_where=text("decision = 'pending'"),
+            postgresql_where=text("decision = 'pending'"),
+        ),
+        CheckConstraint(
+            "decision IN ('pending','approved','rejected','cancelled')",
+            name="ck_action_approval_decision",
+        ),
+    )
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    session_id: Mapped[str] = mapped_column(ForeignKey("agent_sessions.id"))
+    action_id: Mapped[str] = mapped_column(String(128))
+    tool_name: Mapped[str] = mapped_column(String(80))
+    tool_version: Mapped[str] = mapped_column(String(128))
+    tool_policy_digest: Mapped[str] = mapped_column(String(64))
+    arguments_digest: Mapped[str] = mapped_column(String(64))
+    decision: Mapped[str] = mapped_column(String(16))
+    actor: Mapped[str | None] = mapped_column(String(80))
+    reason: Mapped[str | None] = mapped_column(String(1000))
+    created_at: Mapped[float] = mapped_column(Float)
+    decided_at: Mapped[float | None] = mapped_column(Float)
+    consumed_at: Mapped[float | None] = mapped_column(Float)
+
+
+class AgentActionReconciliationRow(Base):
+    __tablename__ = "agent_action_reconciliations"
+    __table_args__ = (
+        ForeignKeyConstraint(
+            ["session_id", "action_id"],
+            ["agent_actions.session_id", "agent_actions.id"],
+        ),
+        Index(
+            "uq_agent_applied_reconciliation",
+            "session_id",
+            "action_id",
+            unique=True,
+            sqlite_where=text("applied"),
+            postgresql_where=text("applied"),
+        ),
+        CheckConstraint(
+            "confirmed_status IN ('succeeded','failed')",
+            name="ck_action_reconciliation_outcome",
+        ),
+    )
+    id: Mapped[str] = mapped_column(String(128), primary_key=True)
+    session_id: Mapped[str] = mapped_column(ForeignKey("agent_sessions.id"))
+    action_id: Mapped[str] = mapped_column(String(128))
+    request_revision: Mapped[int] = mapped_column(Integer)
+    previous_status: Mapped[str] = mapped_column(String(16))
+    confirmed_status: Mapped[str] = mapped_column(String(16))
+    result: Mapped[Any | None] = mapped_column(JSON)
+    error_code: Mapped[str | None] = mapped_column(String(80))
+    evidence_reference: Mapped[str] = mapped_column(String(1000))
+    actor: Mapped[str] = mapped_column(String(80))
+    reason: Mapped[str] = mapped_column(String(1000))
+    applied: Mapped[bool] = mapped_column(Boolean)
+    created_at: Mapped[float] = mapped_column(Float)
