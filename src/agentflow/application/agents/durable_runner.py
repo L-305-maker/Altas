@@ -3,15 +3,17 @@
 import asyncio
 import hashlib
 import json
+import math
 from collections.abc import Awaitable
-from typing import Literal
+from typing import Literal, Self
 from uuid import uuid4
 
 from jsonschema import ValidationError as SchemaError
-from pydantic import BaseModel, ConfigDict, ValidationError
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
 
 from agentflow.application.agents.context import (
     AgentContextBuilder,
+    context_bytes,
     mapped_calls,
     parse_tool_arguments,
 )
@@ -71,6 +73,42 @@ class DurableAgentConfig(BaseModel):
     max_tool_calls: Counter = 32
     # 本版只强制调用次数预算；资源计价需要独立策略，拒绝伪装成已强制执行。
     max_resource_units: Literal[0] = 0
+    max_context_bytes: int = Field(default=1_000_000, ge=1, strict=True)
+    retry_base_seconds: float = Field(
+        default=1, gt=0, le=3600, allow_inf_nan=False, strict=True
+    )
+    retry_max_seconds: float = Field(
+        default=60, gt=0, le=3600, allow_inf_nan=False, strict=True
+    )
+
+    @model_validator(mode="after")
+    def ordered_retry_limits(self) -> Self:
+        if self.retry_base_seconds > self.retry_max_seconds:
+            raise ValueError("retry base must not exceed retry maximum")
+        return self
+
+    def retry_delay(self, attempt: int, hint: float | None = None) -> float:
+        # Compare exponents before scaling, including extremely small finite bases.
+        exponent = attempt - 1
+        delay = (
+            self.retry_max_seconds
+            if exponent
+            >= math.log2(self.retry_max_seconds) - math.log2(self.retry_base_seconds)
+            else math.ldexp(self.retry_base_seconds, exponent)
+        )
+        return min(self.retry_max_seconds, max(delay, hint or 0))
+
+    def initial_budget(self) -> AgentBudget:
+        return AgentBudget(
+            **self.model_dump(
+                include={
+                    "max_model_rounds",
+                    "max_model_attempts",
+                    "max_tool_calls",
+                    "max_resource_units",
+                }
+            )
+        )
 
 
 def successor(snapshot: AgentSnapshot, **changes) -> AgentSnapshot:
@@ -113,7 +151,7 @@ class DurableAgentRunner:
         config = DurableAgentConfig.model_validate(parameters)
         initial = AgentSnapshot(
             id=hashlib.sha256(task.idempotency_key.encode()).hexdigest(),
-            budget=AgentBudget(**config.model_dump()),
+            budget=config.initial_budget(),
         )
         messages = (
             AgentMessage(
@@ -148,7 +186,7 @@ class DurableAgentRunner:
                 )
             if status == AgentStatus.READY_MODEL:
                 try:
-                    state, outcome = await self._model(task, state, allowed)
+                    state, outcome = await self._model(task, state, allowed, config)
                 except AgentBudgetExhaustedError:
                     return await self._fail(
                         task, state, "AgentExhausted", exhausted=True
@@ -162,12 +200,12 @@ class DurableAgentRunner:
             else:
                 raise StateConflict("task cannot execute this agent state")
 
-    def _result(self, task, state):
+    def _result(self, task, state, *, status=None):
         return CommittedAgentResult(
             task.run_id,
             task.step_id,
             task.token,
-            state.snapshot.status.value,
+            status or state.snapshot.status.value,
             state.snapshot.revision,
         )
 
@@ -187,15 +225,19 @@ class DurableAgentRunner:
         saved = await asyncio.to_thread(self.store.fail_agent_step, task, transition)
         return self._result(task, saved)
 
-    async def _model(self, task, state, allowed):
+    async def _model(self, task, state, allowed, config):
         old = state.snapshot
         retry = bool(state.model_calls and state.model_calls[-1].status == "failed")
-        budget = old.budget.consume(model_rounds=int(not retry), model_attempts=1)
         context = self.context.build(state)
         try:
             schemas = self.tools.schemas(allowed)
         except ToolDeniedError:
             return state, await self._fail(task, state, "ToolConfigurationError")
+        if context_bytes(context, schemas) > config.max_context_bytes:
+            return state, await self._fail(
+                task, state, "AgentContextLimit", exhausted=True
+            )
+        budget = old.budget.consume(model_rounds=int(not retry), model_attempts=1)
         reservation = AgentTransition(
             snapshot=successor(
                 old,
@@ -218,9 +260,16 @@ class DurableAgentRunner:
                 raise ModelProtocolError()
             response = ModelResponse.model_validate(response.model_dump(mode="json"))
             finite_json(response.model_dump(mode="json"))
-        except ModelRetryableError:
+        except ModelRetryableError as error:
+            if (
+                state.snapshot.budget.model_attempts
+                >= state.snapshot.budget.max_model_attempts
+            ):
+                return state, await self._fail(
+                    task, state, "AgentExhausted", exhausted=True, model_status="failed"
+                )
             saved = await asyncio.to_thread(
-                self.store.commit_transition,
+                self.store.defer_model_retry,
                 task,
                 AgentTransition(
                     snapshot=successor(state.snapshot, status=AgentStatus.READY_MODEL),
@@ -229,8 +278,11 @@ class DurableAgentRunner:
                     ),
                     error_code="ModelRetryable",
                 ),
+                config.retry_delay(
+                    state.model_calls[-1].attempts, error.retry_after_seconds
+                ),
             )
-            return saved, None
+            return saved, self._result(task, saved, status="retry_scheduled")
         except (
             ModelProtocolError,
             ModelConfigurationError,

@@ -1,6 +1,7 @@
 """模型协议返回完整 assistant 消息，保留多轮工具调用所需的 provider 字段。"""
 
 import json
+import math
 from typing import Any, Literal, Protocol, Self
 
 from pydantic import (
@@ -24,6 +25,16 @@ class ModelRetryableError(ModelError):
     """供应商确认未完成的请求，允许有界重试。"""
 
     code = "ModelRetryable"
+
+    def __init__(self, *, retry_after_seconds: float | None = None):
+        super().__init__()
+        self.retry_after_seconds = (
+            retry_after_seconds
+            if type(retry_after_seconds) in {int, float}
+            and math.isfinite(retry_after_seconds)
+            and retry_after_seconds >= 0
+            else None
+        )
 
 
 class ModelOutcomeUnknown(ModelError):

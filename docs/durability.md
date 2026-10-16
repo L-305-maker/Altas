@@ -149,7 +149,7 @@ AgentContextBuilder 在每次模型调用前重建上下文。assistant 的工�
 
 | 情况 | 持久化结果 | 后续行为 |
 | --- | --- | --- |
-| 已确认可恢复模型失败（429、连接建立失败） | ModelCall failed，READY_MODEL，安全错误码 | 同一逻辑 ID 有界重试，增加 attempts |
+| 已确认可恢复模型失败（429、连接建立失败） | ModelCall failed，READY_MODEL，Step ready / 未来 available_at，释放租约 | 同一逻辑 ID 有界延期重试，增加模型 attempts |
 | 模型读取超时、5xx、未知异常或恢复中的模型预约 | ModelCall unknown，Agent/Step FAILED | 不重发；请求可能已被供应商计费 |
 | 模型配置、无效响应协议、空/截断回答 | ModelCall failed，Agent/Step FAILED | 不重试，不保存异常正文 |
 | 参数格式/Schema 错误 | Action DENIED，tool_calls 不增加 | 安全错误反馈模型，在总预算内创建新 Action |
@@ -158,6 +158,7 @@ AgentContextBuilder 在每次模型调用前重建上下文。assistant 的工�
 | ToolConfirmedFailure（适配器确认的失败） | Action FAILED、观察原子保存 | 反馈模型；已失败 Action 不重新派发 |
 | 工具超时、未知异常、非法/超大结果、执行中取消 | Action UNKNOWN，Agent/Step 等待对账 | 不再请求模型或派发此行动 |
 | 调用次数预算耗尽 | Agent EXHAUSTED、Step FAILED | 不重开 Agent，不走整步异常重试 |
+| 规范上下文超过 max_context_bytes | Agent EXHAUSTED、Step FAILED，AgentContextLimit | 预约前停止，模型尝试数不增加，不删减历史 |
 | LostLease / StateConflict / AgentStoreUnavailable | 不尝试覆盖、不走普通 Store.fail | 停止；由租约恢复重读持久事实 |
 
 Tool 默认副作用为 UNSAFE。Durable 模式中的 UNSAFE 或 requires_approval 工具必须先获得
@@ -178,6 +179,61 @@ exactly-once。崩溃在预约后、派发前也可能保守进入 UNKNOWN。终
 
 临时 PostgreSQL 验证脚本同时执行新 Runner/Worker 集成、接管 fencing 和真实子进程退出测试。
 真实模型 API、Docker sandbox 和 Compose 仍需各自的环境验证，不能用 SQLite 或 MockTransport 代替。
+
+### 持久模型治理（PR5）
+
+配置仍来自提交时持久化、不可变的 StepSpec；恢复使用相同配置。三个限制分别生效：
+
+| 配置 | 默认值与范围 | 含义 |
+| --- | --- | --- |
+| max_model_rounds / max_model_attempts / max_tool_calls | 8 / 12 / 32，非负整数 | Session 跨 Worker 的累积调用预算 |
+| max_context_bytes | 1,000,000，正整数 | 每次请求的完整消息及工具 Schema 的 JSON UTF-8 字节上限 |
+| retry_base_seconds / retry_max_seconds | 1 / 60，有限正数，base ≤ max ≤ 3600 | 同一逻辑调用第 n 次确认失败后的 min(max, base × 2^(n−1)) 秒等待 |
+
+Runner 只将累积预算字段传给 AgentBudget。退避和上下文限制不是可消费预算，也不会在恢复时重置计数。
+DeepSeek 429 的非负、有限数值 Retry-After 可延长等待，但始终受 retry_max_seconds 限制；
+无效数值及 HTTP 日期形式忽略，使用本地策略。适配器没有隐藏重试，ModelRetryableError() 的旧构造仍可用。
+
+```mermaid
+stateDiagram-v2
+    READY_MODEL --> MODEL_INFLIGHT: 完整上下文检查 / 原子预约并增加 model_attempts
+    MODEL_INFLIGHT --> READY_MODEL: 确认失败且尚有尝试预算 / defer_model_retry
+    READY_MODEL --> MODEL_INFLIGHT: available_at 到期 / 新 token claim / 同一 model_call_id
+    MODEL_INFLIGHT --> EXHAUSTED: 确认失败且尝试预算已耗尽
+    MODEL_INFLIGHT --> FAILED: UNKNOWN / 不自动重试
+    READY_MODEL --> EXHAUSTED: AgentContextLimit / 不预约
+```
+
+`AgentStore.defer_model_retry(task, transition, retry_delay_seconds) -> AgentSession` 仅接受当前
+MODEL_INFLIGHT、原模型记录仍为 inflight 的确认失败，目标 READY_MODEL，且尚有模型尝试预算。
+它复用 Run→Step→Session→审批→ModelCall→Action 锁顺序，验证有效 token、数据库时钟租约、
+revision CAS 和 old.advance(candidate)。模型 failed、Snapshot、Step ready、数据库当前时间加 delay、
+continuation_pending=true、清除 token/lease 与元数据事件在一个事务提交；提交失败整笔回滚。
+事件不包含 Prompt、异常/供应商响应正文或凭据。UNKNOWN 不可通过该入口改写为可重试失败。
+
+Runner 返回 CommittedAgentResult(status="retry_scheduled") 后结束本次执行，不持有 Worker 等待退避，
+不在事务内 sleep。Worker 读取数据库确认 READY_MODEL、revision、ready Step、释放的租约、确认失败的模型记录
+和 continuation_pending，随后不调用普通 complete/fail。若新 Worker 已领取或 Workflow 已取消，验证冲突即停止。
+claim 使用已保存 available_at，重启不重新计算等待；一次性 continuation 标记使正常内部模型尝试不增加
+Step attempts。model_attempts 每次真实预约增加，model_rounds 与 model_call_id 在重试中保持不变。
+真正的进程租约失败仍受 Step max_attempts 约束；普通 Handler 的 retry_delay 和失败重试规则不变。
+
+每次 Provider 调用之前，ContextBuilder 先完成已有的 UNKNOWN 阻断、工具结果去重与角色规范化。
+对 `{"messages": [...], "tools": [...]}`（没有工具时省略 tools）使用
+ensure_ascii=False、allow_nan=False、separators=(",", ":") 序列化，再精确计算 UTF-8 字节数。
+完整工具 Schema、工具调用 ID、工具结果字符串内的 JSON 转义都计入；等于上限允许，超过一字节即拒绝。
+这定义的是供应商无关的上下文载荷，不包括 model、max_tokens、HTTP headers 等供应商配置，也不是 token 估算。
+不同模型的实际 token 窗口和费用仍需部署者配置；8 MB 存储配额和单项消息限制另行生效。
+
+超限在模型预约前通过 fail_agent_step 原子提交 EXHAUSTED / Step failed，错误码 AgentContextLimit。
+model_attempts 不增加，历史 Action、消息、工具结果和审计均保留，不截断、不隐式删除或提升消息角色。
+后续若引入上下文压缩，须在 ContextBuilder 之后提供独立、可验证的变换，并再次执行同一硬限制；
+本阶段没有摘要模型请求或长期 Memory。
+
+崩溃在延期事务前：保留 MODEL_INFLIGHT，租约恢复按 UNKNOWN fail-closed，不伪称已安排重试。
+崩溃在延期提交后：新进程保留原时间与调用 ID，到期后正常领取。数据库提交响应丢失时以持久事实为准，
+不声称成功；同步数据库线程仍需部署端连接/语句超时。外部模型请求与数据库不能原子化，
+未知结果可能已计费；延期策略不能保证 exactly-once，也不重发 UNKNOWN。
 
 ### 取消信号与有界清理
 

@@ -147,3 +147,9 @@ class AgentStore(Protocol):
     def suspend_agent_step(
         self, task: Task, transition: AgentTransition
     ) -> AgentSession: ...
+
+    def defer_model_retry(
+        self, task: Task, transition: AgentTransition, retry_delay_seconds: float
+    ) -> AgentSession:
+        """确认模型失败并原子释放租约；延迟 (0, 3600] 秒按数据库时钟结算。"""
+        ...

@@ -1,6 +1,7 @@
 """复用 Workflow Store 的连接、锁和时钟；数据库不保证外部副作用 exactly-once。"""
 
 import json
+import math
 import re
 from contextlib import contextmanager
 from uuid import uuid4
@@ -813,7 +814,7 @@ class SQLAgentStore:
         ):
             raise StateConflict("assistant response does not match the action batch")
 
-    def _commit(self, task, transition, mode, output=None):
+    def _commit(self, task, transition, mode, output=None, retry_delay_seconds=None):
         status = transition.snapshot.status
         if status == AgentStatus.WAITING_APPROVAL:
             raise StateConflict("approval waiting requires a durable approval request")
@@ -829,6 +830,7 @@ class SQLAgentStore:
                 AgentStatus.WAITING_APPROVAL,
                 AgentStatus.WAITING_RECONCILIATION,
             },
+            "defer": {AgentStatus.READY_MODEL},
         }
         with self._owned_transaction(task) as (db, run, step):
             if status not in allowed[mode]:
@@ -839,6 +841,26 @@ class SQLAgentStore:
             row = self._session(db, step)
             if row is None:
                 raise StateConflict("agent session is not initialized")
+            if mode == "defer":
+                old_state = self._read(db, row)
+                old = old_state.snapshot
+                if (
+                    old.status != AgentStatus.MODEL_INFLIGHT
+                    or not old_state.model_calls
+                    or old_state.model_calls[-1].status != "inflight"
+                    or transition.model_result is None
+                    or transition.model_result.status != "failed"
+                    or transition.error_code != "ModelRetryable"
+                    or transition.messages
+                    or transition.arguments
+                    or transition.observations
+                    or transition.authorizations
+                    or transition.snapshot.budget.model_attempts
+                    >= transition.snapshot.budget.max_model_attempts
+                ):
+                    raise StateConflict(
+                        "deferred retry requires confirmed model failure and remaining attempts"
+                    )
             result = self._apply(db, run, step, row, transition)
             if mode == "complete":
                 spec = next(
@@ -847,6 +869,23 @@ class SQLAgentStore:
                     if s.id == step.key
                 )
                 self.store._complete_step(db, run, step, output, encoded, spec.artifact)
+            elif mode == "defer":
+                row.continuation_pending = True
+                step.status, step.error = "ready", "ModelRetryable"
+                step.available_at = self.store._now(db) + retry_delay_seconds
+                step.token, step.lease_until = None, None
+                self.store._event(
+                    db,
+                    run.id,
+                    "agent.retry_scheduled",
+                    {
+                        "step": step.key,
+                        "model_call_id": result.snapshot.model_call_id,
+                        "revision": result.snapshot.revision,
+                        "available_at": step.available_at,
+                        "error_code": "ModelRetryable",
+                    },
+                )
             elif mode in {"fail", "suspend"}:
                 step.status = "failed" if mode == "fail" else "waiting"
                 step.error = transition.error_code or (
@@ -882,6 +921,21 @@ class SQLAgentStore:
         self, task: Task, transition: AgentTransition
     ) -> AgentSession:
         return self._commit(task, transition, "suspend")
+
+    def defer_model_retry(
+        self, task: Task, transition: AgentTransition, retry_delay_seconds: float
+    ) -> AgentSession:
+        if (
+            type(retry_delay_seconds) not in {int, float}
+            or not math.isfinite(retry_delay_seconds)
+            or not 0 < retry_delay_seconds <= 3600
+        ):
+            raise AgentDataError(
+                "retry delay must be finite and within (0, 3600] seconds"
+            )
+        return self._commit(
+            task, transition, "defer", retry_delay_seconds=retry_delay_seconds
+        )
 
     def _interrupt(self, db, run, step, row, status, error):
         state = self._read(db, row)
