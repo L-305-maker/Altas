@@ -106,3 +106,4 @@ class ActionExecutionContext(BaseModel):
     action: Action
     binding: ToolBinding | None
     approval: ActionApproval | None = None
+    idempotency_key: str = Field(min_length=1, max_length=256)
