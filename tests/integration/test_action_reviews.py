@@ -8,6 +8,7 @@ from sqlalchemy import select, update
 from agentflow.application.ports.agent_store import (
     ActionArguments,
     ActionObservation,
+    AgentDataError,
     AgentMessage,
     AgentTransition,
     LostLease,
@@ -57,13 +58,20 @@ def candidate(state, **changes):
     )
 
 
-def batch(agents, *, protected=True, count=1):
+def batch(agents, *, protected=True, count=1, max_attempts=3):
     store = agents.store
     run = store.submit(
         store.register(
             WorkflowSpec(
                 name="review",
-                steps=(StepSpec(id="work", handler="agent", retry_delay=0),),
+                steps=(
+                    StepSpec(
+                        id="work",
+                        handler="agent",
+                        retry_delay=0,
+                        max_attempts=max_attempts,
+                    ),
+                ),
             )
         ),
         {},
@@ -144,7 +152,7 @@ def decision(state, value="approved", **changes):
     )
 
 
-def wait_unknown(agents, count=1):
+def wait_unknown(agents, count=1, fill=False):
     run, task, state = batch(agents, protected=False, count=count)
     state = agents.commit_transition(
         task,
@@ -156,6 +164,8 @@ def wait_unknown(agents, count=1):
             )
         ),
     )
+    if fill:
+        state = fill_to_admission_limit(agents, task, state)
     state = agents.suspend_agent_step(
         task,
         AgentTransition(
@@ -176,6 +186,125 @@ def wait_unknown(agents, count=1):
         ),
     )
     return run, task, state
+
+
+def fill_to_admission_limit(agents, task, state):
+    # Scale the total quota in callers, keeping real 100 KB item/result limits.
+    # Fill through public writes, including the same reserved control capacity as
+    # production. The final rejected append must roll back completely.
+    for size, count in ((98_000, 10), (98_000, 1), (9_800, 1), (980, 1), (98, 1)):
+        while True:
+            try:
+                state = agents.commit_transition(
+                    task,
+                    AgentTransition(
+                        snapshot=candidate(state.snapshot),
+                        messages=tuple(
+                            AgentMessage(
+                                sequence=len(state.messages) + i,
+                                role="user",
+                                payload={"padding": "x" * size},
+                            )
+                            for i in range(count)
+                        ),
+                    ),
+                )
+            except AgentDataError:
+                assert agents.load(task) == state
+                break
+    return state
+
+
+@pytest.mark.parametrize(
+    "value,limit",
+    [("approved", 450_000), ("rejected", 450_000), ("approved", 8_000_000)],
+)
+def test_near_full_approval_reserves_decision_and_observation(
+    agents, monkeypatch, value, limit
+):
+    import agentflow.infrastructure.persistence.agent_store as module
+
+    monkeypatch.setattr(module, "MAX_SESSION_BYTES", limit)
+    run, task, state = batch(agents)
+    state = fill_to_admission_limit(agents, task, state)
+    waiting = agents.request_action_approval(task, "action-0", state.snapshot.revision)
+    result = agents.decide_action(
+        waiting.approvals[0].approval_id,
+        ApprovalDecision(
+            expected_revision=waiting.snapshot.revision,
+            decision=value,
+            actor="\x01" * 79 + "a",
+            reason="\x01" * 1000,
+        ),
+    )
+    assert result.reason == "\x01" * 1000
+    task = agents.store.claim(300)
+    restored = agents.load(task)
+    assert restored.snapshot.status == "actions_pending"
+    assert restored.snapshot.budget == state.snapshot.budget
+    assert restored.actions[0].action.status == (
+        "denied" if value == "rejected" else "proposed"
+    )
+    assert len(restored.messages) == len(state.messages) + (value == "rejected")
+
+
+@pytest.mark.parametrize("count,limit", [(1, 8_000_000), (2, 900_000)])
+def test_near_full_unknown_reserves_complete_result_and_audit(
+    agents, monkeypatch, count, limit
+):
+    import agentflow.infrastructure.persistence.agent_store as module
+
+    monkeypatch.setattr(module, "MAX_SESSION_BYTES", limit)
+    run, task, waiting = wait_unknown(agents, count=count, fill=True)
+    revision = waiting.snapshot.revision
+    # The complete observation, including metadata, keeps its 100 KB limit.
+    from agentflow.infrastructure.persistence.store import json_bytes
+
+    envelope = {
+        "action_id": "action-0",
+        "status": "succeeded",
+        "error_code": None,
+        "result": "",
+    }
+    result = "r" * (module.MAX_MESSAGE_BYTES - len(json_bytes(envelope)))
+    oversized = ReconciliationDecision(
+        request_id="too-large",
+        expected_revision=revision,
+        confirmed_status="succeeded",
+        result=result + "x",
+        evidence_reference="external:receipt",
+        actor="operator",
+    )
+    with pytest.raises(AgentDataError):
+        agents.reconcile_action("session", "action-0", oversized)
+    assert not agents.review_history("session")["reconciliations"]
+    assert agents.review_history("session")["revision"] == revision
+    for i in range(count):
+        record = agents.reconcile_action(
+            "session",
+            f"action-{i}",
+            ReconciliationDecision(
+                request_id=f"receipt-{i}",
+                expected_revision=revision,
+                confirmed_status="succeeded",
+                result=result,
+                actor="\x01" * 79 + "a",
+                reason="\x01" * 1000,
+                evidence_reference="\x01" * 999 + "e",
+            ),
+        )
+        assert record.result == result
+        revision += 1
+        if i < count - 1:
+            assert agents.store.claim() is None
+    task = agents.store.claim(300)
+    restored = agents.load(task)
+    assert restored.snapshot.budget == waiting.snapshot.budget
+    assert restored.snapshot.status == "actions_pending"
+    assert all(
+        a.result == result and a.action.status == "succeeded" for a in restored.actions
+    )
+    assert len(restored.messages) == len(waiting.messages) + count
 
 
 def reconcile(state, index=0, status="succeeded", request_id="request"):
@@ -272,9 +401,50 @@ def test_terminal_reconciliation_only_appends_audit(agents):
     )
     audit = agents.reconcile_action("session", "action-0", request)
     assert not audit.applied
+    assert agents.reconcile_action("session", "action-0", request) == audit
+    with pytest.raises(StateConflict):
+        agents.reconcile_action(
+            "session",
+            "action-0",
+            ReconciliationDecision.model_validate(
+                {**request.model_dump(), "result": "different"}
+            ),
+        )
     with agents.store.transaction() as db:
         assert db.scalar(select(AgentSessionRow)).snapshot == before
     assert agents.store.claim() is None
+
+
+@pytest.mark.parametrize("agent", [False, True])
+def test_real_lease_failure_retries_remain_bounded(agents, agent):
+    from agentflow.infrastructure.persistence.models import StepRow
+
+    if agent:
+        run, task, state = batch(agents)
+        waiting = agents.request_action_approval(
+            task, "action-0", state.snapshot.revision
+        )
+        agents.decide_action(waiting.approvals[0].approval_id, decision(waiting))
+        task = agents.store.claim(300)
+        assert task.attempt == 1
+    else:
+        run = agents.store.submit(
+            agents.store.register(
+                WorkflowSpec(
+                    name="plain",
+                    steps=(StepSpec(id="work", handler="echo", retry_delay=0),),
+                )
+            ),
+            {},
+        )
+        task = agents.store.claim(300)
+    for attempt in range(1, 4):
+        assert task.attempt == attempt
+        with agents.store.transaction() as db:
+            db.execute(update(StepRow).values(lease_until=0))
+        task = agents.store.claim(300)
+    assert task is None and agents.store.get_run(run)["status"] == "failed"
+    assert agents.store.get_run(run)["steps"][0]["attempts"] == 3
 
 
 @pytest.mark.parametrize("protected", [False, True])

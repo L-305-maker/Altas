@@ -51,6 +51,8 @@ MAX_MESSAGE_BYTES = 100_000
 MAX_ARGUMENT_BYTES = 100_000
 MAX_RESULT_BYTES = 100_000
 MAX_SESSION_BYTES = 8_000_000
+# Covers bounded actor/reason/evidence, identifiers and JSON escaping/record keys.
+REVIEW_METADATA_RESERVE_BYTES = 20_000
 
 
 def checked_json(value: JsonValue, limit: int = 2_000_000) -> JsonValue:
@@ -111,7 +113,7 @@ class SQLAgentStore:
             .with_for_update()
         )
 
-    def _read(self, db, row):
+    def _read(self, db, row, *, reserve_capacity=False):
         try:
             # Run/Step/Session 已持锁；审批先于模型和 Action 获取锁。
             approval_rows = list(
@@ -231,7 +233,7 @@ class SQLAgentStore:
                 ),
             )
             self._validate_history(state)
-            self._check_capacity(initial, state)
+            self._check_capacity(initial, state, reserve=reserve_capacity)
             return state
         except (ValidationError, KeyError, TypeError):
             raise StateConflict("stored agent data is inconsistent") from None
@@ -278,13 +280,13 @@ class SQLAgentStore:
             created_at=row.created_at,
         )
 
-    def _check_capacity(self, initial, state):
+    def _check_capacity(self, initial, state, *, reserve=False):
         data = {
             "initial": initial.model_dump(mode="json"),
             "state": state.model_dump(mode="json"),
         }
         checked_json(data, MAX_SESSION_BYTES)
-        if state.snapshot.status.is_terminal:
+        if not reserve or state.snapshot.status.is_terminal:
             return
         # 这是容量估算，不会写入数据库。派发前为所有未知结果及其观察预留空间，
         # 避免历史填满后无法取消/记录崩溃。使用最长错误码，并为版本增长留余量。
@@ -324,7 +326,33 @@ class SQLAgentStore:
         AgentSnapshot.model_validate(snapshot)
         checked_json(snapshot, 2_000_000 - 1024)
         data["control_margin"] = "x" * 1024
-        checked_json(data, MAX_SESSION_BYTES)
+        remaining = 0
+        approvals = {a.action_id: a for a in state.approvals}
+        for stored in state.actions:
+            if stored.action.status not in {
+                ActionStatus.PROPOSED,
+                ActionStatus.INFLIGHT,
+                ActionStatus.UNKNOWN,
+            }:
+                continue
+            # A resolved UNKNOWN may store its full result three times: the
+            # Action, appended observation and immutable reconciliation evidence.
+            remaining += 3 * MAX_RESULT_BYTES + REVIEW_METADATA_RESERVE_BYTES
+            if (
+                stored.action.status == ActionStatus.PROPOSED
+                and stored.tool_binding is not None
+                and stored.tool_binding.protected
+            ):
+                approval = approvals.get(stored.action.id)
+                if approval is None:
+                    remaining += REVIEW_METADATA_RESERVE_BYTES
+                elif approval.decision == "pending":
+                    remaining += max(
+                        0,
+                        REVIEW_METADATA_RESERVE_BYTES
+                        - len(json_bytes(approval.model_dump(mode="json"))),
+                    )
+        checked_json(data, MAX_SESSION_BYTES - remaining)
 
     def _validate_history(self, state):
         snapshot, calls, messages = state.snapshot, state.model_calls, state.messages
@@ -497,6 +525,7 @@ class SQLAgentStore:
         data = initial_snapshot.model_dump(mode="json")
         with self._owned_transaction(task) as (db, run, step):
             row = self._session(db, step)
+            created = row is None
             if row is None:
                 now = self.store._now(db)
                 row = AgentSessionRow(
@@ -517,7 +546,7 @@ class SQLAgentStore:
                 )
             elif row.initial_snapshot != data:
                 raise StateConflict("step already has a different agent initialization")
-            result = self._read(db, row)
+            result = self._read(db, row, reserve_capacity=created)
             if result.messages[: len(messages)] != tuple(messages):
                 raise StateConflict("initial messages differ from stored history")
         return result
@@ -692,7 +721,7 @@ class SQLAgentStore:
         )
         db.flush()
         db.expire(row)
-        return self._read(db, row)
+        return self._read(db, row, reserve_capacity=not operator)
 
     def _model_update(self, db, row, old, transition, now):
         candidate, outcome = transition.snapshot, transition.model_result
@@ -911,8 +940,9 @@ class SQLAgentStore:
         if re.fullmatch(r"[a-zA-Z][a-zA-Z0-9_.-]{0,79}", error) is None:
             error = "AgentExecutionError"
         state = self._read(db, row)
-        if error == "LeaseExpired" and step.attempts < spec.max_attempts:
+        if error == "LeaseExpired":
             if any(a.status == ActionStatus.INFLIGHT for a in state.snapshot.actions):
+                row.continuation_pending = False
                 self._interrupt(
                     db, run, step, row, AgentStatus.WAITING_RECONCILIATION, error
                 )
@@ -929,6 +959,7 @@ class SQLAgentStore:
                     {"step": step.key, "agent_state": "waiting_reconciliation"},
                 )
                 return True
+        if error == "LeaseExpired" and step.attempts < spec.max_attempts:
             if state.snapshot.status == AgentStatus.MODEL_INFLIGHT:
                 self._interrupt(db, run, step, row, AgentStatus.MODEL_INFLIGHT, error)
             return False  # 沿用 Step 的尝试上限/退避，下一 Worker 恢复同一 Agent。
@@ -950,6 +981,7 @@ class SQLAgentStore:
     def _cancel_step(self, db, run, step):
         row = self._session(db, step)
         if row is not None:
+            row.continuation_pending = False
             self._interrupt(
                 db, run, step, row, AgentStatus.CANCELLED, "WorkflowCancelled"
             )
@@ -986,7 +1018,9 @@ class SQLAgentStore:
                 "action review persistence unavailable"
             ) from None
 
-    def _ready_review(self, db, run, step):
+    def _ready_review(self, db, run, step, row):
+        # Normal human review continues this attempt; a crashed lease consumed it.
+        row.continuation_pending = step.error != "LeaseExpired"
         step.status, step.token, step.lease_until = "ready", None, None
         step.available_at, step.error = self.store._now(db), None
         db.flush()
@@ -1141,7 +1175,7 @@ class SQLAgentStore:
                 AgentTransition(snapshot=candidate, observations=observations),
                 operator=True,
             )
-            self._ready_review(db, run, step)
+            self._ready_review(db, run, step, row)
             self.store._event(
                 db,
                 run.id,
@@ -1186,12 +1220,13 @@ class SQLAgentStore:
             if decision.expected_revision != old.revision:
                 raise StateConflict("agent revision changed")
             terminal = old.status.is_terminal
+            if stored.action.status != ActionStatus.UNKNOWN:
+                raise StateConflict("reconciliation requires an unknown action")
             if not terminal and (
                 run.status in {"failed", "succeeded", "cancelled"}
                 or step.status != "waiting"
                 or step.token is not None
                 or old.status != AgentStatus.WAITING_RECONCILIATION
-                or stored.action.status != ActionStatus.UNKNOWN
             ):
                 raise StateConflict("action is not waiting for reconciliation")
             record = AgentActionReconciliationRow(
@@ -1218,6 +1253,16 @@ class SQLAgentStore:
                 )
                 actions = tuple(action if a.id == action_id else a for a in old.actions)
                 waiting = any(a.status == ActionStatus.UNKNOWN for a in actions)
+                spec = next(
+                    s
+                    for s in WorkflowSpec.model_validate(run.spec).steps
+                    if s.id == step.key
+                )
+                retries_exhausted = (
+                    not waiting
+                    and step.error == "LeaseExpired"
+                    and step.attempts >= spec.max_attempts
+                )
                 candidate = AgentSnapshot.model_validate(
                     {
                         **old.model_dump(),
@@ -1225,6 +1270,8 @@ class SQLAgentStore:
                         "actions": actions,
                         "status": AgentStatus.WAITING_RECONCILIATION
                         if waiting
+                        else AgentStatus.FAILED
+                        if retries_exhausted
                         else AgentStatus.ACTIONS_PENDING,
                     }
                 )
@@ -1245,8 +1292,22 @@ class SQLAgentStore:
                     ),
                     operator=True,
                 )
-                if not waiting:
-                    self._ready_review(db, run, step)
+                if retries_exhausted:
+                    step.status, step.token, step.lease_until = "failed", None, None
+                    self.store._event(
+                        db,
+                        run.id,
+                        "step.failed",
+                        {
+                            "step": step.key,
+                            "error": "LeaseExpired",
+                            "attempt": step.attempts,
+                        },
+                    )
+                    db.flush()
+                    self.store._schedule(db, run)
+                elif not waiting:
+                    self._ready_review(db, run, step, row)
             else:
                 self._read(db, row)  # 终态只追加审计，并校验累计体积。
             self.store._event(

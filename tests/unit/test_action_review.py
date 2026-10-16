@@ -11,6 +11,8 @@ from agentflow.domain.agent.action import Action, digest_arguments
 from agentflow.domain.agent.review import (
     ActionApproval,
     ActionExecutionContext,
+    ActionReconciliation,
+    ApprovalDecision,
     ReconciliationDecision,
     ToolBinding,
 )
@@ -46,6 +48,10 @@ def test_binding_cannot_authorize_changed_action():
         {"result": float("nan")},
         {"actor": "  "},
         {"evidence_reference": ""},
+        {"actor": "operator\0"},
+        {"reason": "reason\0"},
+        {"request_id": "request\0"},
+        {"evidence_reference": "evidence\0"},
     ],
 )
 def test_reconciliation_requires_explicit_safe_evidence(changes):
@@ -59,6 +65,36 @@ def test_reconciliation_requires_explicit_safe_evidence(changes):
                 "reason": "checked",
                 "evidence_reference": "external:receipt",
                 **changes,
+            }
+        )
+
+
+def test_formal_reconciliation_requires_original_unknown_status():
+    with pytest.raises(ValidationError):
+        ActionReconciliation(
+            request_id="request",
+            session_id="session",
+            action_id="action",
+            expected_revision=1,
+            previous_status="succeeded",
+            confirmed_status="failed",
+            error_code="Failure",
+            evidence_reference="external:receipt",
+            actor="operator",
+            applied=False,
+            created_at=0,
+        )
+
+
+@pytest.mark.parametrize("field", ["actor", "reason"])
+def test_approval_metadata_rejects_postgres_text_nul(field):
+    with pytest.raises(ValidationError):
+        ApprovalDecision.model_validate(
+            {
+                "expected_revision": 0,
+                "decision": "approved",
+                "actor": "operator",
+                field: "invalid\0",
             }
         )
 

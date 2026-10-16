@@ -102,6 +102,9 @@ class AgentSessionRow(Base):
     initial_snapshot: Mapped[dict[str, Any]] = mapped_column(JSON)
     snapshot: Mapped[dict[str, Any]] = mapped_column(JSON)
     revision: Mapped[int] = mapped_column(Integer)
+    continuation_pending: Mapped[bool] = mapped_column(
+        Boolean, default=False, server_default=text("false")
+    )
     created_at: Mapped[float] = mapped_column(Float)
     updated_at: Mapped[float] = mapped_column(Float)
 
@@ -240,6 +243,9 @@ class AgentActionReconciliationRow(Base):
         CheckConstraint(
             "confirmed_status IN ('succeeded','failed')",
             name="ck_action_reconciliation_outcome",
+        ),
+        CheckConstraint(
+            "previous_status = 'unknown'", name="ck_action_reconciliation_source"
         ),
     )
     id: Mapped[str] = mapped_column(String(128), primary_key=True)

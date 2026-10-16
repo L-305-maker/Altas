@@ -3,16 +3,18 @@ import os
 from dataclasses import replace
 
 import pytest
+from sqlalchemy import select, update
 
 from agentflow.application.agents.durable_runner import DurableAgentRunner
 from agentflow.application.orchestration.worker import HandlerRegistry, Worker
+from agentflow.application.ports.agent_store import LostLease, StateConflict
 from agentflow.application.tools.runtime import Tool, ToolRuntime
 from agentflow.domain.agent.review import ApprovalDecision, ReconciliationDecision
 from agentflow.domain.agent.status import ToolSideEffect
 from agentflow.domain.workflow.spec import StepSpec, WorkflowSpec
 from agentflow.infrastructure.models.mock import MockProvider
 from agentflow.infrastructure.persistence.agent_store import SQLAgentStore
-from agentflow.infrastructure.persistence.models import Base
+from agentflow.infrastructure.persistence.models import AgentSessionRow, Base, StepRow
 from agentflow.infrastructure.persistence.store import Store
 
 
@@ -47,13 +49,19 @@ def proposal(count=1):
     }
 
 
-def setup(store, *, protected=True, unknown=False, count=1):
+def setup(store, *, protected=True, unknown=False, count=1, max_attempts=3):
     run = store.submit(
         store.register(
             WorkflowSpec(
                 name="review-runner",
                 steps=(
-                    StepSpec(id="work", handler="agent", artifact=True, retry_delay=0),
+                    StepSpec(
+                        id="work",
+                        handler="agent",
+                        artifact=True,
+                        retry_delay=0,
+                        max_attempts=max_attempts,
+                    ),
                 ),
             )
         ),
@@ -224,3 +232,125 @@ async def test_unknown_reconciliation_resumes_without_reexecuting_tool(store, st
     assert store.get_run(run)["status"] == "succeeded"
     tools = [m for m in provider.contexts[-1] if m["role"] == "tool"]
     assert len(tools) == 1 and f'"status":"{status}"' in tools[0]["content"]
+
+
+def approve_pending(agents):
+    pending = agents.list_pending_action_approvals()[0]
+    agents.decide_action(
+        pending.approval_id,
+        ApprovalDecision(
+            expected_revision=agents.review_history(pending.session_id)["revision"],
+            decision="approved",
+            actor="operator",
+        ),
+    )
+    return pending
+
+
+@pytest.mark.asyncio
+async def test_single_attempt_approval_is_a_continuation_not_a_retry(store):
+    run, agents, runtime, provider, invoked, handlers, definition = setup(
+        store, max_attempts=1
+    )
+    worker = Worker(store, handlers)
+    assert await worker.tick()
+    approve_pending(agents)
+    store.engine.dispose()  # The one-shot continuation survives a reconnect.
+    assert await worker.tick()
+    assert store.get_run(run)["status"] == "succeeded"
+    assert store.get_run(run)["steps"][0]["attempts"] == 1
+    assert len(invoked) == 1 and provider.calls == 2
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("max_attempts", [1, 3])
+async def test_two_approvals_then_crash_preserves_reconciliation_and_retry_bound(
+    store, monkeypatch, max_attempts
+):
+    run, agents, runtime, provider, invoked, handlers, definition = setup(
+        store, count=2, max_attempts=max_attempts
+    )
+    worker = Worker(store, handlers)
+    assert await worker.tick()
+    first = approve_pending(agents)
+    assert await worker.tick()
+    second = approve_pending(agents)
+    saved = []
+    commit = agents.commit_transition
+
+    def record(task, transition):
+        state = commit(task, transition)
+        saved.append((task, state))
+        return state
+
+    class ProcessCrash(BaseException):
+        pass
+
+    async def crash(args, invocation):
+        invoked.append(invocation)
+        raise ProcessCrash
+
+    monkeypatch.setattr(agents, "commit_transition", record)
+    runtime._tools["write"] = replace(definition, invoke_durable=crash)
+    with pytest.raises(ProcessCrash):
+        await worker.tick()
+    old_task, inflight = saved[-1]
+    with store.transaction() as db:
+        db.execute(update(StepRow).values(lease_until=0))
+    assert store.claim(300) is None
+    pending = agents.list_unknown_actions()[0]
+    assert pending["agent_status"] == "waiting_reconciliation"
+    assert store.get_run(run)["steps"][0]["attempts"] == 1
+    with pytest.raises(LostLease):
+        agents.load(old_task)
+    agents.reconcile_action(
+        pending["session_id"],
+        pending["action_id"],
+        ReconciliationDecision(
+            request_id="crash-evidence",
+            expected_revision=pending["revision"],
+            confirmed_status="succeeded",
+            result={"value": 1},
+            evidence_reference="external:receipt",
+            actor="operator",
+        ),
+    )
+    runtime._tools["write"] = definition
+    assert await worker.tick() is (max_attempts > 1)
+    assert [i.action_id for i in invoked] == [first.action_id, second.action_id]
+    assert len({i.idempotency_key for i in invoked}) == 2
+    assert store.get_run(run)["status"] == (
+        "succeeded" if max_attempts > 1 else "failed"
+    )
+    with store.transaction() as db:
+        snapshot = db.scalar(select(AgentSessionRow)).snapshot
+    assert snapshot["budget"]["tool_calls"] == 2
+    assert snapshot["budget"]["model_rounds"] == (2 if max_attempts > 1 else 1)
+    assert store.get_run(run)["steps"][0]["attempts"] == (2 if max_attempts > 1 else 1)
+
+
+@pytest.mark.asyncio
+async def test_successful_terminal_action_cannot_be_disguised_as_unknown_reconciliation(
+    store,
+):
+    run, agents, runtime, provider, invoked, handlers, definition = setup(store)
+    worker = Worker(store, handlers)
+    await worker.tick()
+    pending = approve_pending(agents)
+    await worker.tick()
+    before = store.get_run(run)
+    with pytest.raises(StateConflict):
+        agents.reconcile_action(
+            pending.session_id,
+            pending.action_id,
+            ReconciliationDecision(
+                request_id="contradictory-evidence",
+                expected_revision=agents.review_history(pending.session_id)["revision"],
+                confirmed_status="failed",
+                error_code="ExternalFailure",
+                evidence_reference="external:receipt",
+                actor="operator",
+            ),
+        )
+    assert not agents.review_history(pending.session_id)["reconciliations"]
+    assert store.get_run(run) == before and not await worker.tick()

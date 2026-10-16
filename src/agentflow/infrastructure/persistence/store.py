@@ -286,7 +286,15 @@ class Store:
                         str(uuid4()),
                         now + lease_seconds,
                     )
-                    row.attempts += 1
+                    agent = session.scalar(
+                        select(AgentSessionRow)
+                        .where(AgentSessionRow.step_row_id == row.id)
+                        .with_for_update()
+                    )
+                    if agent is not None and agent.continuation_pending:
+                        agent.continuation_pending = False
+                    else:
+                        row.attempts += 1
                     spec = specs[row.key]
                     self._event(
                         session,

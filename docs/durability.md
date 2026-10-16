@@ -206,11 +206,13 @@ Worker 的 asyncio.timeout 会把取消转换为步骤 TimeoutError。Store.fail
 ## 行动审批与人工对账（PR4）
 
 `0003_agent_action_review` 在 `agent_actions` 新增可空 `tool_binding`，新增
-`agent_action_approvals` 和 `agent_action_reconciliations`。审批具有 Session/Action 唯一约束，
+`agent_action_approvals` 和 `agent_action_reconciliations`，并在 Session 新增默认 false 的
+`continuation_pending`。审批具有 Session/Action 唯一约束，
 部分唯一索引保证每个 Session 只有一个 pending 请求；对账请求 ID 唯一，每个 Action 至多有
-一份实际改变状态的对账记录。外键绑定真实 Session/Action，不使用 Step key 代替数据库 Step ID。
+一份实际改变状态的对账记录；正式对账的 previous_status 必须是 UNKNOWN（领域与数据库约束）。
+外键绑定真实 Session/Action，不使用 Step key 代替数据库 Step ID。
 升级不推断旧行动的工具版本或授权：binding 为 NULL 的旧提案不能派发。
-回退 0003→0002 会删除审批/对账审计和 binding，保留 Workflow、Step、Session、消息及行动；
+回退 0003→0002 会删除审批/对账审计、binding 和续执行标记，保留 Workflow、Step、Session、消息及行动；
 有审计留存要求时必须先导出备份，并停止所有 Worker 后回退。重新升级不会恢复已删除的审计。
 
 ```mermaid
@@ -221,14 +223,22 @@ stateDiagram-v2
     ACTIONS_PENDING --> WAITING_RECONCILIATION: 不确定结果记 UNKNOWN / Step waiting
     WAITING_RECONCILIATION --> WAITING_RECONCILIATION: 仍有其他 UNKNOWN
     WAITING_RECONCILIATION --> ACTIONS_PENDING: 最后一个 UNKNOWN 已确认 / Step ready
+    WAITING_RECONCILIATION --> FAILED: 已确认全部 UNKNOWN / 真正失败重试耗尽
 ```
 
 `request_action_approval(Task, action_id, expected_revision)` 必须持有效租约，原子创建请求与等待状态。
 `decide_action(approval_id, ApprovalDecision)`、`reconcile_action(session_id, action_id,
 ReconciliationDecision)` 是独立操作员事务，不构造 Task 或 token。它们按
 Run→Step→Session→Approval→模型记录→Action 获取锁，验证 Run 未取消、合法等待状态和 revision，
-仍使用 `AgentSnapshot.advance()` 和 revision CAS。批准和对账只恢复 Step ready，Worker 必须重新
+仍使用 `AgentSnapshot.advance()` 和 revision CAS。批准和可继续的对账只恢复 Step ready，Worker 必须重新
 claim 获得新 token。任何旧 token、过期租约或已取消 Workflow 均不能提交晚到的执行结果。
+
+正常审批/对账将 Session 的一次性 continuation_pending 置 true；claim 在 Session 锁内消耗标记，
+复用当前 Step attempt，token 仍更新。它不是失败重试，也不重置 attempts 或 AgentBudget。
+真正的租约过期消耗当前尝试，后续领取增加 attempts；普通 Handler 仍每次领取增加 attempts。
+有 INFLIGHT 时，无论 max_attempts 是否已用尽，先原子记 UNKNOWN 并等待对账。若所有 UNKNOWN
+已确认且这次租约失败用尽重试，最后一次对账原子提交 Agent/Step FAILED，不再派发；否则恢复 ready，
+下一次 claim 作为失败重试计数。普通工具未知结果的人工确认仍属于正常续执行，受 AgentBudget 约束。
 
 Tool 新增兼容默认值 `version="1"`。策略 SHA-256 覆盖名称、版本、JSON Schema、副作用、审批要求、
 超时和描述；参数单独使用规范化 SHA-256。版本需要部署者在工具实现或安全语义变化时主动更新，
@@ -263,10 +273,29 @@ Workflow 取消后拒绝审批，pending 请求记 cancelled。对账 request_id
 snapshot revision 与 Step 状态原子提交。多 UNKNOWN 只在最后一个解决后恢复；预算、Action ID、
 幂等键与消息序号不重置。ContextBuilder 只回放最终有效观察一次，保留旧 UNKNOWN 审计消息。
 
-FAILED/CANCELLED/EXHAUSTED/SUCCEEDED Agent 只能追加 applied=false 的独立证据，不能改变
-Snapshot、Action 结果或历史消息，也不会重启 Workflow。租约恢复、取消传播和 5 秒清理规则不变。
+FAILED/CANCELLED/EXHAUSTED/SUCCEEDED Agent 仅允许为仍是 UNKNOWN 的 Action 追加 applied=false
+证据，不能改变 Snapshot、Action 结果或历史消息，也不会重启 Workflow。SUCCEEDED/FAILED/DENIED
+等已知状态不能伪装为 UNKNOWN 对账；本阶段不提供已知结果的其他补充审计类型。request_id 精确重复
+仍幂等，矛盾内容冲突。取消传播和 5 秒清理规则不变。
 数据库事务与外部工具无法原子提交，批准消耗不保证 exactly-once；预约后派发前崩溃也保守记 UNKNOWN。
 适配器仍应使用稳定幂等键，操作员必须在外部核对后再给出明确结论。
+
+### 容量准入与恢复
+
+新工作写入除原有取消/崩溃余量外，为每个尚未解决的 Action 预留最多三份 100 KB 结果
+（Action、追加观察、正式对账）和 20 KB 对账元数据；受保护提案额外预留完整 20 KB 审批记录，
+扣除已有 pending 记录的实际字节。元数据余量包含受限理由、证据、标签、ID 和 JSON 转义。
+批准、拒绝、对账逐步使用这些空间；历史逼近 8 MB 时先拒绝新增工作，不等到进入人工等待后才
+因控制记录不足而拒绝恢复。多 UNKNOWN 各自保留完整空间，最后一项解决前不会领取新任务。
+
+8 MB 总量、100 KB 单结果和 100 KB 完整观察限制不提高；结果必须连同观察的 action_id/status/
+error_code 元数据一同容纳。超限仍 422、整笔回滚，不能静默截断；操作员可明确选择 result=null，
+将完整外部结果留在 evidence_reference 所指受控存储。读取只验证已存数据的实际大小，不强迫旧会话
+重新满足新增预留。新预留不能追溯创造旧版本已经用满的空间：旧的逼满会话可能需要更小的显式
+核对请求；连最小审计都无法容纳时需受控的离线留存处理，本阶段不提供删除历史或扩大限额的绕过。
+
+0003 尚未合并，此次在同一迁移内扩展 schema；已经安装早期 PR 预览版 0003 的数据库必须先备份，
+停 Worker 后按文档回退/重新升级或重建隔离预览库，单独运行 upgrade head 不会修改已打戳的 0003。
 
 `scripts/verify_postgres.py` 覆盖审批、对账、取消/领取竞争、CAS/fencing 与
 0002→0003→0002→0003 数据保留/模型差异检查。Compose CI 停止常规 Worker 后，在 API 容器运行

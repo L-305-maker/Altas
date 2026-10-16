@@ -42,7 +42,6 @@ def test_agent_migration_roundtrip_preserves_existing_workflows(
             ),
             {"value": 42},
         )
-        task = store.claim(300)
         with store.transaction() as db:
             step_id = db.scalar(select(StepRow.id).where(StepRow.run_id == run_id))
         command.upgrade(config, "0002")
@@ -54,6 +53,7 @@ def test_agent_migration_roundtrip_preserves_existing_workflows(
             "agent_actions",
         } <= set(tables)
         command.upgrade(config, "head")  # 当前实现只在当前 schema 上运行。
+        task = store.claim(300)
         SQLAgentStore(store).open(
             task,
             AgentSnapshot(

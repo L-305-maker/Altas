@@ -10,6 +10,15 @@ depends_on = None
 
 
 def upgrade():
+    op.add_column(
+        "agent_sessions",
+        sa.Column(
+            "continuation_pending",
+            sa.Boolean,
+            nullable=False,
+            server_default=sa.false(),
+        ),
+    )
     op.add_column("agent_actions", sa.Column("tool_binding", sa.JSON, nullable=True))
     op.create_table(
         "agent_action_approvals",
@@ -77,6 +86,9 @@ def upgrade():
             "confirmed_status IN ('succeeded','failed')",
             name="ck_action_reconciliation_outcome",
         ),
+        sa.CheckConstraint(
+            "previous_status = 'unknown'", name="ck_action_reconciliation_source"
+        ),
     )
     op.create_index(
         "uq_agent_applied_reconciliation",
@@ -92,3 +104,4 @@ def downgrade():
     op.drop_table("agent_action_reconciliations")
     op.drop_table("agent_action_approvals")
     op.drop_column("agent_actions", "tool_binding")
+    op.drop_column("agent_sessions", "continuation_pending")

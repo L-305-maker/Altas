@@ -49,6 +49,12 @@ class ApprovalDecision(BaseModel):
     )
     reason: str = Field(default="", max_length=1000)
 
+    @model_validator(mode="after")
+    def valid_text(self) -> Self:
+        if any("\0" in v for v in (self.actor, self.reason)):
+            raise ValueError("operator text cannot contain NUL")
+        return self
+
 
 class ActionApproval(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
@@ -106,6 +112,11 @@ class ReconciliationDecision(BaseModel):
 
     @model_validator(mode="after")
     def safe_outcome(self) -> Self:
+        if any(
+            "\0" in v
+            for v in (self.request_id, self.actor, self.reason, self.evidence_reference)
+        ):
+            raise ValueError("operator text cannot contain NUL")
         if (self.confirmed_status == "failed") != (self.error_code is not None):
             raise ValueError("failed reconciliation requires a safe error code")
         if len(json.dumps(self.result, allow_nan=False).encode()) > 100_000:
@@ -116,7 +127,7 @@ class ReconciliationDecision(BaseModel):
 class ActionReconciliation(ReconciliationDecision):
     session_id: Identifier
     action_id: Identifier
-    previous_status: ActionStatus
+    previous_status: Literal[ActionStatus.UNKNOWN]
     applied: bool
     created_at: FiniteFloat
 

@@ -68,6 +68,9 @@ def test_review_upgrade_downgrade_preserves_old_agent_data(
         command.upgrade(config, "0003")
         command.check(config)
         with store.engine.connect() as db:
+            assert db.execute(
+                text("SELECT continuation_pending FROM agent_sessions")
+            ).scalar_one() in (False, 0)
             assert (
                 db.execute(text("SELECT tool_binding FROM agent_actions")).scalar_one()
                 is None
@@ -80,6 +83,9 @@ def test_review_upgrade_downgrade_preserves_old_agent_data(
             )
         command.downgrade(config, "0002")
         assert "agent_action_approvals" not in inspect(store.engine).get_table_names()
+        assert "continuation_pending" not in {
+            c["name"] for c in inspect(store.engine).get_columns("agent_sessions")
+        }
         command.upgrade(config, "0003")
         command.check(config)
         with store.engine.connect() as db:
