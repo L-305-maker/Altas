@@ -1,4 +1,6 @@
+import asyncio
 import os
+from dataclasses import replace
 
 import pytest
 
@@ -119,6 +121,40 @@ async def test_runner_approves_and_executes_original_actions_in_sequence(store):
     assert len(store.artifacts(run)) == 1
     assert provider.calls == 2
     assert len(agents.review_history(first.session_id)["approvals"]) == 2
+
+
+@pytest.mark.asyncio
+async def test_consumed_approval_survives_cancel_and_unknown_is_not_reexecuted(store):
+    run, agents, runtime, provider, invoked, handlers, definition = setup(store)
+    started = asyncio.Event()
+
+    async def blocked(args, invocation):
+        invoked.append(invocation)
+        started.set()
+        await asyncio.Event().wait()
+
+    runtime._tools["write"] = replace(definition, invoke_durable=blocked)
+    worker = Worker(store, handlers)
+    assert await worker.tick()
+    approval = agents.list_pending_action_approvals()[0]
+    agents.decide_action(
+        approval.approval_id,
+        ApprovalDecision(
+            expected_revision=agents.review_history(approval.session_id)["revision"],
+            decision="approved",
+            actor="operator",
+        ),
+    )
+    job = asyncio.create_task(worker.tick())
+    await asyncio.wait_for(started.wait(), 5)
+    job.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await job
+    assert agents.get_action_approval(approval.approval_id).consumed_at is not None
+    assert agents.list_unknown_actions()[0]["action_id"] == approval.action_id
+    assert store.get_run(run)["status"] == "waiting"
+    assert not await worker.tick()
+    assert len(invoked) == 1 and provider.calls == 1
 
 
 @pytest.mark.asyncio

@@ -10,7 +10,7 @@ from pydantic import TypeAdapter
 
 from agentflow.domain.agent.action import ErrorCode, Identifier, digest_arguments
 from agentflow.domain.agent.review import ActionExecutionContext, ToolBinding
-from agentflow.domain.agent.status import ToolSideEffect
+from agentflow.domain.agent.status import ActionStatus, ToolSideEffect
 
 
 class ToolDeniedError(Exception):
@@ -123,6 +123,7 @@ class ToolRuntime:
         )
         if (
             context is None
+            or context.action.status != ActionStatus.INFLIGHT
             or context.action.id != invocation.action_id
             or context.idempotency_key != invocation.idempotency_key
         ):

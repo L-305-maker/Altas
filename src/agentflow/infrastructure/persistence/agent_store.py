@@ -207,6 +207,11 @@ class SQLAgentStore:
             actions.sort(
                 key=lambda a: (call_order[a.action.model_call_id], a.call_index)
             )
+            if any(
+                a.tool_binding is not None and not a.tool_binding.matches(a.action)
+                for a in actions
+            ):
+                raise StateConflict("stored tool binding differs from action")
             state = AgentSession(
                 snapshot=snapshot,
                 messages=messages,
@@ -1005,6 +1010,9 @@ class SQLAgentStore:
                 or stored.tool_binding is None
                 or not stored.tool_binding.protected
                 or any(
+                    a.status == ActionStatus.INFLIGHT for a in state.snapshot.actions
+                )
+                or any(
                     a.decision == "pending" or a.action_id == action_id
                     for a in state.approvals
                 )
@@ -1286,7 +1294,11 @@ class SQLAgentStore:
                         ).limit(limit)
                     )
                 )
-            return tuple(self.get_action_approval(i) for i in ids)
+            return tuple(
+                a
+                for i in ids
+                if (a := self.get_action_approval(i)).decision == "pending"
+            )
         except SQLAlchemyError:
             raise AgentStoreUnavailable(
                 "action review persistence unavailable"
@@ -1313,7 +1325,9 @@ class SQLAgentStore:
                         "action_id": a.id,
                         "run_id": r,
                         "revision": s.revision,
-                        "agent_status": s.snapshot["status"],
+                        "agent_status": AgentSnapshot.model_validate(
+                            checked_json(s.snapshot)
+                        ).status.value,
                         "tool_name": a.tool_name,
                         "arguments_digest": a.arguments_digest,
                         "idempotency_key": a.idempotency_key,
@@ -1324,6 +1338,8 @@ class SQLAgentStore:
                         ).limit(limit)
                     )
                 ]
+        except ValidationError:
+            raise StateConflict("stored agent data is inconsistent") from None
         except SQLAlchemyError:
             raise AgentStoreUnavailable(
                 "action review persistence unavailable"

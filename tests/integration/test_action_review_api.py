@@ -152,6 +152,26 @@ def test_api_unknown_reconciliation_resume_e2e(scenario):
     assert len([m for m in provider.contexts[-1] if m["role"] == "tool"]) == 1
 
 
+def test_api_rejection_reaches_model_without_dispatch(scenario):
+    client, store, agents, provider, invoked, handlers = scenario
+    run = start(scenario)
+    approval = client.get("/api/agent/action-approvals").json()[0]
+    history = client.get(f"/api/agent/sessions/{approval['session_id']}/reviews").json()
+    response = client.post(
+        f"/api/agent/action-approvals/{approval['approval_id']}/decision",
+        json={
+            "expected_revision": history["revision"],
+            "decision": "rejected",
+            "actor": "operator",
+        },
+    )
+    assert response.status_code == 200
+    assert asyncio.run(Worker(store, handlers).tick())
+    assert not invoked and store.get_run(run)["status"] == "succeeded"
+    tools = [m for m in provider.contexts[-1] if m["role"] == "tool"]
+    assert len(tools) == 1 and "ActionRejected" in tools[0]["content"]
+
+
 @pytest.mark.parametrize(
     "method,path",
     [

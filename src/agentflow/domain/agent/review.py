@@ -64,6 +64,22 @@ class ActionApproval(BaseModel):
     decided_at: FiniteFloat | None = None
     consumed_at: FiniteFloat | None = None
 
+    @model_validator(mode="after")
+    def consistent_decision(self) -> Self:
+        if self.decision == "pending":
+            if any(
+                v is not None
+                for v in (self.actor, self.reason, self.decided_at, self.consumed_at)
+            ):
+                raise ValueError("pending approval cannot contain decision facts")
+        elif self.decided_at is None:
+            raise ValueError("decided approval requires a decision timestamp")
+        if self.decision in {"approved", "rejected"} and self.actor is None:
+            raise ValueError("operator decision requires an audit label")
+        if self.consumed_at is not None and self.decision != "approved":
+            raise ValueError("only approved authorization can be consumed")
+        return self
+
     def authorizes(self, action: Action, binding: ToolBinding) -> bool:
         return (
             self.decision == "approved"

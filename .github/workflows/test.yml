@@ -83,6 +83,10 @@ jobs:
         run: docker compose up --build -d postgres api worker web
       - name: Verify reference application evidence-to-approval flow through the web proxy
         run: python3 scripts/verify_compose.py
+      - name: Verify action approval and reconciliation through the real API and Worker
+        run: |
+          docker compose stop worker
+          docker compose exec -T api python - < scripts/verify_action_review_compose.py
       - name: Show service diagnostics
         if: always()
         run: |

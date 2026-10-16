@@ -1,13 +1,16 @@
 import os
+from concurrent.futures import ThreadPoolExecutor
+from threading import Barrier
 
 import pytest
-from sqlalchemy import select
+from sqlalchemy import select, update
 
 from agentflow.application.ports.agent_store import (
     ActionArguments,
     ActionObservation,
     AgentMessage,
     AgentTransition,
+    LostLease,
     ModelCallResult,
     StateConflict,
 )
@@ -21,7 +24,13 @@ from agentflow.domain.agent.review import (
 from agentflow.domain.agent.run import AgentSnapshot
 from agentflow.domain.workflow.spec import StepSpec, WorkflowSpec
 from agentflow.infrastructure.persistence.agent_store import SQLAgentStore
-from agentflow.infrastructure.persistence.models import AgentSessionRow, Base
+from agentflow.infrastructure.persistence.models import (
+    AgentActionApprovalRow,
+    AgentActionReconciliationRow,
+    AgentActionRow,
+    AgentSessionRow,
+    Base,
+)
 from agentflow.infrastructure.persistence.store import Store
 
 
@@ -195,6 +204,8 @@ def test_approval_wait_decision_and_atomic_consumption(agents):
         agents.decide_action(approval.approval_id, decision(state, "rejected"))
     new = agents.store.claim(300)
     assert new.token != task.token
+    with pytest.raises(LostLease):
+        agents.load(task)
     state = agents.load(new)
     transition = AgentTransition(
         snapshot=candidate(
@@ -264,3 +275,265 @@ def test_terminal_reconciliation_only_appends_audit(agents):
     with agents.store.transaction() as db:
         assert db.scalar(select(AgentSessionRow)).snapshot == before
     assert agents.store.claim() is None
+
+
+@pytest.mark.parametrize("protected", [False, True])
+def test_missing_version_cannot_dispatch_even_through_plain_commit(agents, protected):
+    run, task, state = batch(agents, protected=protected)
+    with agents.store.transaction() as db:
+        db.execute(update(AgentActionRow).values(tool_binding=None))
+    before = agents.load(task)
+    with pytest.raises(StateConflict):
+        agents.commit_transition(
+            task,
+            AgentTransition(
+                snapshot=candidate(
+                    before.snapshot,
+                    actions=(before.snapshot.actions[0].transition("inflight"),),
+                    budget=before.snapshot.budget.consume(tool_calls=1),
+                )
+            ),
+        )
+    assert agents.load(task) == before
+
+
+def test_approval_for_other_action_cannot_authorize_dispatch(agents):
+    run, task, state = batch(agents, count=2)
+    state = agents.request_action_approval(task, "action-0", state.snapshot.revision)
+    approval = state.approvals[0]
+    agents.decide_action(approval.approval_id, decision(state))
+    new = agents.store.claim(300)
+    state = agents.load(new)
+    with pytest.raises(StateConflict):
+        agents.commit_transition(
+            new,
+            AgentTransition(
+                snapshot=candidate(
+                    state.snapshot,
+                    actions=(
+                        state.snapshot.actions[0],
+                        state.snapshot.actions[1].transition("inflight"),
+                    ),
+                    budget=state.snapshot.budget.consume(tool_calls=1),
+                ),
+                authorizations=(approval.approval_id,),
+            ),
+        )
+    assert agents.load(new) == state
+
+
+def test_only_one_pending_request_and_restart_preserves_review(agents):
+    run, task, state = batch(agents, count=2)
+    state = agents.request_action_approval(task, "action-0", state.snapshot.revision)
+    with pytest.raises(LostLease):
+        agents.request_action_approval(task, "action-1", state.snapshot.revision)
+    agents.store.engine.dispose()
+    assert (
+        SQLAgentStore(agents.store).get_action_approval(state.approvals[0].approval_id)
+        == state.approvals[0]
+    )
+    with agents.store.transaction() as db:
+        assert len(list(db.scalars(select(AgentActionApprovalRow)))) == 1
+
+
+@pytest.mark.parametrize("same", [False, True])
+def test_concurrent_operators_make_only_one_approval_transition(agents, same):
+    run, task, state = batch(agents)
+    state = agents.request_action_approval(task, "action-0", state.snapshot.revision)
+    barrier = Barrier(2)
+
+    def decide(index):
+        barrier.wait()
+        try:
+            return agents.decide_action(
+                state.approvals[0].approval_id,
+                ApprovalDecision(
+                    expected_revision=state.snapshot.revision,
+                    decision="approved",
+                    actor="operator" if same else f"operator-{index}",
+                ),
+            )
+        except StateConflict:
+            return None
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        results = list(pool.map(decide, range(2)))
+    assert sum(r is not None for r in results) == (2 if same else 1)
+    assert agents.review_history("session")["revision"] == state.snapshot.revision + 1
+
+
+@pytest.mark.parametrize(
+    "race", ["approval_cancel", "reconcile_cancel", "reconcile_claim", "two_reconciles"]
+)
+def test_operator_cancel_claim_races_preserve_cas_and_terminal_rules(agents, race):
+    if race == "approval_cancel":
+        run, task, state = batch(agents)
+        state = agents.request_action_approval(
+            task, "action-0", state.snapshot.revision
+        )
+    else:
+        run, task, state = wait_unknown(agents)
+    barrier = Barrier(2)
+
+    def operate(index):
+        barrier.wait()
+        try:
+            if index == 0 or race == "two_reconciles":
+                if race == "approval_cancel":
+                    return agents.decide_action(
+                        state.approvals[0].approval_id, decision(state)
+                    )
+                return agents.reconcile_action(
+                    "session",
+                    "action-0",
+                    reconcile(state, request_id=f"request-{index}"),
+                )
+            if race == "reconcile_claim":
+                return agents.store.claim(300)
+            agents.store.cancel(run)
+        except StateConflict:
+            return None
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        results = list(pool.map(operate, range(2)))
+    with agents.store.transaction() as db:
+        saved = AgentSnapshot.model_validate(
+            db.scalar(select(AgentSessionRow)).snapshot
+        )
+        audits = list(db.scalars(select(AgentActionReconciliationRow)))
+    if "cancel" in race:
+        assert (
+            saved.status == "cancelled"
+            and agents.store.get_run(run)["status"] == "cancelled"
+        )
+        assert agents.store.claim() is None
+    else:
+        assert saved.revision == state.snapshot.revision + 1
+        assert saved.status == "actions_pending" and len(audits) == 1
+    if race == "two_reconciles":
+        assert sum(r is not None for r in results) == 1
+
+
+def test_operator_failure_rolls_back_approval_and_snapshot(agents):
+    from sqlalchemy import event
+    from sqlalchemy.exc import IntegrityError
+
+    run, task, state = batch(agents)
+    state = agents.request_action_approval(task, "action-0", state.snapshot.revision)
+
+    def fail_event(connection, cursor, statement, parameters, context, executemany):
+        if statement.lstrip().upper().startswith("INSERT INTO EVENTS"):
+            raise IntegrityError("safe failure", None, None)
+
+    event.listen(agents.store.engine, "before_cursor_execute", fail_event)
+    try:
+        with pytest.raises(StateConflict):
+            agents.decide_action(state.approvals[0].approval_id, decision(state))
+    finally:
+        event.remove(agents.store.engine, "before_cursor_execute", fail_event)
+    assert (
+        agents.get_action_approval(state.approvals[0].approval_id).decision == "pending"
+    )
+    assert agents.review_history("session")["revision"] == state.snapshot.revision
+
+
+def test_dispatch_failure_rolls_back_authorization_consumption(agents):
+    run, task, state = batch(agents)
+    state = agents.request_action_approval(task, "action-0", state.snapshot.revision)
+    approval = state.approvals[0]
+    agents.decide_action(approval.approval_id, decision(state))
+    task = agents.store.claim(300)
+    state = agents.load(task)
+    with pytest.raises(StateConflict):
+        agents.commit_transition(
+            task,
+            AgentTransition(
+                snapshot=candidate(
+                    state.snapshot,
+                    actions=(state.snapshot.actions[0].transition("inflight"),),
+                    budget=state.snapshot.budget.consume(tool_calls=1),
+                ),
+                authorizations=(approval.approval_id,),
+                messages=(
+                    AgentMessage(
+                        sequence=len(state.messages) + 1, role="user", payload={}
+                    ),
+                ),
+            ),
+        )
+    assert agents.load(task) == state
+    assert agents.get_action_approval(approval.approval_id).consumed_at is None
+
+
+@pytest.mark.parametrize("terminal", ["failed", "exhausted"])
+def test_failed_terminal_reconciliation_preserves_action_and_observation(
+    agents, terminal
+):
+    run, task, state = batch(agents, protected=False)
+    state = agents.commit_transition(
+        task,
+        AgentTransition(
+            snapshot=candidate(
+                state.snapshot,
+                actions=(state.snapshot.actions[0].transition("inflight"),),
+                budget=state.snapshot.budget.consume(tool_calls=1),
+            )
+        ),
+    )
+    state = agents.fail_agent_step(
+        task,
+        AgentTransition(
+            snapshot=candidate(
+                state.snapshot,
+                status=terminal,
+                actions=(
+                    state.snapshot.actions[0].transition(
+                        "unknown", error_code="Interrupted"
+                    ),
+                ),
+            ),
+            observations=(
+                ActionObservation(
+                    sequence=len(state.messages), action_id="action-0", result=None
+                ),
+            ),
+            error_code="Interrupted",
+        ),
+    )
+    for i in range(2):
+        record = agents.reconcile_action(
+            "session", "action-0", reconcile(state, request_id=f"evidence-{i}")
+        )
+        assert not record.applied and record.previous_status == "unknown"
+    with agents.store.transaction() as db:
+        restored = agents._read(db, db.scalar(select(AgentSessionRow)))
+    assert restored.snapshot == state.snapshot
+    assert restored.messages == state.messages and restored.actions == state.actions
+    assert len(restored.reconciliations) == 2
+    assert agents.store.get_run(run)["status"] == "failed"
+    assert agents.store.claim() is None
+
+
+def test_generic_transition_cannot_resolve_unknown_without_operator_audit(agents):
+    run, task, state = wait_unknown(agents)
+    from agentflow.infrastructure.persistence.models import StepRow
+
+    with agents.store.transaction() as db:
+        db.execute(update(StepRow).values(status="ready"))
+    new = agents.store.claim(300)
+    with pytest.raises(StateConflict):
+        agents.commit_transition(
+            new,
+            AgentTransition(
+                snapshot=candidate(
+                    state.snapshot,
+                    status="actions_pending",
+                    actions=(state.snapshot.actions[0].reconcile("succeeded"),),
+                ),
+                observations=(
+                    ActionObservation(
+                        sequence=len(state.messages), action_id="action-0", result=None
+                    ),
+                ),
+            ),
+        )

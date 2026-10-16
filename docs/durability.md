@@ -92,8 +92,8 @@ StateConflict，非法或超大 JSON 抛 AgentDataError。数据库驱动故障�
 - Workflow 取消：活动 Agent 转 CANCELLED，未确认工具结果先记 UNKNOWN，释放执行所有权。
 - Handler 抛异常或 Step 恢复尝试耗尽：Agent/Step 终态失败，保留未知结果，不套用会重开 Agent 的普通重试。
 
-终态 Agent 快照不可修改；后续到达的结果只能由未来审计/对账服务另存证据。
-本 PR 不提供该服务，也不声称仅凭数据库可保证所有外部工具 exactly-once。
+终态 Agent 快照不可修改；后续到达的结果只能通过下述操作员对账事务另存审计证据。
+数据库不能保证所有外部工具 exactly-once。
 
 验证使用 SQLite 与专用临时 PostgreSQL 的同一组 AgentStore 测试。`scripts/verify_postgres.py`
 会运行普通 PostgreSQL、AgentStore 并发/fencing/回滚以及 0001↔0002 迁移测试；SQLite 不模拟行锁。
@@ -153,17 +153,18 @@ AgentContextBuilder 在每次模型调用前重建上下文。assistant 的工�
 | 模型读取超时、5xx、未知异常或恢复中的模型预约 | ModelCall unknown，Agent/Step FAILED | 不重发；请求可能已被供应商计费 |
 | 模型配置、无效响应协议、空/截断回答 | ModelCall failed，Agent/Step FAILED | 不重试，不保存异常正文 |
 | 参数格式/Schema 错误 | Action DENIED，tool_calls 不增加 | 安全错误反馈模型，在总预算内创建新 Action |
-| 未授权、需审批、UNSAFE 或策略变更的工具 | Action DENIED，tool_calls 不增加 | 不执行；Step 级审批不授予后续行动权限 |
+| 未授权或策略变更的工具 | Action DENIED，tool_calls 不增加 | 不执行；Step 级审批不授予后续行动权限 |
+| 需审批或 UNSAFE 工具 | Action 保持 PROPOSED，Agent/Step 等待审批 | 仅绑定该行动的批准可授权一次预约 |
 | ToolConfirmedFailure（适配器确认的失败） | Action FAILED、观察原子保存 | 反馈模型；已失败 Action 不重新派发 |
 | 工具超时、未知异常、非法/超大结果、执行中取消 | Action UNKNOWN，Agent/Step 等待对账 | 不再请求模型或派发此行动 |
 | 调用次数预算耗尽 | Agent EXHAUSTED、Step FAILED | 不重开 Agent，不走整步异常重试 |
 | LostLease / StateConflict / AgentStoreUnavailable | 不尝试覆盖、不走普通 Store.fail | 停止；由租约恢复重读持久事实 |
 
-Tool 默认副作用为 UNSAFE。Durable 模式只允许部署者显式声明 READ_ONLY、IDEMPOTENT 或
-RECONCILABLE 且在当前白名单中的工具；requires_approval 的工具一律拒绝。
+Tool 默认副作用为 UNSAFE。Durable 模式中的 UNSAFE 或 requires_approval 工具必须先获得
+持久行动批准；其他工具仍须通过部署者声明的副作用策略、白名单和 Schema 校验。
 `Tool.invoke_durable(arguments, ToolInvocation)` 可接收稳定 Action ID 和幂等键；
 普通 invoke 保留兼容性。工具适配器只有确认失败时才抛 ToolConfirmedFailure，其他执行异常视为 UNKNOWN。
-目前不提供行动审批 API，也不从 StepSpec.requires_approval 推导行动授权。
+不从 StepSpec.requires_approval 推导行动授权；旧 AgentRunner 的调用协议保持兼容。
 
 Worker 接受绑定当前 Task 的 CommittedAgentResult，并读取数据库核对 Agent revision、终态/等待状态、
 Step 状态及已释放租约，随后不再 complete/fail。不存在提交的标记会被拒绝；并发取消造成的状态变化
@@ -172,8 +173,8 @@ Step 状态及已释放租约，随后不再 complete/fail。不存在提交的�
 
 仍存在数据库提交与外部派发之间的不可原子窗口：租约核对不能撤回已经发出的请求，不能保证外部
 exactly-once。崩溃在预约后、派发前也可能保守进入 UNKNOWN。终态不可重开；晚到结果需另存审计证据。
-PR4 必须补充有鉴权的行动审批、对账证据与等待状态恢复事务，先解决 UNKNOWN 并返回 ACTIONS_PENDING，
-才可派发尚未执行的 Action。PR3 没有新增任意恢复 waiting Step 的入口。
+下述操作员事务先解决 UNKNOWN 并返回 ACTIONS_PENDING，才可派发尚未执行的 Action。
+没有任意恢复 waiting Step 的入口。
 
 临时 PostgreSQL 验证脚本同时执行新 Runner/Worker 集成、接管 fencing 和真实子进程退出测试。
 真实模型 API、Docker sandbox 和 Compose 仍需各自的环境验证，不能用 SQLite 或 MockTransport 代替。
@@ -201,3 +202,73 @@ Worker 的 asyncio.timeout 会把取消转换为步骤 TimeoutError。Store.fail
 发现已有 AgentSession 时，对该超时返回 False、不提交失败，避免将工具等待对账覆盖成终态，
 也避免清理未完成时绕过 AgentStore 做整步重试。清理已成功时，原 token 已释放，同样拒绝重复写入。
 未创建 AgentSession 的普通 Handler 仍按原规则失败/重试；旧 AgentRunner 的取消传播保持不变。
+
+## 行动审批与人工对账（PR4）
+
+`0003_agent_action_review` 在 `agent_actions` 新增可空 `tool_binding`，新增
+`agent_action_approvals` 和 `agent_action_reconciliations`。审批具有 Session/Action 唯一约束，
+部分唯一索引保证每个 Session 只有一个 pending 请求；对账请求 ID 唯一，每个 Action 至多有
+一份实际改变状态的对账记录。外键绑定真实 Session/Action，不使用 Step key 代替数据库 Step ID。
+升级不推断旧行动的工具版本或授权：binding 为 NULL 的旧提案不能派发。
+回退 0003→0002 会删除审批/对账审计和 binding，保留 Workflow、Step、Session、消息及行动；
+有审计留存要求时必须先导出备份，并停止所有 Worker 后回退。重新升级不会恢复已删除的审计。
+
+```mermaid
+stateDiagram-v2
+    ACTIONS_PENDING --> WAITING_APPROVAL: 原子请求审批 / Step waiting / 释放租约
+    WAITING_APPROVAL --> ACTIONS_PENDING: 批准保留 PROPOSED / 拒绝变 DENIED / Step ready
+    ACTIONS_PENDING --> ACTIONS_PENDING: 新 Worker 核验批准并消耗授权 / 预约 INFLIGHT
+    ACTIONS_PENDING --> WAITING_RECONCILIATION: 不确定结果记 UNKNOWN / Step waiting
+    WAITING_RECONCILIATION --> WAITING_RECONCILIATION: 仍有其他 UNKNOWN
+    WAITING_RECONCILIATION --> ACTIONS_PENDING: 最后一个 UNKNOWN 已确认 / Step ready
+```
+
+`request_action_approval(Task, action_id, expected_revision)` 必须持有效租约，原子创建请求与等待状态。
+`decide_action(approval_id, ApprovalDecision)`、`reconcile_action(session_id, action_id,
+ReconciliationDecision)` 是独立操作员事务，不构造 Task 或 token。它们按
+Run→Step→Session→Approval→模型记录→Action 获取锁，验证 Run 未取消、合法等待状态和 revision，
+仍使用 `AgentSnapshot.advance()` 和 revision CAS。批准和对账只恢复 Step ready，Worker 必须重新
+claim 获得新 token。任何旧 token、过期租约或已取消 Workflow 均不能提交晚到的执行结果。
+
+Tool 新增兼容默认值 `version="1"`。策略 SHA-256 覆盖名称、版本、JSON Schema、副作用、审批要求、
+超时和描述；参数单独使用规范化 SHA-256。版本需要部署者在工具实现或安全语义变化时主动更新，
+摘要不分析 Python 函数体，也不是加密或脱敏。批准绑定 Session/Action、工具名称、版本、策略与
+参数摘要。`ActionExecutionContext` 从持久记录构建，不能用 approved=True、模型文本或 Step 审批替代。
+通用 `commit_transition` 同样检查受保护派发的批准 ID，原子消耗批准、PROPOSED→INFLIGHT、
+累计一次 tool_calls。提交失败则全部回滚；已消耗批准不能再次预约。真实工具调用前重查
+当前注册版本/策略、白名单、Schema 和 Task 租约。配置变化安全拒绝，不重新生成旧 Action。
+
+所有端点复用单租户 Bearer operator token。`actor` 只是已认证操作员提供的审计标签，
+不是独立认证的用户身份；部署方负责 token 保管和工具注册。Python Store/Runtime 属于可信应用边界，
+不是针对进程内恶意代码的权限隔离机制。
+
+| 方法与路径（前缀 `/api/agent`） | 输入 / 结果 |
+| --- | --- |
+| GET `/action-approvals?run_id=&limit=` | 待审批绑定；limit 1–200，默认 100 |
+| GET `/action-approvals/{approval_id}` | 绑定、决定、消耗时间 |
+| POST `/action-approvals/{approval_id}/decision` | expected_revision、decision=approved/rejected、actor、reason |
+| GET `/reconciliations/pending?run_id=&limit=` | UNKNOWN 行动及 Session revision，包括终态审计对象 |
+| POST `/sessions/{session_id}/actions/{action_id}/reconciliations` | request_id、expected_revision、confirmed_status=succeeded/failed、result、安全 error_code、evidence_reference、actor、reason |
+| GET `/sessions/{session_id}/reviews` | revision 与完整审批、对账审计 |
+
+未认证 401；资源不存在 404；CAS/决定冲突 409；非法或过大数据 422（整个请求超限为 413）；
+数据库不可用 503。actor 限 80 字符，reason/evidence_reference 各 1000 字符；结果限有限 JSON
+100 KB，累计会话仍限 8 MB。事件只保存 ID、决定和 applied 等元数据，不保存标签、理由、证据、
+Prompt、参数、工具结果或异常正文。敏感读取同样要求认证。
+
+相同批准/拒绝决定与 actor/reason 重复提交幂等，不再次增加 revision；不同决定或标签/理由冲突。
+Workflow 取消后拒绝审批，pending 请求记 cancelled。对账 request_id 与原始完整请求绑定，
+相同请求重试返回原审计；复用 ID 改写内容冲突。对账证据是操作员确认，不是 Core 独立证明外部事实。
+活动 Action 只能 UNKNOWN→SUCCEEDED/FAILED（FAILED 必须安全错误码），结果、追加观察、审计、
+snapshot revision 与 Step 状态原子提交。多 UNKNOWN 只在最后一个解决后恢复；预算、Action ID、
+幂等键与消息序号不重置。ContextBuilder 只回放最终有效观察一次，保留旧 UNKNOWN 审计消息。
+
+FAILED/CANCELLED/EXHAUSTED/SUCCEEDED Agent 只能追加 applied=false 的独立证据，不能改变
+Snapshot、Action 结果或历史消息，也不会重启 Workflow。租约恢复、取消传播和 5 秒清理规则不变。
+数据库事务与外部工具无法原子提交，批准消耗不保证 exactly-once；预约后派发前崩溃也保守记 UNKNOWN。
+适配器仍应使用稳定幂等键，操作员必须在外部核对后再给出明确结论。
+
+`scripts/verify_postgres.py` 覆盖审批、对账、取消/领取竞争、CAS/fencing 与
+0002→0003→0002→0003 数据保留/模型差异检查。Compose CI 停止常规 Worker 后，在 API 容器运行
+`scripts/verify_action_review_compose.py`，使用真实认证 HTTP/PostgreSQL/Worker/Artifact 验证
+批准、拒绝及 UNKNOWN 对账恢复；脚本的通用工具和 MockProvider 只在测试进程注册，不进入部署入口。

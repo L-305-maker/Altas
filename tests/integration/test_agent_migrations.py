@@ -53,6 +53,7 @@ def test_agent_migration_roundtrip_preserves_existing_workflows(
             "agent_model_calls",
             "agent_actions",
         } <= set(tables)
+        command.upgrade(config, "head")  # 当前实现只在当前 schema 上运行。
         SQLAgentStore(store).open(
             task,
             AgentSnapshot(
