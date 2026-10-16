@@ -44,7 +44,9 @@ class ApprovalDecision(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
     expected_revision: Counter
     decision: Literal["approved", "rejected"]
-    actor: AuditLabel
+    actor: AuditLabel = Field(
+        description="Audit label supplied by the authenticated single-tenant operator; not independently verified identity"
+    )
     reason: str = Field(default="", max_length=1000)
 
 
@@ -81,7 +83,9 @@ class ReconciliationDecision(BaseModel):
     result: JsonValue = None
     error_code: ErrorCode | None = None
     evidence_reference: str = Field(min_length=1, max_length=1000, pattern=r"\S")
-    actor: AuditLabel
+    actor: AuditLabel = Field(
+        description="Audit label supplied by the authenticated single-tenant operator; not independently verified identity"
+    )
     reason: str = Field(default="", max_length=1000)
 
     @model_validator(mode="after")

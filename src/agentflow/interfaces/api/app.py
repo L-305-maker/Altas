@@ -27,9 +27,17 @@ from sqlalchemy.exc import SQLAlchemyError
 
 from agentflow import __version__
 from agentflow.application.orchestration.worker import HandlerRegistry
+from agentflow.application.ports.agent_store import AgentStoreUnavailable, StateConflict
 from agentflow.bootstrap import build_handlers
 from agentflow.config import Settings
+from agentflow.domain.agent.review import (
+    ActionApproval,
+    ActionReconciliation,
+    ApprovalDecision,
+    ReconciliationDecision,
+)
 from agentflow.domain.workflow.spec import WorkflowSpec
+from agentflow.infrastructure.persistence.agent_store import SQLAgentStore
 from agentflow.infrastructure.persistence.store import (
     ConflictError,
     NotFoundError,
@@ -100,6 +108,7 @@ def create_app(
     owned_store = store is None
     store = store or Store(settings.database_url.get_secret_value())
     handlers = handlers if handlers is not None else build_handlers(settings)
+    agents = SQLAgentStore(store)
 
     @asynccontextmanager
     async def lifespan(app):
@@ -143,6 +152,58 @@ def create_app(
     @app.exception_handler(SQLAlchemyError)
     async def database_unavailable(_request, _error):
         return JSONResponse({"detail": "database unavailable"}, 503)
+
+    @app.exception_handler(StateConflict)
+    async def agent_conflict(_request, _error):
+        return JSONResponse({"detail": "agent state conflict"}, 409)
+
+    @app.exception_handler(AgentStoreUnavailable)
+    async def agent_unavailable(_request, _error):
+        return JSONResponse({"detail": "agent persistence unavailable"}, 503)
+
+    @app.get(
+        "/api/agent/action-approvals",
+        dependencies=auth,
+        response_model=list[ActionApproval],
+    )
+    def pending_action_approvals(
+        run_id: str | None = None, limit: int = Query(100, ge=1, le=200)
+    ):
+        return agents.list_pending_action_approvals(run_id, limit)
+
+    @app.get(
+        "/api/agent/action-approvals/{approval_id}",
+        dependencies=auth,
+        response_model=ActionApproval,
+    )
+    def action_approval(approval_id: str):
+        return agents.get_action_approval(approval_id)
+
+    @app.post(
+        "/api/agent/action-approvals/{approval_id}/decision",
+        dependencies=auth,
+        response_model=ActionApproval,
+    )
+    def decide_action(approval_id: str, body: ApprovalDecision):
+        return agents.decide_action(approval_id, body)
+
+    @app.get("/api/agent/reconciliations/pending", dependencies=auth)
+    def pending_reconciliation(
+        run_id: str | None = None, limit: int = Query(100, ge=1, le=200)
+    ):
+        return agents.list_unknown_actions(run_id, limit)
+
+    @app.post(
+        "/api/agent/sessions/{session_id}/actions/{action_id}/reconciliations",
+        dependencies=auth,
+        response_model=ActionReconciliation,
+    )
+    def reconcile_action(session_id: str, action_id: str, body: ReconciliationDecision):
+        return agents.reconcile_action(session_id, action_id, body)
+
+    @app.get("/api/agent/sessions/{session_id}/reviews", dependencies=auth)
+    def action_review_history(session_id: str):
+        return agents.review_history(session_id)
 
     @app.get("/health")
     def health():
