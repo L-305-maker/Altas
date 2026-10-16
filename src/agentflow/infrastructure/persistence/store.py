@@ -420,6 +420,12 @@ class Store:
             if not owned:
                 return False
             run, row = owned
+            if isinstance(error, TimeoutError) and session.scalar(
+                select(AgentSessionRow.id).where(AgentSessionRow.step_row_id == row.id)
+            ):
+                # Agent 取消清理可能尚未提交；普通失败不能把待对账的工具改成终态。
+                # 保留预约与原租约，交由清理结果或租约过期恢复，不声称已提交失败。
+                return False
             # 异常消息可能包含 HTTP Authorization 或输入片段，持久化仅保留类型。
             self._fail(
                 session,

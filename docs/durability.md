@@ -177,3 +177,27 @@ PR4 必须补充有鉴权的行动审批、对账证据与等待状态恢复事�
 
 临时 PostgreSQL 验证脚本同时执行新 Runner/Worker 集成、接管 fencing 和真实子进程退出测试。
 真实模型 API、Docker sandbox 和 Compose 仍需各自的环境验证，不能用 SQLite 或 MockTransport 代替。
+
+### 取消信号与有界清理
+
+Python 协程取消与 Workflow 业务取消分开处理。DurableRunner 在等待模型或工具时收到
+CancelledError，会尽力持久化未知结果，随后始终重抛原始 CancelledError，保留取消原因。
+外层 asyncio.timeout 因此能产生 TimeoutError，Worker 关闭也不会被伪装成正常返回。
+
+| 取消来源 | 持久状态 |
+| --- | --- |
+| 模型请求中的协程取消/步骤超时 | 有效租约下记录模型 UNKNOWN，Agent/Step fail-closed 失败 |
+| 工具执行中的协程取消/步骤超时 | 有效租约下 INFLIGHT → UNKNOWN，Agent 等待对账、Step waiting，释放租约 |
+| Workflow 业务取消 | Store.cancel 原子提交 CANCELLED 和未确认工具 UNKNOWN；旧 Runner 不得覆盖 |
+| 清理失败、租约失效、冲突、二次取消或清理等待超时 | 原始取消继续传播，不声称清理成功；保留数据库事实，由租约恢复处理 |
+
+清理协程直接在调用者中等待，最多等待 5 秒；不创建 shield 后脱离调用者的 asyncio Task，
+不调用 uncancel 隐藏取消。第二次取消可以提前停止等待。同步数据库线程无法被协程强制终止，
+底层数据库操作可能在调用者退出后返回；仍使用旧 Task/token/revision，且提交前再次检查数据库租约。
+5 秒限制的是协程等待，不是数据库驱动线程的强制终止；数据库连接/语句超时需由部署环境约束。
+线程延迟返回不授予新所有权，也不能据此声称外部副作用 exactly-once。
+
+Worker 的 asyncio.timeout 会把取消转换为步骤 TimeoutError。Store.fail 在有效执行所有权下
+发现已有 AgentSession 时，对该超时返回 False、不提交失败，避免将工具等待对账覆盖成终态，
+也避免清理未完成时绕过 AgentStore 做整步重试。清理已成功时，原 token 已释放，同样拒绝重复写入。
+未创建 AgentSession 的普通 Handler 仍按原规则失败/重试；旧 AgentRunner 的取消传播保持不变。

@@ -363,9 +363,18 @@ async def test_worker_honors_durable_result_without_double_commit(
     handlers.register("agent", handler)
     attempts = []
     monkeypatch.setattr(store, "complete", lambda *args: attempts.append("complete"))
-    monkeypatch.setattr(store, "fail", lambda *args: attempts.append("fail"))
+    fail = store.fail
+
+    def timeout_probe(task, error):
+        assert isinstance(error, TimeoutError)
+        before = store.get_run(task.run_id)
+        assert fail(task, error) is False
+        assert store.get_run(task.run_id) == before
+        attempts.append("timeout_probe")
+
+    monkeypatch.setattr(store, "fail", timeout_probe)
     assert await Worker(store, handlers).tick()
-    assert attempts == []
+    assert attempts == (["timeout_probe"] if "timeout" in kind else [])
     assert persisted(store)["status"] == (
         "waiting_reconciliation"
         if "tool" in kind
