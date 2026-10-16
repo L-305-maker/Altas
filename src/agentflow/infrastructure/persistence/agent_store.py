@@ -23,16 +23,27 @@ from agentflow.application.ports.agent_store import (
     StoredAction,
 )
 from agentflow.domain.agent.action import Action, digest_arguments
+from agentflow.domain.agent.review import (
+    ActionApproval,
+    ActionReconciliation,
+    ApprovalDecision,
+    ReconciliationDecision,
+    ToolBinding,
+)
 from agentflow.domain.agent.run import AgentSnapshot
 from agentflow.domain.agent.status import ActionStatus, AgentStatus
 from agentflow.domain.execution.exception import InvalidStateTransitionError
 from agentflow.domain.execution.task import Task
 from agentflow.domain.workflow.spec import WorkflowSpec
 from agentflow.infrastructure.persistence.models import (
+    AgentActionApprovalRow,
+    AgentActionReconciliationRow,
     AgentActionRow,
     AgentMessageRow,
     AgentModelCallRow,
     AgentSessionRow,
+    RunRow,
+    StepRow,
 )
 from agentflow.infrastructure.persistence.store import NotFoundError, Store, json_bytes
 
@@ -40,6 +51,8 @@ MAX_MESSAGE_BYTES = 100_000
 MAX_ARGUMENT_BYTES = 100_000
 MAX_RESULT_BYTES = 100_000
 MAX_SESSION_BYTES = 8_000_000
+# Covers bounded actor/reason/evidence, identifiers and JSON escaping/record keys.
+REVIEW_METADATA_RESERVE_BYTES = 20_000
 
 
 def checked_json(value: JsonValue, limit: int = 2_000_000) -> JsonValue:
@@ -100,8 +113,17 @@ class SQLAgentStore:
             .with_for_update()
         )
 
-    def _read(self, db, row):
+    def _read(self, db, row, *, reserve_capacity=False):
         try:
+            # Run/Step/Session 已持锁；审批先于模型和 Action 获取锁。
+            approval_rows = list(
+                db.scalars(
+                    select(AgentActionApprovalRow)
+                    .where(AgentActionApprovalRow.session_id == row.id)
+                    .order_by(AgentActionApprovalRow.id)
+                    .with_for_update()
+                )
+            )
             snapshot = AgentSnapshot.model_validate(checked_json(row.snapshot))
             initial = AgentSnapshot.model_validate(checked_json(row.initial_snapshot))
             if (
@@ -179,30 +201,92 @@ class SQLAgentStore:
                         arguments=arguments,
                         idempotency_key=a.idempotency_key,
                         result=checked_json(a.result, MAX_RESULT_BYTES),
+                        tool_binding=ToolBinding.model_validate(a.tool_binding)
+                        if a.tool_binding is not None
+                        else None,
                     )
                 )
             actions.sort(
                 key=lambda a: (call_order[a.action.model_call_id], a.call_index)
             )
+            if any(
+                a.tool_binding is not None and not a.tool_binding.matches(a.action)
+                for a in actions
+            ):
+                raise StateConflict("stored tool binding differs from action")
             state = AgentSession(
                 snapshot=snapshot,
                 messages=messages,
                 model_calls=calls,
                 actions=tuple(actions),
+                approvals=tuple(self._approval(a, actions) for a in approval_rows),
+                reconciliations=tuple(
+                    self._reconciliation(r)
+                    for r in db.scalars(
+                        select(AgentActionReconciliationRow)
+                        .where(AgentActionReconciliationRow.session_id == row.id)
+                        .order_by(
+                            AgentActionReconciliationRow.created_at,
+                            AgentActionReconciliationRow.id,
+                        )
+                    )
+                ),
             )
             self._validate_history(state)
-            self._check_capacity(initial, state)
+            self._check_capacity(initial, state, reserve=reserve_capacity)
             return state
         except (ValidationError, KeyError, TypeError):
             raise StateConflict("stored agent data is inconsistent") from None
 
-    def _check_capacity(self, initial, state):
+    def _approval(self, row, actions):
+        stored = next((a for a in actions if a.action.id == row.action_id), None)
+        if (
+            stored is None
+            or stored.tool_binding is None
+            or row.tool_name != stored.tool_binding.tool_name
+            or row.tool_version != stored.tool_binding.tool_version
+            or row.tool_policy_digest != stored.tool_binding.tool_policy_digest
+            or row.arguments_digest != stored.action.arguments_digest
+        ):
+            raise StateConflict("approval binding differs from stored action")
+        return ActionApproval(
+            approval_id=row.id,
+            session_id=row.session_id,
+            action_id=row.action_id,
+            binding=stored.tool_binding,
+            arguments_digest=row.arguments_digest,
+            decision=row.decision,
+            actor=row.actor,
+            reason=row.reason,
+            created_at=row.created_at,
+            decided_at=row.decided_at,
+            consumed_at=row.consumed_at,
+        )
+
+    def _reconciliation(self, row):
+        return ActionReconciliation(
+            request_id=row.id,
+            session_id=row.session_id,
+            action_id=row.action_id,
+            expected_revision=row.request_revision,
+            previous_status=row.previous_status,
+            confirmed_status=row.confirmed_status,
+            result=checked_json(row.result, MAX_RESULT_BYTES),
+            error_code=row.error_code,
+            evidence_reference=row.evidence_reference,
+            actor=row.actor,
+            reason=row.reason,
+            applied=row.applied,
+            created_at=row.created_at,
+        )
+
+    def _check_capacity(self, initial, state, *, reserve=False):
         data = {
             "initial": initial.model_dump(mode="json"),
             "state": state.model_dump(mode="json"),
         }
         checked_json(data, MAX_SESSION_BYTES)
-        if state.snapshot.status.is_terminal:
+        if not reserve or state.snapshot.status.is_terminal:
             return
         # 这是容量估算，不会写入数据库。派发前为所有未知结果及其观察预留空间，
         # 避免历史填满后无法取消/记录崩溃。使用最长错误码，并为版本增长留余量。
@@ -242,7 +326,33 @@ class SQLAgentStore:
         AgentSnapshot.model_validate(snapshot)
         checked_json(snapshot, 2_000_000 - 1024)
         data["control_margin"] = "x" * 1024
-        checked_json(data, MAX_SESSION_BYTES)
+        remaining = 0
+        approvals = {a.action_id: a for a in state.approvals}
+        for stored in state.actions:
+            if stored.action.status not in {
+                ActionStatus.PROPOSED,
+                ActionStatus.INFLIGHT,
+                ActionStatus.UNKNOWN,
+            }:
+                continue
+            # A resolved UNKNOWN may store its full result three times: the
+            # Action, appended observation and immutable reconciliation evidence.
+            remaining += 3 * MAX_RESULT_BYTES + REVIEW_METADATA_RESERVE_BYTES
+            if (
+                stored.action.status == ActionStatus.PROPOSED
+                and stored.tool_binding is not None
+                and stored.tool_binding.protected
+            ):
+                approval = approvals.get(stored.action.id)
+                if approval is None:
+                    remaining += REVIEW_METADATA_RESERVE_BYTES
+                elif approval.decision == "pending":
+                    remaining += max(
+                        0,
+                        REVIEW_METADATA_RESERVE_BYTES
+                        - len(json_bytes(approval.model_dump(mode="json"))),
+                    )
+        checked_json(data, MAX_SESSION_BYTES - remaining)
 
     def _validate_history(self, state):
         snapshot, calls, messages = state.snapshot, state.model_calls, state.messages
@@ -415,6 +525,7 @@ class SQLAgentStore:
         data = initial_snapshot.model_dump(mode="json")
         with self._owned_transaction(task) as (db, run, step):
             row = self._session(db, step)
+            created = row is None
             if row is None:
                 now = self.store._now(db)
                 row = AgentSessionRow(
@@ -435,7 +546,7 @@ class SQLAgentStore:
                 )
             elif row.initial_snapshot != data:
                 raise StateConflict("step already has a different agent initialization")
-            result = self._read(db, row)
+            result = self._read(db, row, reserve_capacity=created)
             if result.messages[: len(messages)] != tuple(messages):
                 raise StateConflict("initial messages differ from stored history")
         return result
@@ -448,7 +559,7 @@ class SQLAgentStore:
             result = self._read(db, row)
         return result
 
-    def _apply(self, db, run, step, row, transition):
+    def _apply(self, db, run, step, row, transition, *, operator=False):
         try:
             transition = AgentTransition.model_validate(
                 checked_json(transition.model_dump(mode="json"))
@@ -462,6 +573,44 @@ class SQLAgentStore:
         except (ValueError, InvalidStateTransitionError):
             raise StateConflict("invalid agent revision or state transition") from None
         now = self.store._now(db)
+        supplied = set(transition.authorizations)
+        required = set()
+        stored_actions = {a.action.id: a for a in old_state.actions}
+        for previous, action in zip(old.actions, candidate.actions, strict=False):
+            if (
+                previous.status == ActionStatus.UNKNOWN
+                and previous != action
+                and not operator
+            ):
+                raise StateConflict("reconciliation requires an operator transaction")
+            if (
+                previous.status != ActionStatus.PROPOSED
+                or action.status != ActionStatus.INFLIGHT
+            ):
+                continue
+            stored = stored_actions[previous.id]
+            binding = stored.tool_binding
+            if binding is None or not binding.matches(previous):
+                raise StateConflict("dispatch requires a verifiable tool binding")
+            if binding.protected:
+                approval = next(
+                    (a for a in old_state.approvals if a.action_id == action.id), None
+                )
+                if (
+                    approval is None
+                    or not approval.authorizes(previous, binding)
+                    or approval.consumed_at is not None
+                    or approval.approval_id not in supplied
+                ):
+                    raise StateConflict(
+                        "protected dispatch requires unused action approval"
+                    )
+                required.add(approval.approval_id)
+                db.get(AgentActionApprovalRow, approval.approval_id).consumed_at = now
+        if len(supplied) != len(transition.authorizations) or supplied != required:
+            raise StateConflict(
+                "authorizations must match protected dispatches exactly"
+            )
         changed = db.execute(
             update(AgentSessionRow)
             .where(
@@ -486,6 +635,7 @@ class SQLAgentStore:
             and candidate.status == AgentStatus.ACTIONS_PENDING
         )
         arguments = {a.action_id: a.arguments for a in transition.arguments}
+        bindings = {a.action_id: a.tool_binding for a in transition.arguments}
         if len(arguments) != len(transition.arguments) or set(arguments) != (
             {a.id for a in candidate.actions} if new_batch else set()
         ):
@@ -501,6 +651,9 @@ class SQLAgentStore:
         for index, action in enumerate(candidate.actions):
             if new_batch:
                 values = checked_json(arguments[action.id], MAX_ARGUMENT_BYTES)
+                binding = bindings[action.id]
+                if binding is not None and not binding.matches(action):
+                    raise StateConflict("tool binding differs from action metadata")
                 if digest_arguments(values) != action.arguments_digest:
                     raise AgentDataError("action arguments digest mismatch")
                 db.add(
@@ -519,6 +672,9 @@ class SQLAgentStore:
                         error_code=action.error_code,
                         created_at=now,
                         updated_at=now,
+                        tool_binding=binding.model_dump(mode="json")
+                        if binding
+                        else None,
                     )
                 )
             elif previous.get(action.id) != action:
@@ -565,7 +721,7 @@ class SQLAgentStore:
         )
         db.flush()
         db.expire(row)
-        return self._read(db, row)
+        return self._read(db, row, reserve_capacity=not operator)
 
     def _model_update(self, db, row, old, transition, now):
         candidate, outcome = transition.snapshot, transition.model_result
@@ -659,6 +815,8 @@ class SQLAgentStore:
 
     def _commit(self, task, transition, mode, output=None):
         status = transition.snapshot.status
+        if status == AgentStatus.WAITING_APPROVAL:
+            raise StateConflict("approval waiting requires a durable approval request")
         allowed = {
             "transition": {
                 AgentStatus.READY_MODEL,
@@ -782,8 +940,9 @@ class SQLAgentStore:
         if re.fullmatch(r"[a-zA-Z][a-zA-Z0-9_.-]{0,79}", error) is None:
             error = "AgentExecutionError"
         state = self._read(db, row)
-        if error == "LeaseExpired" and step.attempts < spec.max_attempts:
+        if error == "LeaseExpired":
             if any(a.status == ActionStatus.INFLIGHT for a in state.snapshot.actions):
+                row.continuation_pending = False
                 self._interrupt(
                     db, run, step, row, AgentStatus.WAITING_RECONCILIATION, error
                 )
@@ -800,6 +959,7 @@ class SQLAgentStore:
                     {"step": step.key, "agent_state": "waiting_reconciliation"},
                 )
                 return True
+        if error == "LeaseExpired" and step.attempts < spec.max_attempts:
             if state.snapshot.status == AgentStatus.MODEL_INFLIGHT:
                 self._interrupt(db, run, step, row, AgentStatus.MODEL_INFLIGHT, error)
             return False  # 沿用 Step 的尝试上限/退避，下一 Worker 恢复同一 Agent。
@@ -821,6 +981,427 @@ class SQLAgentStore:
     def _cancel_step(self, db, run, step):
         row = self._session(db, step)
         if row is not None:
+            row.continuation_pending = False
             self._interrupt(
                 db, run, step, row, AgentStatus.CANCELLED, "WorkflowCancelled"
             )
+            for approval in db.scalars(
+                select(AgentActionApprovalRow).where(
+                    AgentActionApprovalRow.session_id == row.id,
+                    AgentActionApprovalRow.decision == "pending",
+                )
+            ):
+                approval.decision = "cancelled"
+                approval.decided_at = self.store._now(db)
+
+    @contextmanager
+    def _operator_transaction(self, session_id):
+        try:
+            with self.store.transaction() as db:
+                identity = db.execute(
+                    select(StepRow.run_id, StepRow.id)
+                    .join(AgentSessionRow, AgentSessionRow.step_row_id == StepRow.id)
+                    .where(AgentSessionRow.id == session_id)
+                ).first()
+                if identity is None:
+                    raise NotFoundError("agent session not found")
+                run = self.store._locked_run(db, identity[0])
+                step = db.scalar(
+                    select(StepRow).where(StepRow.id == identity[1]).with_for_update()
+                )
+                row = self._session(db, step)
+                yield db, run, step, row, self._read(db, row)
+        except IntegrityError:
+            raise StateConflict("action review record conflicts") from None
+        except SQLAlchemyError:
+            raise AgentStoreUnavailable(
+                "action review persistence unavailable"
+            ) from None
+
+    def _ready_review(self, db, run, step, row):
+        # Normal human review continues this attempt; a crashed lease consumed it.
+        row.continuation_pending = step.error != "LeaseExpired"
+        step.status, step.token, step.lease_until = "ready", None, None
+        step.available_at, step.error = self.store._now(db), None
+        db.flush()
+        self.store._schedule(db, run)
+
+    def request_action_approval(
+        self, task: Task, action_id: str, expected_revision: int
+    ) -> AgentSession:
+        with self._owned_transaction(task) as (db, run, step):
+            row = self._session(db, step)
+            if row is None:
+                raise StateConflict("agent session is not initialized")
+            state = self._read(db, row)
+            stored = next((a for a in state.actions if a.action.id == action_id), None)
+            if (
+                state.snapshot.revision != expected_revision
+                or state.snapshot.status != AgentStatus.ACTIONS_PENDING
+                or stored is None
+                or stored.action not in state.snapshot.actions
+                or stored.action.status != ActionStatus.PROPOSED
+                or stored.tool_binding is None
+                or not stored.tool_binding.protected
+                or any(
+                    a.status == ActionStatus.INFLIGHT for a in state.snapshot.actions
+                )
+                or any(
+                    a.decision == "pending" or a.action_id == action_id
+                    for a in state.approvals
+                )
+            ):
+                raise StateConflict("action cannot request approval in this state")
+            binding, now = stored.tool_binding, self.store._now(db)
+            db.add(
+                AgentActionApprovalRow(
+                    id=str(uuid4()),
+                    session_id=row.id,
+                    action_id=action_id,
+                    tool_name=binding.tool_name,
+                    tool_version=binding.tool_version,
+                    tool_policy_digest=binding.tool_policy_digest,
+                    arguments_digest=stored.action.arguments_digest,
+                    decision="pending",
+                    created_at=now,
+                )
+            )
+            db.flush()
+            candidate = AgentSnapshot.model_validate(
+                {
+                    **state.snapshot.model_dump(),
+                    "revision": expected_revision + 1,
+                    "status": AgentStatus.WAITING_APPROVAL,
+                }
+            )
+            result = self._apply(
+                db, run, step, row, AgentTransition(snapshot=candidate)
+            )
+            step.status, step.token, step.lease_until = "waiting", None, None
+            self.store._event(
+                db,
+                run.id,
+                "agent.approval_requested",
+                {"step": step.key, "action_id": action_id},
+            )
+            db.flush()
+            self.store._schedule(db, run)
+        return result
+
+    def get_action_approval(self, approval_id: str) -> ActionApproval:
+        try:
+            with self.store.transaction() as db:
+                record = db.get(AgentActionApprovalRow, approval_id)
+                if record is None:
+                    raise NotFoundError("action approval not found")
+                session_id = record.session_id
+            with self._operator_transaction(session_id) as (
+                _db,
+                _run,
+                _step,
+                _row,
+                state,
+            ):
+                return next(a for a in state.approvals if a.approval_id == approval_id)
+        except SQLAlchemyError:
+            raise AgentStoreUnavailable(
+                "action review persistence unavailable"
+            ) from None
+
+    def decide_action(
+        self, approval_id: str, decision: ApprovalDecision
+    ) -> ActionApproval:
+        decision = ApprovalDecision.model_validate(decision.model_dump())
+        info = self.get_action_approval(approval_id)
+        with self._operator_transaction(info.session_id) as (db, run, step, row, state):
+            approval = next(a for a in state.approvals if a.approval_id == approval_id)
+            if run.status == "cancelled":
+                raise StateConflict("cancelled workflow cannot approve actions")
+            if approval.decision != "pending":
+                if (approval.decision, approval.actor, approval.reason) == (
+                    decision.decision,
+                    decision.actor,
+                    decision.reason,
+                ):
+                    return approval
+                raise StateConflict("action approval already has a different decision")
+            if (
+                run.status in {"failed", "succeeded"}
+                or step.status != "waiting"
+                or step.token is not None
+                or state.snapshot.status != AgentStatus.WAITING_APPROVAL
+                or state.snapshot.revision != decision.expected_revision
+            ):
+                raise StateConflict("action approval revision or waiting state changed")
+            action = next(
+                (a for a in state.snapshot.actions if a.id == approval.action_id), None
+            )
+            if action is None or action.status != ActionStatus.PROPOSED:
+                raise StateConflict("action approval no longer matches a proposal")
+            saved = db.get(AgentActionApprovalRow, approval_id)
+            saved.decision, saved.actor, saved.reason = (
+                decision.decision,
+                decision.actor,
+                decision.reason,
+            )
+            saved.decided_at = self.store._now(db)
+            observations = ()
+            actions = state.snapshot.actions
+            if decision.decision == "rejected":
+                actions = tuple(
+                    a.transition(ActionStatus.DENIED, error_code="ActionRejected")
+                    if a.id == action.id
+                    else a
+                    for a in actions
+                )
+                observations = (
+                    ActionObservation(
+                        sequence=len(state.messages), action_id=action.id, result=None
+                    ),
+                )
+            candidate = AgentSnapshot.model_validate(
+                {
+                    **state.snapshot.model_dump(),
+                    "revision": state.snapshot.revision + 1,
+                    "status": AgentStatus.ACTIONS_PENDING,
+                    "actions": actions,
+                }
+            )
+            result = self._apply(
+                db,
+                run,
+                step,
+                row,
+                AgentTransition(snapshot=candidate, observations=observations),
+                operator=True,
+            )
+            self._ready_review(db, run, step, row)
+            self.store._event(
+                db,
+                run.id,
+                "agent.approval_decided",
+                {
+                    "step": step.key,
+                    "action_id": action.id,
+                    "decision": decision.decision,
+                },
+            )
+            answer = next(a for a in result.approvals if a.approval_id == approval_id)
+        return answer
+
+    def reconcile_action(
+        self, session_id: str, action_id: str, decision: ReconciliationDecision
+    ) -> ActionReconciliation:
+        decision = ReconciliationDecision.model_validate(
+            checked_json(decision.model_dump(mode="json"))
+        )
+        with self._operator_transaction(session_id) as (db, run, step, row, state):
+            duplicate = db.get(AgentActionReconciliationRow, decision.request_id)
+            if duplicate is not None:
+                record = self._reconciliation(duplicate)
+                if (
+                    record.session_id == session_id
+                    and record.action_id == action_id
+                    and ReconciliationDecision.model_validate(decision.model_dump())
+                    == ReconciliationDecision.model_validate(
+                        {
+                            k: v
+                            for k, v in record.model_dump().items()
+                            if k in ReconciliationDecision.model_fields
+                        }
+                    )
+                ):
+                    return record
+                raise StateConflict("reconciliation request id has different content")
+            stored = next((a for a in state.actions if a.action.id == action_id), None)
+            if stored is None:
+                raise NotFoundError("agent action not found")
+            old = state.snapshot
+            if decision.expected_revision != old.revision:
+                raise StateConflict("agent revision changed")
+            terminal = old.status.is_terminal
+            if stored.action.status != ActionStatus.UNKNOWN:
+                raise StateConflict("reconciliation requires an unknown action")
+            if not terminal and (
+                run.status in {"failed", "succeeded", "cancelled"}
+                or step.status != "waiting"
+                or step.token is not None
+                or old.status != AgentStatus.WAITING_RECONCILIATION
+            ):
+                raise StateConflict("action is not waiting for reconciliation")
+            record = AgentActionReconciliationRow(
+                id=decision.request_id,
+                session_id=session_id,
+                action_id=action_id,
+                request_revision=old.revision,
+                previous_status=stored.action.status.value,
+                confirmed_status=decision.confirmed_status,
+                result=checked_json(decision.result, MAX_RESULT_BYTES),
+                error_code=decision.error_code,
+                evidence_reference=decision.evidence_reference,
+                actor=decision.actor,
+                reason=decision.reason,
+                applied=not terminal,
+                created_at=self.store._now(db),
+            )
+            db.add(record)
+            db.flush()
+            if not terminal:
+                action = stored.action.reconcile(
+                    ActionStatus(decision.confirmed_status),
+                    error_code=decision.error_code,
+                )
+                actions = tuple(action if a.id == action_id else a for a in old.actions)
+                waiting = any(a.status == ActionStatus.UNKNOWN for a in actions)
+                spec = next(
+                    s
+                    for s in WorkflowSpec.model_validate(run.spec).steps
+                    if s.id == step.key
+                )
+                retries_exhausted = (
+                    not waiting
+                    and step.error == "LeaseExpired"
+                    and step.attempts >= spec.max_attempts
+                )
+                candidate = AgentSnapshot.model_validate(
+                    {
+                        **old.model_dump(),
+                        "revision": old.revision + 1,
+                        "actions": actions,
+                        "status": AgentStatus.WAITING_RECONCILIATION
+                        if waiting
+                        else AgentStatus.FAILED
+                        if retries_exhausted
+                        else AgentStatus.ACTIONS_PENDING,
+                    }
+                )
+                self._apply(
+                    db,
+                    run,
+                    step,
+                    row,
+                    AgentTransition(
+                        snapshot=candidate,
+                        observations=(
+                            ActionObservation(
+                                sequence=len(state.messages),
+                                action_id=action_id,
+                                result=decision.result,
+                            ),
+                        ),
+                    ),
+                    operator=True,
+                )
+                if retries_exhausted:
+                    step.status, step.token, step.lease_until = "failed", None, None
+                    self.store._event(
+                        db,
+                        run.id,
+                        "step.failed",
+                        {
+                            "step": step.key,
+                            "error": "LeaseExpired",
+                            "attempt": step.attempts,
+                        },
+                    )
+                    db.flush()
+                    self.store._schedule(db, run)
+                elif not waiting:
+                    self._ready_review(db, run, step, row)
+            else:
+                self._read(db, row)  # 终态只追加审计，并校验累计体积。
+            self.store._event(
+                db,
+                run.id,
+                "agent.reconciled",
+                {"step": step.key, "action_id": action_id, "applied": not terminal},
+            )
+            answer = self._reconciliation(record)
+        return answer
+
+    def review_history(self, session_id: str) -> dict:
+        with self._operator_transaction(session_id) as (_db, _run, _step, _row, state):
+            return {
+                "session_id": session_id,
+                "revision": state.snapshot.revision,
+                "approvals": state.approvals,
+                "reconciliations": state.reconciliations,
+            }
+
+    def list_pending_action_approvals(
+        self, run_id: str | None = None, limit: int = 100
+    ) -> tuple[ActionApproval, ...]:
+        try:
+            with self.store.transaction() as db:
+                query = (
+                    select(AgentActionApprovalRow.id)
+                    .join(
+                        AgentSessionRow,
+                        AgentSessionRow.id == AgentActionApprovalRow.session_id,
+                    )
+                    .join(StepRow, StepRow.id == AgentSessionRow.step_row_id)
+                    .join(RunRow, RunRow.id == StepRow.run_id)
+                    .where(
+                        AgentActionApprovalRow.decision == "pending",
+                        RunRow.status.not_in(["failed", "succeeded", "cancelled"]),
+                    )
+                )
+                if run_id is not None:
+                    query = query.where(RunRow.id == run_id)
+                ids = list(
+                    db.scalars(
+                        query.order_by(
+                            AgentActionApprovalRow.created_at, AgentActionApprovalRow.id
+                        ).limit(limit)
+                    )
+                )
+            return tuple(
+                a
+                for i in ids
+                if (a := self.get_action_approval(i)).decision == "pending"
+            )
+        except SQLAlchemyError:
+            raise AgentStoreUnavailable(
+                "action review persistence unavailable"
+            ) from None
+
+    def list_unknown_actions(
+        self, run_id: str | None = None, limit: int = 100
+    ) -> list[dict]:
+        try:
+            with self.store.transaction() as db:
+                query = (
+                    select(AgentActionRow, AgentSessionRow, StepRow.run_id)
+                    .join(
+                        AgentSessionRow, AgentSessionRow.id == AgentActionRow.session_id
+                    )
+                    .join(StepRow, StepRow.id == AgentSessionRow.step_row_id)
+                    .where(AgentActionRow.status == "unknown")
+                )
+                if run_id is not None:
+                    query = query.where(StepRow.run_id == run_id)
+                return [
+                    {
+                        "session_id": s.id,
+                        "action_id": a.id,
+                        "run_id": r,
+                        "revision": s.revision,
+                        "agent_status": AgentSnapshot.model_validate(
+                            checked_json(s.snapshot)
+                        ).status.value,
+                        "tool_name": a.tool_name,
+                        "arguments_digest": a.arguments_digest,
+                        "idempotency_key": a.idempotency_key,
+                    }
+                    for a, s, r in db.execute(
+                        query.order_by(
+                            AgentActionRow.created_at, AgentActionRow.id
+                        ).limit(limit)
+                    )
+                ]
+        except ValidationError:
+            raise StateConflict("stored agent data is inconsistent") from None
+        except SQLAlchemyError:
+            raise AgentStoreUnavailable(
+                "action review persistence unavailable"
+            ) from None

@@ -283,7 +283,7 @@ async def test_invalid_final_never_succeeds(store, text, reason):
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("policy", ["approval", "not_allowed", "unsafe"])
-async def test_unapproved_or_unauthorized_tools_are_denied(store, policy):
+async def test_protected_tools_wait_and_unauthorized_tools_are_denied(store, policy):
     run = submit(store)
     invoked = []
 
@@ -309,7 +309,11 @@ async def test_unapproved_or_unauthorized_tools_are_denied(store, policy):
     )
     assert not invoked
     assert persisted(store)["budget"]["tool_calls"] == 0
-    assert store.get_run(run)["status"] == "succeeded"
+    assert store.get_run(run)["status"] == (
+        "succeeded" if policy == "not_allowed" else "waiting"
+    )
+    if policy != "not_allowed":
+        assert len(SQLAgentStore(store).list_pending_action_approvals()) == 1
 
 
 @pytest.mark.asyncio
@@ -334,9 +338,11 @@ async def test_worker_honors_durable_result_without_double_commit(
     store, monkeypatch, kind
 ):
     submit(store)
+    deadline = None
 
     async def invoke(args):
         if kind == "tool_timeout":
+            deadline.reschedule(asyncio.get_running_loop().time() + 0.1)
             await asyncio.sleep(1)
         raise TimeoutError("private")
 
@@ -350,6 +356,7 @@ async def test_worker_honors_durable_result_without_double_commit(
     if kind == "model_timeout":
 
         async def respond(*args):
+            deadline.reschedule(asyncio.get_running_loop().time() + 0.1)
             await asyncio.sleep(1)
 
         provider.respond = respond
@@ -357,7 +364,8 @@ async def test_worker_honors_durable_result_without_double_commit(
     handlers = HandlerRegistry()
 
     async def handler(task):
-        async with asyncio.timeout(0.1 if "timeout" in kind else 10):
+        nonlocal deadline
+        async with asyncio.timeout(10) as deadline:
             return await runner.run(task, "goal", allowed={"echo"})
 
     handlers.register("agent", handler)

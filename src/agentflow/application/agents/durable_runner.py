@@ -34,6 +34,7 @@ from agentflow.application.ports.model_provider import (
     ModelRetryableError,
 )
 from agentflow.application.tools.runtime import (
+    ToolApprovalRequired,
     ToolConfirmedFailure,
     ToolDeniedError,
     ToolInvocation,
@@ -45,6 +46,7 @@ from agentflow.domain.agent.budget import (
     AgentBudgetExhaustedError,
     Counter,
 )
+from agentflow.domain.agent.review import ActionExecutionContext
 from agentflow.domain.agent.run import AgentSnapshot
 from agentflow.domain.agent.status import ActionStatus, AgentStatus
 from agentflow.domain.execution.task import Task
@@ -339,7 +341,13 @@ class DurableAgentRunner:
                     side_effect=self.tools.side_effect(call.function.name),
                 )
             )
-            arguments.append(ActionArguments(action_id=action_id, arguments=values))
+            arguments.append(
+                ActionArguments(
+                    action_id=action_id,
+                    arguments=values,
+                    tool_binding=self.tools.binding(call.function.name),
+                )
+            )
         return AgentTransition(
             snapshot=successor(
                 state.snapshot,
@@ -426,8 +434,23 @@ class DurableAgentRunner:
             )
             return saved, None
         stored = next(a for a in state.actions if a.action.id == proposed.id)
+        approval = next(
+            (
+                a
+                for a in state.approvals
+                if a.action_id == proposed.id and a.decision == "approved"
+            ),
+            None,
+        )
+        context = ActionExecutionContext(
+            action=proposed,
+            binding=stored.tool_binding,
+            approval=approval,
+            idempotency_key=stored.idempotency_key,
+        )
         call = mapped_calls(state)[proposed.id]
         code = None
+        needs_approval = False
         try:
             if parse_tool_arguments(call.function.arguments) != stored.arguments:
                 raise StateConflict("stored arguments differ from the model proposal")
@@ -444,7 +467,10 @@ class DurableAgentRunner:
                     stored.arguments,
                     allowed=allowed,
                     side_effect=proposed.side_effect,
+                    context=context,
                 )
+            except ToolApprovalRequired:
+                needs_approval = True
             except ToolDeniedError:
                 code = "ToolDenied"
             except SchemaError:
@@ -461,10 +487,19 @@ class DurableAgentRunner:
             return state, await self._fail(
                 task, state, "AgentExhausted", exhausted=True
             )
+        if needs_approval:
+            saved = await asyncio.to_thread(
+                self.store.request_action_approval,
+                task,
+                proposed.id,
+                state.snapshot.revision,
+            )
+            return saved, self._result(task, saved)
         state = await asyncio.to_thread(
             self.store.commit_transition,
             task,
             AgentTransition(
+                authorizations=(approval.approval_id,) if approval is not None else (),
                 snapshot=successor(
                     state.snapshot,
                     actions=tuple(
@@ -474,11 +509,25 @@ class DurableAgentRunner:
                         for a in state.snapshot.actions
                     ),
                     budget=budget,
-                )
+                ),
             ),
         )
         inflight = next(a for a in state.snapshot.actions if a.id == proposed.id)
-        await asyncio.to_thread(self.store.load, task)
+        state = await asyncio.to_thread(self.store.load, task)
+        approval = next(
+            (
+                a
+                for a in state.approvals
+                if a.action_id == proposed.id and a.decision == "approved"
+            ),
+            None,
+        )
+        context = ActionExecutionContext(
+            action=inflight,
+            binding=stored.tool_binding,
+            approval=approval,
+            idempotency_key=stored.idempotency_key,
+        )
         try:
             result = await self.tools.call_durable(
                 proposed.tool_name,
@@ -486,8 +535,17 @@ class DurableAgentRunner:
                 ToolInvocation(proposed.id, stored.idempotency_key),
                 allowed=allowed,
                 side_effect=proposed.side_effect,
+                context=context,
             )
             result = finite_json(result)
+        except (ToolDeniedError, SchemaError):
+            return await self._observe(
+                task,
+                state,
+                inflight,
+                ActionStatus.FAILED,
+                code="ToolAuthorizationChanged",
+            )
         except ToolConfirmedFailure as error:
             return await self._observe(
                 task, state, inflight, ActionStatus.FAILED, code=error.code

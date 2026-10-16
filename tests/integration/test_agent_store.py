@@ -22,6 +22,7 @@ from agentflow.application.ports.agent_store import (
 )
 from agentflow.domain.agent.action import Action, digest_arguments
 from agentflow.domain.agent.budget import AgentBudget
+from agentflow.domain.agent.review import ToolBinding
 from agentflow.domain.agent.run import AgentSnapshot
 from agentflow.domain.agent.status import ActionStatus, AgentStatus
 from agentflow.domain.workflow.spec import StepSpec, WorkflowSpec
@@ -114,7 +115,9 @@ def reserve(agents, task, state, model_id="model-1"):
     )
 
 
-def response(state, *, action_id="action-1", arguments=None, sequence=None):
+def response(
+    state, *, action_id="action-1", arguments=None, sequence=None, protected=False
+):
     old = state.snapshot
     arguments = {"query": "private input"} if arguments is None else arguments
     action = Action(
@@ -123,6 +126,7 @@ def response(state, *, action_id="action-1", arguments=None, sequence=None):
         model_call_id=old.model_call_id,
         tool_name="lookup",
         arguments_digest=digest_arguments(arguments),
+        side_effect="unsafe" if protected else "read_only",
     )
     return AgentTransition(
         snapshot=candidate(old, status=AgentStatus.ACTIONS_PENDING, actions=(action,)),
@@ -137,7 +141,19 @@ def response(state, *, action_id="action-1", arguments=None, sequence=None):
         model_result=ModelCallResult(
             model_call_id=old.model_call_id, status="succeeded", usage={"tokens": 10}
         ),
-        arguments=(ActionArguments(action_id=action_id, arguments=arguments),),
+        arguments=(
+            ActionArguments(
+                action_id=action_id,
+                arguments=arguments,
+                tool_binding=ToolBinding(
+                    tool_name="lookup",
+                    tool_version="1",
+                    tool_policy_digest="a" * 64,
+                    side_effect=action.side_effect,
+                    requires_approval=protected,
+                ),
+            ),
+        ),
     )
 
 
@@ -394,13 +410,8 @@ def test_terminal_failure_does_not_restart_irreversible_agent(agents):
 
 def test_suspend_releases_lease_without_exposing_unconditional_resume(agents):
     task, state = start(agents)
-    state = propose(agents, task, reserve(agents, task, state))
-    waiting = agents.suspend_agent_step(
-        task,
-        AgentTransition(
-            snapshot=candidate(state.snapshot, status=AgentStatus.WAITING_APPROVAL)
-        ),
-    )
+    state = propose(agents, task, reserve(agents, task, state), protected=True)
+    waiting = agents.request_action_approval(task, "action-1", state.snapshot.revision)
     assert waiting.snapshot.status == AgentStatus.WAITING_APPROVAL
     with agents.store.transaction() as db:
         step = db.scalar(select(StepRow).where(StepRow.run_id == task.run_id))

@@ -11,6 +11,13 @@ from pydantic import BaseModel, ConfigDict, Field, JsonValue
 
 from agentflow.domain.agent.action import Action, ErrorCode, Identifier
 from agentflow.domain.agent.budget import Counter
+from agentflow.domain.agent.review import (
+    ActionApproval,
+    ActionReconciliation,
+    ApprovalDecision,
+    ReconciliationDecision,
+    ToolBinding,
+)
 from agentflow.domain.agent.run import AgentSnapshot
 from agentflow.domain.execution.task import Task
 
@@ -59,6 +66,7 @@ class ActionArguments(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
     action_id: Identifier
     arguments: dict[str, JsonValue]
+    tool_binding: ToolBinding | None = None
 
 
 class ActionObservation(BaseModel):
@@ -75,6 +83,7 @@ class StoredAction(BaseModel):
     arguments: dict[str, JsonValue]
     idempotency_key: str
     result: JsonValue = None
+    tool_binding: ToolBinding | None = None
 
 
 class AgentTransition(BaseModel):
@@ -87,6 +96,7 @@ class AgentTransition(BaseModel):
     arguments: tuple[ActionArguments, ...] = ()
     observations: tuple[ActionObservation, ...] = ()
     error_code: ErrorCode | None = None
+    authorizations: tuple[Identifier, ...] = ()
 
 
 class AgentSession(BaseModel):
@@ -95,9 +105,23 @@ class AgentSession(BaseModel):
     messages: tuple[AgentMessage, ...]
     model_calls: tuple[ModelCallRecord, ...]
     actions: tuple[StoredAction, ...]
+    approvals: tuple[ActionApproval, ...] = ()
+    reconciliations: tuple[ActionReconciliation, ...] = ()
 
 
 class AgentStore(Protocol):
+    def request_action_approval(
+        self, task: Task, action_id: str, expected_revision: int
+    ) -> AgentSession: ...
+
+    def decide_action(
+        self, approval_id: str, decision: ApprovalDecision
+    ) -> ActionApproval: ...
+
+    def reconcile_action(
+        self, session_id: str, action_id: str, decision: ReconciliationDecision
+    ) -> ActionReconciliation: ...
+
     def open(
         self,
         task: Task,
