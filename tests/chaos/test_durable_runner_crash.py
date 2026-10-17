@@ -26,6 +26,7 @@ from agentflow.infrastructure.persistence.store import Store
 PROGRAM = """
 import asyncio, os
 from pathlib import Path
+from sqlalchemy import event
 from agentflow.application.agents.durable_runner import DurableAgentRunner
 from agentflow.application.orchestration.worker import HandlerRegistry, Worker
 from agentflow.application.ports.model_provider import ModelRetryableError
@@ -39,12 +40,15 @@ store = Store(os.environ['AGENTFLOW_CRASH_TEST_DB'])
 agents = SQLAgentStore(store)
 commit = agents.commit_transition
 def crash_after_commit(task, transition):
+    if stage == 'before_model_reservation' and transition.snapshot.status == 'model_inflight':
+        event.listen(store.engine, 'commit', lambda connection: os._exit(13))
     state = commit(task, transition)
     snapshot = state.snapshot
     if ((stage == 'model_response' and snapshot.status == 'actions_pending'
          and all(a.status == 'proposed' for a in snapshot.actions))
         or (stage == 'tool_result' and any(a.status == 'succeeded' for a in snapshot.actions))
-        or (stage == 'model_reservation' and snapshot.status == 'model_inflight')):
+        or (stage == 'model_reservation' and snapshot.status == 'model_inflight')
+        or (stage == 'tool_reservation' and any(a.status == 'inflight' for a in snapshot.actions))):
         os._exit(13)
     return state
 agents.commit_transition = crash_after_commit
@@ -103,9 +107,13 @@ def database(request, tmp_path):
         "tool_dispatch",
         "model_reservation",
         "retry_scheduled",
+        "before_model_reservation",
+        "tool_reservation",
     ],
 )
-def test_real_process_crash_and_new_worker(database, tmp_path, stage):
+def test_real_process_crash_and_new_worker(
+    database, tmp_path, stage, runtime_invariants
+):
     store = Store(database)
     run = store.submit(
         store.register(
@@ -146,6 +154,10 @@ def test_real_process_crash_and_new_worker(database, tmp_path, stage):
     # 真正断开连接后，新的 Engine 与 Worker 读取数据库中的事实。
     store = Store(database)
     try:
+        checkpoint = runtime_invariants(store, run)["work"]
+        if stage == "before_model_reservation":
+            assert checkpoint.agent.snapshot.budget.model_attempts == 0
+            assert checkpoint.agent.snapshot.revision == 0
         with store.transaction() as db:
             ids = list(db.scalars(select(AgentActionRow.id)))
             if stage == "retry_scheduled":
@@ -199,7 +211,7 @@ def test_real_process_crash_and_new_worker(database, tmp_path, stage):
             assert snapshot["budget"]["model_attempts"] == 2
             assert store.get_run(run)["steps"][0]["attempts"] == 1
             assert provider.calls == 1
-        elif stage == "tool_dispatch":
+        elif stage in {"tool_dispatch", "tool_reservation"}:
             assert not tick
             assert snapshot["status"] == "waiting_reconciliation"
             assert snapshot["actions"][0]["status"] == "unknown"
@@ -208,13 +220,27 @@ def test_real_process_crash_and_new_worker(database, tmp_path, stage):
             assert tick and snapshot["status"] == "failed"
             assert snapshot["budget"]["model_attempts"] == 1
             assert provider.calls == 0
+        elif stage == "before_model_reservation":
+            assert tick and store.get_run(run)["status"] == "succeeded"
+            assert snapshot["budget"]["model_rounds"] == 1
+            assert snapshot["budget"]["model_attempts"] == 1
+            assert provider.calls == 1
         else:
             assert tick and store.get_run(run)["status"] == "succeeded"
             assert snapshot["budget"]["model_rounds"] == 2
             assert snapshot["budget"]["tool_calls"] == 1
             assert provider.calls == 1
         assert int(counter.read_text()) == (
-            0 if stage in {"model_reservation", "retry_scheduled"} else 1
+            0
+            if stage
+            in {
+                "model_reservation",
+                "retry_scheduled",
+                "before_model_reservation",
+                "tool_reservation",
+            }
+            else 1
         )
+        runtime_invariants(store, run)
     finally:
         store.close()

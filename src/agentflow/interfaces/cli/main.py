@@ -20,6 +20,13 @@ async def serve_worker(
     settings: Settings, *, once: bool = False, handler_factory=build_handlers
 ) -> None:
     store = Store(settings.database_url.get_secret_value())
+    if settings.telemetry:
+        try:
+            from agentflow.infrastructure.telemetry.metrics import RuntimeMetrics
+
+            store.metrics = RuntimeMetrics()
+        except Exception:
+            pass  # Optional instrumentation cannot prevent workflow execution.
     tracing = local_tracing() if settings.telemetry else None
     try:
         async with AsyncExitStack() as stack:
@@ -49,6 +56,7 @@ async def serve_worker(
                 concurrency=settings.concurrency,
                 poll_seconds=settings.poll_seconds,
                 tracer=tracing.get_tracer("agentflow.worker") if tracing else None,
+                observe=store.observe_execution if settings.telemetry else None,
             )
             if once:
                 await worker.tick()

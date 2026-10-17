@@ -13,6 +13,12 @@ from pydantic import SecretStr
 from agentflow.application.orchestration.worker import Worker
 from agentflow.config import Settings
 from agentflow.infrastructure.persistence.store import Store
+from agentflow.bootstrap import build_handlers as core_handlers
+from agentflow.domain.workflow.spec import StepSpec, WorkflowSpec
+from agentflow.domain.agent.run import AgentSnapshot
+from agentflow.infrastructure.persistence.models import AgentSessionRow
+from agentflow.interfaces.api.app import create_app as core_app
+from sqlalchemy import select
 from applications.living_guideline.bootstrap import build_handlers, create_app
 
 settings = Settings(provider="mock", api_token=SecretStr("wheel-smoke-test-token"))
@@ -32,11 +38,28 @@ try:
         asyncio.run(worker.tick())
         assert store.get_run(run_id)["status"] == "succeeded"
         assert store.artifacts(run_id)[0]["content"]["citations"][0]["quote"] == "evidence"
+    # Exercise installed core modules and the existing authenticated metrics endpoint.
+    observed = Settings(provider="mock", telemetry=True, api_token=SecretStr("wheel-smoke-test-token"))
+    with TestClient(core_app(observed, store)) as client:
+        run_id = store.submit(store.register(WorkflowSpec(name="installed-durable", steps=(
+            StepSpec(id="agent", handler="agent", artifact=True, parameters={"prompt":"wheel goal", "agent":{"mode":"durable_v1"}}),
+        ))), {})
+        worker = Worker(store, core_handlers(observed, store=store), observe=store.observe_execution)
+        assert asyncio.run(worker.tick())
+        assert store.get_run(run_id)["status"] == "succeeded"
+        assert len(store.artifacts(run_id)) == 1
+        with store.transaction() as db:
+            snapshot = AgentSnapshot.model_validate(db.scalar(select(AgentSessionRow)).snapshot)
+        assert snapshot.status == "succeeded" and snapshot.budget.model_attempts == 1
+        assert client.get("/metrics").status_code == 401
+        response = client.get("/metrics", headers={"Authorization":"Bearer wheel-smoke-test-token"})
+        assert response.status_code == 200
+        assert 'agentflow_agent_model_requests_total{outcome="reserved"} 1.0' in response.text
 finally:
     store.close()
 from applications.living_guideline.evaluation import main
 asyncio.run(main())
-print("Installed wheel: reference application flow passed")
+print("Installed wheel: reference application, durable runtime and metrics passed")
 """
 
 

@@ -1,0 +1,200 @@
+"""测试专用的只读持久化契约断言，不补写或修复被检查的状态。"""
+
+import math
+from dataclasses import dataclass
+
+import pytest
+from sqlalchemy import select
+
+from agentflow.application.ports.agent_store import (
+    AgentSession,
+    AgentTransition,
+    LostLease,
+)
+from agentflow.domain.agent.run import AgentSnapshot
+from agentflow.domain.workflow.spec import WorkflowSpec
+from agentflow.infrastructure.persistence.agent_store import SQLAgentStore
+from agentflow.infrastructure.persistence.models import (
+    AgentSessionRow,
+    ArtifactRow,
+    StepRow,
+)
+
+
+@dataclass(frozen=True)
+class Checkpoint:
+    agent: AgentSession
+    step: dict
+    run_status: str
+    continuation: bool
+    artifacts: tuple
+
+
+class RuntimeInvariants:
+    def __init__(self):
+        self.previous = {}
+
+    def __call__(self, store, run_id):
+        result = {}
+        with store.transaction() as db:
+            run = store._locked_run(db, run_id)
+            specs = {s.id: s for s in WorkflowSpec.model_validate(run.spec).steps}
+            steps = db.scalars(
+                select(StepRow)
+                .where(StepRow.run_id == run_id)
+                .order_by(StepRow.id)
+                .with_for_update()
+            )
+            for step in steps:
+                row = db.scalar(
+                    select(AgentSessionRow)
+                    .where(AgentSessionRow.step_row_id == step.id)
+                    .with_for_update()
+                )
+                if row is None:
+                    continue
+                state = SQLAgentStore(store)._read(db, row)
+                artifacts = tuple(
+                    a.content
+                    for a in db.scalars(
+                        select(ArtifactRow).where(ArtifactRow.step_id == step.id)
+                    )
+                )
+                saved = Checkpoint(
+                    state,
+                    {
+                        "status": step.status,
+                        "attempts": step.attempts,
+                        "token": step.token,
+                        "lease_until": step.lease_until,
+                        "available_at": step.available_at,
+                        "error": step.error,
+                    },
+                    run.status,
+                    row.continuation_pending,
+                    artifacts,
+                )
+                snapshot = state.snapshot
+                expected = {
+                    "succeeded": "succeeded",
+                    "failed": "failed",
+                    "exhausted": "failed",
+                    "cancelled": "cancelled",
+                }
+                if snapshot.status.is_terminal:
+                    assert step.status == expected[snapshot.status.value]
+                if step.status in {"succeeded", "failed", "cancelled"}:
+                    assert snapshot.status.is_terminal
+                if step.status == "waiting":
+                    assert snapshot.status in {
+                        "waiting_approval",
+                        "waiting_reconciliation",
+                    }
+                if snapshot.status in {"waiting_approval", "waiting_reconciliation"}:
+                    assert step.status == "waiting"
+                    assert not any(a.status == "inflight" for a in snapshot.actions)
+                if step.status != "running":
+                    assert step.token is None and step.lease_until is None
+                if step.status == "ready":
+                    assert saved.continuation or step.error == "LeaseExpired"
+                    if step.error == "ModelRetryable":
+                        assert snapshot.status == "ready_model"
+                        assert state.model_calls[-1].status == "failed"
+                        assert saved.continuation and math.isfinite(step.available_at)
+                assert len(artifacts) == int(
+                    step.status == "succeeded" and specs[step.key].artifact
+                )
+                assert len(state.model_calls) == snapshot.budget.model_rounds
+                assert [c.round_index for c in state.model_calls] == list(
+                    range(1, len(state.model_calls) + 1)
+                )
+                assert len({c.model_call_id for c in state.model_calls}) == len(
+                    state.model_calls
+                )
+                key = (run_id, step.key)
+                old = self.previous.get(key)
+                if old:
+                    prior = old.agent.snapshot
+                    assert snapshot.revision >= prior.revision
+                    if snapshot.revision == prior.revision or prior.status.is_terminal:
+                        assert snapshot == prior
+                    for counter in (
+                        "model_rounds",
+                        "model_attempts",
+                        "tool_calls",
+                        "resource_units",
+                    ):
+                        assert (
+                            getattr(prior.budget, counter)
+                            <= getattr(snapshot.budget, counter)
+                            <= getattr(snapshot.budget, f"max_{counter}")
+                        )
+                        assert getattr(prior.budget, f"max_{counter}") == getattr(
+                            snapshot.budget, f"max_{counter}"
+                        )
+                    assert (
+                        state.messages[: len(old.agent.messages)] == old.agent.messages
+                    )
+                    calls = {c.model_call_id: c for c in state.model_calls}
+                    for call in old.agent.model_calls:
+                        assert calls[call.model_call_id].round_index == call.round_index
+                        assert calls[call.model_call_id].attempts >= call.attempts
+                    actions = {a.action.id: a for a in state.actions}
+                    for stored in old.agent.actions:
+                        current = actions[stored.action.id]
+                        assert current.idempotency_key == stored.idempotency_key
+                        assert (
+                            current.arguments == stored.arguments
+                            and current.tool_binding == stored.tool_binding
+                        )
+                        assert (
+                            current.action.model_call_id == stored.action.model_call_id
+                        )
+                        assert current.call_index == stored.call_index
+                        for field in (
+                            "id",
+                            "agent_id",
+                            "model_call_id",
+                            "tool_name",
+                            "arguments_digest",
+                            "side_effect",
+                        ):
+                            assert getattr(current.action, field) == getattr(
+                                stored.action, field
+                            )
+                        if stored.action.status.is_terminal:
+                            assert current == stored
+                        if stored.action.status == "unknown":
+                            assert current.action.status in {
+                                "unknown",
+                                "succeeded",
+                                "failed",
+                            }
+                            if current.action.status != "unknown":
+                                assert any(
+                                    r.action_id == stored.action.id and r.applied
+                                    for r in state.reconciliations
+                                )
+                    if old.run_status == "cancelled":
+                        assert (
+                            saved.run_status == "cancelled" and saved.step == old.step
+                        )
+                result[step.key] = saved
+        for key, value in result.items():
+            self.previous[(run_id, key)] = value
+        return result
+
+    def fenced(self, agents, task):
+        with pytest.raises(LostLease):
+            agents.load(task)
+        current = self(agents.store, task.run_id)[task.step_id].agent.snapshot
+        candidate = AgentSnapshot.model_validate(
+            {**current.model_dump(), "revision": current.revision + 1}
+        )
+        with pytest.raises(LostLease):
+            agents.commit_transition(task, AgentTransition(snapshot=candidate))
+
+
+@pytest.fixture
+def runtime_invariants():
+    return RuntimeInvariants()

@@ -628,6 +628,9 @@ class SQLAgentStore:
         if changed.rowcount != 1:
             raise StateConflict("agent revision changed concurrently")
         self._model_update(db, row, old, transition, now)
+        dispatched = candidate.budget.tool_calls - old.budget.tool_calls
+        if dispatched:
+            self.store._metric(db, "agent.action_reserved", {"count": dispatched})
         messages = list(transition.messages)
         if any(m.role == "tool" for m in messages):
             raise StateConflict("tool messages must be committed as observations")
@@ -739,6 +742,7 @@ class SQLAgentStore:
             .with_for_update()
         )
         if starts:
+            self.store._metric(db, "agent.model", {"outcome": "reserved"})
             if outcome is not None:
                 raise StateConflict("model reservation cannot contain a response")
             if old.model_call_id != candidate.model_call_id:
@@ -766,6 +770,7 @@ class SQLAgentStore:
                     now,
                 )
         if outcome is not None:
+            self.store._metric(db, "agent.model", {"outcome": outcome.status})
             if (
                 call is None
                 or outcome.model_call_id != old.model_call_id
@@ -995,6 +1000,7 @@ class SQLAgentStore:
             error = "AgentExecutionError"
         state = self._read(db, row)
         if error == "LeaseExpired":
+            self.store._metric(db, "runtime.failure", {"kind": "lease_expired"})
             if any(a.status == ActionStatus.INFLIGHT for a in state.snapshot.actions):
                 row.continuation_pending = False
                 self._interrupt(
@@ -1369,6 +1375,11 @@ class SQLAgentStore:
                 run.id,
                 "agent.reconciled",
                 {"step": step.key, "action_id": action_id, "applied": not terminal},
+            )
+            self.store._metric(
+                db,
+                "agent.reconciliation_outcome",
+                {"status": decision.confirmed_status, "applied": not terminal},
             )
             answer = self._reconciliation(record)
         return answer

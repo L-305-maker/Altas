@@ -62,3 +62,20 @@ def test_test_exit_code_is_preserved_and_server_stopped(
     monkeypatch.setattr(verifier.subprocess, "run", run)
     assert verifier.main() == exit_code
     assert calls[-1][-1] == "stop"
+
+
+def test_release_gates_are_opt_in_and_bounded(verifier, monkeypatch):
+    monkeypatch.setattr(
+        verifier.sys,
+        "argv",
+        ["verify_postgres.py", "--bin", "unused", "--release-gates"],
+    )
+
+    def run(command, **kwargs):
+        if "pytest" in command:
+            assert "tests/integration/test_runtime_hardening.py" in command
+            assert kwargs["timeout"] == 600
+        return subprocess.CompletedProcess(command, 0, "", "")
+
+    monkeypatch.setattr(verifier.subprocess, "run", run)
+    assert verifier.main() == 0
