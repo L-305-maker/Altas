@@ -9,14 +9,15 @@ import json
 import os
 import subprocess
 import sys
+import tempfile
 import time
 from collections import Counter
 from pathlib import Path
 from uuid import uuid4
 
 import pytest
-from pydantic import TypeAdapter
 from rc_support import FLAGS, ROOT
+from sqlalchemy import select
 from sqlalchemy.exc import SQLAlchemyError
 
 from agentflow.application.agents.durable_runner import DurableAgentRunner
@@ -30,7 +31,27 @@ from agentflow.domain.execution.task import Task
 from agentflow.domain.workflow.spec import StepSpec, WorkflowSpec
 from agentflow.infrastructure.models.mock import MockProvider
 from agentflow.infrastructure.persistence.agent_store import SQLAgentStore
+from agentflow.infrastructure.persistence.models import RunRow
 from agentflow.infrastructure.persistence.store import Store
+
+
+def task_fence_record(task: Task) -> dict:
+    """Only the real lease identity; no prompt, inputs, spec or dependencies."""
+    return {
+        "run_id": task.run_id,
+        "step_id": task.step_id,
+        "token": task.token,
+        "attempt": task.attempt,
+    }
+
+
+def private_records(root):
+    # mkdir(0o700) installs a private Windows ACL starting with Python 3.12.4.
+    if os.name == "nt" and sys.version_info < (3, 12, 4):
+        raise RuntimeError("RC private records require Windows Python 3.12.4+")
+    root = Path(root)
+    root.mkdir(mode=0o700, exist_ok=True)
+    return Path(tempfile.mkdtemp(prefix="worker-", dir=root))
 
 
 def record(root, kind, **data):
@@ -51,6 +72,7 @@ def record(root, kind, **data):
 
 
 async def serve(url, root, seconds):
+    root = private_records(root)
     store = Store(url)  # Independent engine/pool in every OS process.
     agents, handlers = SQLAgentStore(store), HandlerRegistry()
 
@@ -59,7 +81,7 @@ async def serve(url, root, seconds):
         return {"ok": True}
 
     async def agent(task):
-        record(root, "claim", task=TypeAdapter(Task).dump_python(task, mode="json"))
+        record(root, "claim", task=task_fence_record(task))
         scenario = task.inputs["scenario"]
         tools = ToolRuntime()
 
@@ -141,7 +163,7 @@ async def serve(url, root, seconds):
 class Workload:
     def __init__(self, url, root):
         self.url, self.root = url, Path(root)
-        self.root.mkdir(exist_ok=True)
+        self.root.mkdir(mode=0o700, exist_ok=True)
         self.store = Store(url)
         self.agents = SQLAgentStore(self.store)
         # Reuse the release invariant checker without a second implementation.
@@ -213,7 +235,7 @@ class Workload:
 
     def events(self):
         result = []
-        for path in self.root.glob("worker-*.jsonl"):
+        for path in self.root.glob("worker-*/worker-*.jsonl"):
             lines = path.read_text(encoding="utf-8").splitlines(keepends=True)
             for index, line in enumerate(lines):
                 try:
@@ -340,7 +362,29 @@ class Workload:
     def fenced_claims(self):
         for entry in self.events():
             if entry["kind"] == "claim":
-                task = TypeAdapter(Task).validate_python(entry["task"])
+                identity = entry["task"]
+                # Recover the immutable spec in memory from the test database.
+                # Payloads are unnecessary for lease checks and stay omitted.
+                with self.store.transaction() as db:
+                    definition = db.scalar(
+                        select(RunRow.spec).where(RunRow.id == identity["run_id"])
+                    )
+                    if definition is None:
+                        raise AssertionError("MissingRCFixtureRun")
+                    spec = next(
+                        s
+                        for s in WorkflowSpec.model_validate(definition).steps
+                        if s.id == identity["step_id"]
+                    )
+                task = Task(
+                    identity["run_id"],
+                    identity["step_id"],
+                    identity["token"],
+                    identity["attempt"],
+                    spec,
+                    {},
+                    {},
+                )
                 if self.state(task.run_id) is None:
                     # A process may die after claim and before AgentStore.open.
                     with pytest.raises(LostLease):

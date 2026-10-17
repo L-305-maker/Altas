@@ -2,9 +2,12 @@
 
 ## 结论与基线
 
-本 PR 基于 PR #8 HEAD `4510f775f4b812042e67afeeaed3acb3fa375d46`，上游仍为未合并 Draft。
-堆叠 base 为 feat/durable-agent-v1-hardening；合并上游后应重新定位 main 并重跑 CI。
-本页记录 2026-10-17 的实际证据，后续部署必须重做环境项。
+PR #9 的原合并提交 `40862a93bc7db2a53bdcd4f320c367ed468db33a` 位于旧开发分支，并未将
+RC 能力集成到 main。main 撤回提交 `3a25db0e295c21453892c1adff467436035b6055` 的代码树与
+基准 `8fbb6e12b1ab3093ba9ae5f211da94b21aaac97e` 相同。本次仅在 main 应用这两个代码树之间
+已审核的差异，以 `f26f192` 保存集成提交；其代码树与原 PR #9 合并树完全相同，再补三项安全修复。
+没有重写历史、创建分支或 PR，也没有修改旧合并记录。本页原 PR9 证据为历史记录，本轮结果另列于下方；
+后续部署必须重做环境项。
 
 **代码可审核/合并不等于当前环境获准生产发布。** 建议进入隔离 RC staging 验收；真实 Provider、
 跨主机和生产配置仍未验证，不能宣称 Production Ready。外部副作用不保证 exactly-once。
@@ -60,6 +63,39 @@ MockProvider/MockTransport 不是供应商实测。完整故障窗口复用 [v1 
 新增验证先执行失败回归：审计入口缺失、隔离资源入口缺失、live 双重授权及 Durable harness 缺失；
 再实现入口。实际演练也发现测试断言遗漏“崩溃对账后真实有界 Step 重试”的 ready 状态，以及被取消
 前尚未创建 Session 的 Task。仅修正测试检查器/验证器，不修改 Domain 或运行时状态规则。
+
+## main 集成与安全修复验证
+
+1. 干净基准完整回归：590 passed、196 skipped；恢复原 PR9 后完整回归：606 passed、204 skipped。
+   先验证原始 30 秒 Soak、真实 7 Run/12 表备份恢复和 Ruff，再创建集成提交。
+2. 安全回归先失败后实现：实际 Worker 日志含 PRIVATE Task 数据、环境变量独自启用 live、缺少分页。
+   测试拦截付费脚本，失败也不能发送真实请求；失败输出只使用安全错误码。
+3. JSONL 只留租约身份，保存在每 Worker 私有目录；原 token 保持不变，用真实 Store.claim 的 Task
+   验证 load/commit_transition 均 LostLease。Action ID、幂等键和所有持久化不变量保持原检查。
+4. 默认 pytest 即使有模拟付费授权与 Key 仍跳过；显式选项 + 授权 + Key 的启用路径只用 MockProvider
+   回归。独立脚本仍需要 --allow-paid-request，手动 Provider Job 仍默认关闭。
+5. 审计新增有界 offset/next_offset，每页最多 10000 Step、明确排序、只读、无原始身份输出。跨页是
+   独立快照，更新时可能移动，不声称多页构成一次全库一致快照。
+
+本轮本地实际结果见下表；main CI 在推送后独立核对，不把跳过项记为通过。
+
+| 检查 | 本轮结果 |
+| --- | --- |
+| `uv run pytest -q tests/unit/test_rc_tools.py` | 15 passed |
+| `uv run pytest -q tests/integration/test_runtime_audit.py` | 8 passed、8 skipped（PG 专项另测） |
+| `uv run pytest -q tests/integration/test_runtime_metrics_loss.py` | 4 passed、4 skipped（PG 专项另测） |
+| `uv run pytest -q tests/integration/test_rc_fencing.py` | 1 passed、1 skipped（PG 专项另测） |
+| `uv run pytest -q`，模拟付费授权/Key 均存在、未给 live 选项 | 618 passed、210 skipped，真实付费请求 0 |
+| Ruff check / format --check | PASS；117 files already formatted |
+| `uv build` / `scripts/verify_wheel.py` | PASS；仓库外安装、Durable/认证指标/参考应用/离线评估 |
+| 架构检查 / `evals/run.py` | 3 passed / offline 3/3 |
+| `verify_postgres.py --bin D:/PSQL/bin --release-gates` | 406 passed、零跳过，164.36 秒；真实临时 PG，含 SQLite 对照 |
+| `verify_durable_soak.py --bin D:/PSQL/bin --seconds 180 --workload 6 --seed 7` | PASS；190.47 秒、34 波、209 Run、106 Action 派发、346 次领取 |
+| `verify_runtime_backup.py --bin D:/PSQL/bin` | PASS；0003、12 表、7 Run；已完成工具重派 0，明确新批准派发 1 |
+| 本地 Docker Sandbox | 2 skipped；daemon pipe 不可用，不计通过 |
+| 最新 main Docker/Compose/全部 CI | 推送后核对实际运行；最终交付报告提供链接，不借用旧分支结果 |
+
+真实 DeepSeek 与跨主机仍为 NOT VERIFIED；本轮无新增 Core、迁移、Scheduler 或授权语义改动。
 
 ## 运维关注项
 

@@ -9,11 +9,7 @@ from pathlib import Path
 import pytest
 
 
-@pytest.mark.skipif(
-    os.environ.get("AGENTFLOW_LIVE_DEEPSEEK_AUTHORIZATION") != "one-paid-request"
-    or not os.environ.get("AGENTFLOW_DEEPSEEK_API_KEY"),
-    reason="LIVE PROVIDER NOT VERIFIED: explicit paid authorization and key required",
-)
+@pytest.mark.live_provider
 def test_real_https_deepseek_to_durable_artifact():
     script = Path(__file__).resolve().parents[2] / "scripts/verify_live_provider.py"
     result = subprocess.run(

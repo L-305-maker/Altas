@@ -1,6 +1,7 @@
 import importlib.util
 import json
 import sys
+from collections import Counter
 from pathlib import Path
 
 import pytest
@@ -119,3 +120,72 @@ async def test_waiting_reviews_are_observations_but_inconsistent_revision_is_sev
     monkeypatch.setattr(sys, "argv", ["audit_durable_runtime.py"])
     assert module.main() == 2
     assert "revision_mismatch" in capsys.readouterr().out
+
+
+def test_audit_integer_pages_are_bounded_stable_read_only_and_redacted(
+    store, monkeypatch, capsys
+):
+    workflow = store.register(
+        WorkflowSpec(
+            name="PRIVATE_PAGES", steps=(StepSpec(id="work", handler="plain"),)
+        )
+    )
+    runs = [store.submit(workflow, {"document": "PRIVATE_INPUT"}) for _ in range(5)]
+    task = store.claim(30)
+    store.complete(task, {"text": "PRIVATE_OUTPUT"})
+    task = store.claim(30)
+    store.cancel(task.run_id)
+    with store.transaction() as db:
+        ordered = list(db.scalars(select(StepRow).order_by(StepRow.id)))
+        statuses = [row.status for row in ordered]
+        identities = runs + [row.id for row in ordered]
+    module = auditor()
+    statements = []
+
+    def observe(conn, cursor, statement, *args):
+        statements.append(statement.upper())
+
+    event.listen(store.engine, "before_cursor_execute", observe)
+    try:
+        for offset in (0, 2, 4):
+            report = module.audit(store.engine, limit=2, offset=offset)
+            assert report["steps"] == dict(Counter(statuses[offset : offset + 2]))
+            assert report["scope"]["offset"] == offset
+            assert report["scope"]["scanned_steps"] <= 2
+            assert report["scope"]["truncated"] == (offset < 4)
+            assert report["scope"]["next_offset"] == (
+                offset + 2 if offset < 4 else None
+            )
+            encoded = json.dumps(report)
+            if "PRIVATE" in encoded or any(
+                identity in encoded for identity in identities
+            ):
+                pytest.fail("AuditIdentityOrPayloadLeak", pytrace=False)
+    finally:
+        event.remove(store.engine, "before_cursor_execute", observe)
+    assert any("OFFSET" in statement for statement in statements)
+    assert not any(
+        statement.startswith(("INSERT", "UPDATE", "DELETE", "BEGIN IMMEDIATE"))
+        for statement in statements
+    )
+    if store.engine.dialect.name == "postgresql":
+        assert any("READ ONLY" in statement for statement in statements)
+    monkeypatch.setenv(
+        "AGENTFLOW_DATABASE_URL", store.engine.url.render_as_string(hide_password=False)
+    )
+    monkeypatch.setattr(
+        sys, "argv", ["audit_durable_runtime.py", "--limit", "2", "--offset", "2"]
+    )
+    assert module.main() == 0
+    assert json.loads(capsys.readouterr().out)["scope"]["next_offset"] == 4
+    # A scan never pretends to cover rows beyond the supported offset bound.
+    monkeypatch.setattr(module, "MAX_AUDIT_OFFSET", 0)
+    scope = module.audit(store.engine, limit=1)["scope"]
+    assert scope["truncated"] and scope["next_offset"] is None
+    assert scope["offset_limit_reached"]
+
+
+@pytest.mark.parametrize("offset", [-1, 1_000_001, True, 0.5])
+def test_audit_rejects_invalid_offsets(store, offset):
+    with pytest.raises(ValueError):
+        auditor().audit(store.engine, offset=offset)

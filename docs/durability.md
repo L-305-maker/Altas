@@ -388,3 +388,8 @@ PROMETHEUS_MULTIPROC_DIR 并共享受保护目录/卷，沿用认证端点，不
 普通 CI 不发真实模型请求；长测独立手动运行，不用单机多进程冒充跨主机网络分区验证。
 指标采集前退出可以少计、Collector 故障不影响数据库事实；审计输出不是精确计费或 Counter 补账机制。
 本轮无新表/迁移，不放宽审批、UNKNOWN、CAS、fencing、取消传播或普通 Handler 语义。
+
+RC 能力现已通过审核树差异集成到 main，保留原 PR 历史。Soak 诊断只记录私有租约身份，
+不序列化 Task 的输入、依赖或 Prompt；审计支持不暴露 UUID 的有界整数分页，各页是独立快照。
+普通 pytest 必须显式加 --run-live-provider，且授权环境变量和专用 Key 同时存在才会运行付费验收；
+环境变量单独存在时仍跳过。独立脚本的 --allow-paid-request 和手动工作流默认关闭策略保持不变。

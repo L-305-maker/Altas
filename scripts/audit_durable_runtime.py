@@ -28,6 +28,8 @@ from agentflow.infrastructure.persistence.models import (
     StepRow,
 )
 
+MAX_AUDIT_OFFSET = 1_000_000
+
 
 def audit(
     engine,
@@ -36,11 +38,14 @@ def audit(
     since=0,
     stale_seconds=3600,
     after_step=None,
+    offset=0,
     timeout_seconds=30,
 ):
     if (
         type(limit) is not int
         or not 1 <= limit <= 10000
+        or type(offset) is not int
+        or not 0 <= offset <= MAX_AUDIT_OFFSET
         or not math.isfinite(since)
         or since < 0
         or not math.isfinite(stale_seconds)
@@ -80,6 +85,7 @@ def audit(
                     )
                     .where(RunRow.created_at >= since)
                     .order_by(StepRow.id)
+                    .offset(offset)
                     .limit(limit + 1)
                 )
                 if after_step:
@@ -193,11 +199,18 @@ def audit(
                             .select_from(table)
                             .where(table.session_id == session.id, condition)
                         )
+                following = offset + scanned
+                offset_limit_reached = truncated and following > MAX_AUDIT_OFFSET
                 return {
                     "version": 1,
                     "scope": {
                         "since": since,
                         "limit": limit,
+                        "offset": offset,
+                        "next_offset": following
+                        if truncated and not offset_limit_reached
+                        else None,
+                        "offset_limit_reached": offset_limit_reached,
                         "scanned_steps": scanned,
                         "truncated": truncated,
                     },
@@ -218,6 +231,12 @@ def audit(
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--limit", type=int, default=1000)
+    parser.add_argument(
+        "--offset",
+        type=int,
+        default=0,
+        help="bounded integer page position (0..1000000)",
+    )
     parser.add_argument(
         "--since", type=float, default=0, help="UTC Unix seconds, inclusive"
     )
@@ -240,6 +259,7 @@ def main():
         report = audit(
             engine,
             limit=args.limit,
+            offset=args.offset,
             since=args.since,
             stale_seconds=args.stale_seconds,
             after_step=args.after_step,

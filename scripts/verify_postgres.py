@@ -102,6 +102,7 @@ def main():
                             "tests/integration/test_runtime_metrics.py",
                             "tests/integration/test_runtime_metrics_loss.py",
                             "tests/integration/test_runtime_audit.py",
+                            "tests/integration/test_rc_fencing.py",
                         ]
                         if args.release_gates
                         else []

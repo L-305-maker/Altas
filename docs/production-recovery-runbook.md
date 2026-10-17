@@ -36,6 +36,21 @@ UNKNOWN 对账、取消/接管竞争，以及实际停止并重启专用 Postgre
 普通 CI 只跑 30 秒目标的有界样本及备份恢复一次。长测试使用 `Manual durable runtime RC acceptance`
 手动工作流或以上命令，最长手动门禁 40 分钟；不把 PR CI 变成长时间负载测试。
 
+### 诊断数据最小化
+
+Worker 的 claim JSONL 仅保留 run_id、step_id、原 token、attempt；不序列化 Task、spec、inputs、
+dependencies、Prompt、工具参数或 Secret。派发只记录 Action ID 与幂等键，原有稳定性检查继续生效。
+旧 Task 的不可变 StepSpec 在核查时从隔离数据库取回，仅在内存使用；fencing 不需要的 inputs 和
+dependencies 保持空对象。真实旧 token 仍用于 load/commit_transition 的 LostLease 验证，不生成替代 token。
+
+每个 Worker 在记录根目录内新建独立私有子目录：POSIX 为 0700，JSONL 为 0600；Windows 使用
+Python 的私有目录 ACL，只允许当前用户与管理员访问。Windows 运维脚本要求 Python 3.12.4+，
+旧补丁版本拒绝执行，依据 [Python mkdir 权限约定](https://docs.python.org/3.12/library/os.html#os.mkdir)。
+包含旧 token 的目录只用于私有测试，不得贴入普通日志、复制为公开诊断或上传 CI Artifact；结束后按
+测试资源策略清理。公开执行报告只保留聚合结果，Token 和数据库内容不进入报告。
+如曾使用旧 staging 入口，原 JSONL 可能包含完整 Task，应按敏感数据检查并受控清理；升级不会自动
+删除操作者已有文件，也不能撤销此前已经复制出去的数据。
+
 ## 生产备份与恢复操作顺序
 
 1. 明确恢复点、允许的 RPO/RTO、数据库和应用版本，记录授权。先在隔离环境验证备份可读。
@@ -57,15 +72,20 @@ UNKNOWN 对账、取消/接管竞争，以及实际停止并重启专用 Postgre
 
 ```sh
 # AGENTFLOW_DATABASE_URL 由安全环境注入，不在命令或报告中显示。
-uv run python scripts/audit_durable_runtime.py --since <UTC-Unix-seconds> --limit 1000 --stale-seconds 3600 --timeout-seconds 30
+uv run python scripts/audit_durable_runtime.py --since <UTC-Unix-seconds> --limit 1000 --offset 0 --stale-seconds 3600 --timeout-seconds 30
 ```
 
 使用专用 SELECT-only 角色；PostgreSQL 事务显式 `REPEATABLE READ, READ ONLY`，不加行锁；SQLite 使用
 query_only 只读快照，结束恢复连接设置。不调用 Store.claim、heartbeat 或恢复操作。单次扫描最多
 10000 Step，流式读取，每条语句限制 5 秒，累计行循环默认 30 秒（可配置 1–120 秒），连接最多 5 秒。
 超时/连接失败返回安全错误、退出 1，不能视作健康。字段 `truncated=true` 仅表示部分范围，不是全库证明；
-使用更窄的 since 或操作者已有的 StepRow UUID `--after-step` 分页，报告不返回 UUID/工具名/内容/actor。
-每页来自独立快照，不声称跨页事务一致。
+使用报告 `scope.next_offset` 作为下次 `--offset`，保持 since/limit 等过滤条件一致，无需查找 UUID。
+offset 必须为 0–1000000 的整数，每页最多 10000 Step，按数据库 StepRow.id 明确排序，ID 不输出。
+完整最后一页返回 truncated=false、next_offset=null；如触及 offset 上界仍有数据，则
+truncated=true、offset_limit_reached=true、next_offset=null，必须缩小 since 范围，不能视作全库扫描完成。
+旧 `--after-step` 过滤器为兼容保留，普通分页不需要它。报告不返回 Run/Step/Session 等原始身份、
+工具名、内容或 actor。每个请求使用独立数据库快照，持续插入、删除或更新时分页位置可能移动，出现
+重复或遗漏；**多页结果不代表一次完全一致的全库快照**。需要一致全库核验时应在停 Writer 的隔离恢复库执行。
 
 JSON 中 steps 为选定范围的状态计数；waiting 含数量和自最后状态更新以来的最长秒数。
 observations 含到期/未来模型重试、过期租约、无推进会话、UNKNOWN 和批准未消耗授权数量。
@@ -110,12 +130,22 @@ Artifact 唯一。使用相同方法提交 retry/unknown/review/normal/cancel �
 
 ## 受控真实 Provider（当前 LIVE PROVIDER NOT VERIFIED）
 
-默认 pytest 跳过 live；普通 push/PR CI 无付费凭据和开关。操作者先给专用 DeepSeek 账户设置金额上限，
+默认 pytest 永远跳过 live，即使开发机已有授权环境变量和 Key。pytest 仅在同时具备
+`--run-live-provider`、操作者授权环境变量和专用 API Key 时启用；缺任一条件均不启动付费进程。
+普通 push/PR CI 不提供这个选项。离线回归使用模拟 Key 并拦截付费子进程，以 MockProvider 验证显式
+开启分支，不发送网络请求。默认 skip reason 为 `paid provider tests require explicit --run-live-provider`。
+操作者先给专用 DeepSeek 账户设置金额上限，
 核对当时价格并授权**一次**请求，再安全注入 `AGENTFLOW_DEEPSEEK_API_KEY` 与
 `AGENTFLOW_LIVE_DEEPSEEK_AUTHORIZATION=one-paid-request`，显式运行：
 
 ```sh
 uv run python scripts/verify_live_provider.py --allow-paid-request
+```
+
+完成相同授权后，也可显式选择 pytest 入口：
+
+```sh
+uv run pytest -q tests/live/test_deepseek_live.py --run-live-provider
 ```
 
 固定 `https://api.deepseek.com`、deepseek-chat、公开无敏感 Prompt，无工具，单次输出最多 4096 token，
