@@ -17,6 +17,7 @@ from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 
 from agentflow.domain.agent.run import AgentSnapshot
+from agentflow.domain.execution.status import StepStatus
 from agentflow.domain.workflow.spec import WorkflowSpec
 from agentflow.infrastructure.persistence.models import (
     AgentActionApprovalRow,
@@ -92,7 +93,11 @@ def audit(
                         truncated = True
                         break
                     scanned += 1
-                    counts[step.status] += 1
+                    if step.status in {status.value for status in StepStatus}:
+                        counts[step.status] += 1
+                    else:
+                        counts["invalid"] += 1
+                        severe["invalid_step_status"] += 1
                     if step.status == "running" and (step.lease_until or 0) <= now:
                         observations["expired_leases"] += 1
                     if run.status == "cancelled" and step.status not in {

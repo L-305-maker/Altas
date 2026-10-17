@@ -50,6 +50,9 @@ NOT APPLICABLE 只用于明确不适用的部署项并注明理由，不用来�
 | `docker info` / `docker compose config --quiet` | daemon pipe 不存在；Compose 缺部署环境变量，本地 E2E 未执行 |
 | `uv run python scripts/verify_live_provider.py` | LIVE PROVIDER NOT VERIFIED，requests=0 |
 
+最后增加损坏 Step 状态的脱敏失败回归，再改为只输出固定 invalid 分类。
+同一审计文件在新建临时 PostgreSQL 上运行双后端 **6 passed、零跳过**，Ruff/格式检查再次通过。
+
 204 skipped 包含专用 PG、Docker 和 1 项显式 live 门控，不计通过。真实 PostgreSQL 由独立临时实例
 专项补充。本分支 GitHub CI 的实际结果在 PR 中记录；本地 Docker 不可用不借用上游 CI 的成功替代。
 MockProvider/MockTransport 不是供应商实测。完整故障窗口复用 [v1 verification](durable-runtime-v1-verification.md)。

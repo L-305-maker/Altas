@@ -69,7 +69,8 @@ query_only 只读快照，结束恢复连接设置。不调用 Store.claim、hea
 
 JSON 中 steps 为选定范围的状态计数；waiting 含数量和自最后状态更新以来的最长秒数。
 observations 含到期/未来模型重试、过期租约、无推进会话、UNKNOWN 和批准未消耗授权数量。
-severe 含 revision/快照、Agent/Step 状态、取消后活跃 Step、延期不一致和 Artifact 数量错误的固定码。
+severe 含未知 Step 状态、revision/快照、Agent/Step 状态、取消后活跃 Step、延期不一致和 Artifact
+数量错误的固定码。损坏的状态值只归入 invalid，不把原始数据库值输出到报告。
 退出 2 表示严重一致性问题，退出 0 只表示所扫描范围未发现这些问题。
 等待审批和对账、过期租约、到期未领取均不自动判失败；按值班 SLA 提醒操作者调查。
 工具不逐条重建所有历史转换，完整历史契约由发布测试及 AgentStore 恢复验证覆盖。

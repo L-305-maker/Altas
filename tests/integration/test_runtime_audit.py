@@ -72,6 +72,10 @@ def test_audit_reports_expired_lease_without_repairing_it(store):
     with store.transaction() as db:
         row = db.scalar(select(StepRow).where(StepRow.run_id == run))
         assert row.token == task.token and row.status == "running"
+        row.status = "PRIVATE"
+    report = auditor().audit(store.engine)
+    assert "PRIVATE" not in json.dumps(report)
+    assert {"code": "invalid_step_status", "count": 1} in report["severe"]
 
 
 @pytest.mark.asyncio
