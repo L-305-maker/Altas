@@ -5,6 +5,7 @@
 """
 
 import asyncio
+import time
 from collections.abc import Awaitable, Callable
 from contextlib import suppress
 from typing import Any
@@ -54,10 +55,12 @@ class Worker:
         concurrency: int = 4,
         poll_seconds: float = 0.5,
         tracer: trace.Tracer | None = None,
+        observe: Callable[[str, float], None] | None = None,
     ):
         if lease_seconds <= 0 or concurrency < 1 or poll_seconds <= 0:
             raise ValueError("invalid worker limits")
         self.store, self.handlers = store, handlers
+        self.observe = observe
         self.tracer = tracer or trace.get_tracer("agentflow.worker")
         self.lease_seconds, self.concurrency, self.poll_seconds = (
             lease_seconds,
@@ -106,6 +109,7 @@ class Worker:
                 job.cancel()
 
         heartbeat = asyncio.create_task(renew())
+        start, outcome = time.monotonic(), "error"
         try:
             output = await job
             if isinstance(output, CommittedAgentResult):
@@ -118,11 +122,14 @@ class Worker:
                 await asyncio.to_thread(self.store.validate_agent_result, task, output)
             else:
                 await asyncio.to_thread(self.store.complete, task, output)
+            outcome = "returned"
         except asyncio.CancelledError:
+            outcome = "cancelled"
             # 进程停止/租约丢失不提交失败；由租约过期恢复。外部取消继续向上传播。
             if asyncio.current_task().cancelling():
                 raise
         except (LostLease, StateConflict, AgentStoreUnavailable):
+            outcome = "stopped"
             # 所有权/提交结果不确定时停止；不能经普通 fail 触发整步重试或覆盖新 Worker。
             pass
         except Exception as error:  # noqa: BLE001 - isolate user handlers at the worker boundary
@@ -134,6 +141,9 @@ class Worker:
                 await heartbeat
             with suppress(asyncio.CancelledError, Exception):
                 await job
+            if self.observe is not None:
+                with suppress(Exception):
+                    self.observe(outcome, time.monotonic() - start)
         return True
 
     async def serve(self, stop: asyncio.Event) -> None:

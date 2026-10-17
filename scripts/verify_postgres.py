@@ -16,6 +16,11 @@ from pathlib import Path
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--bin", required=True)
+    parser.add_argument(
+        "--release-gates",
+        action="store_true",
+        help="include cross-worker runtime release gates",
+    )
     args = parser.parse_args()
     binaries = Path(args.bin).resolve()
     flags = subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
@@ -89,6 +94,16 @@ def main():
                     "tests/integration/test_action_reviews.py",
                     "tests/integration/test_action_review_runner.py",
                     "tests/chaos/test_durable_runner_crash.py",
+                    *(
+                        [
+                            "tests/integration/test_runtime_hardening.py",
+                            "tests/integration/test_runtime_commit_faults.py",
+                            "tests/integration/test_runtime_release_migrations.py",
+                            "tests/integration/test_runtime_metrics.py",
+                        ]
+                        if args.release_gates
+                        else []
+                    ),
                     "-q",
                 ],
                 env=environment,
@@ -96,6 +111,7 @@ def main():
                 capture_output=True,
                 text=True,
                 check=False,
+                timeout=600,
             )
             print(result.stdout)
             if result.returncode:

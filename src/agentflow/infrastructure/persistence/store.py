@@ -10,15 +10,15 @@ import json
 import math
 import time
 from contextlib import contextmanager
-from typing import Any
+from typing import TYPE_CHECKING, Any
 from uuid import uuid4
 
 from sqlalchemy import and_, create_engine, event, or_, select, text
-from sqlalchemy.exc import IntegrityError
+from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 from sqlalchemy.orm import Session
 from sqlalchemy.pool import StaticPool
 
-from agentflow.application.ports.agent_store import StateConflict
+from agentflow.application.ports.agent_store import LostLease, StateConflict
 from agentflow.application.ports.handler_result import CommittedAgentResult
 from agentflow.domain.agent.run import AgentSnapshot
 from agentflow.domain.execution.task import Task
@@ -36,6 +36,9 @@ from agentflow.infrastructure.persistence.models import (
 )
 
 TERMINAL = {"succeeded", "failed", "cancelled"}
+
+if TYPE_CHECKING:
+    from agentflow.infrastructure.telemetry.metrics import RuntimeMetrics
 
 
 class NotFoundError(Exception):
@@ -57,7 +60,8 @@ def json_bytes(value: Any) -> bytes:
 
 
 class Store:
-    def __init__(self, url: str):
+    def __init__(self, url: str, *, metrics: "RuntimeMetrics | None" = None):
+        self.metrics = metrics
         options: dict[str, Any] = {"pool_pre_ping": True}
         if url.startswith("sqlite"):
             options["connect_args"] = {"check_same_thread": False, "timeout": 30}
@@ -76,10 +80,48 @@ class Store:
 
     @contextmanager
     def transaction(self):
-        with Session(self.engine, expire_on_commit=False) as session, session.begin():
-            if self.engine.dialect.name == "sqlite":
-                session.execute(text("BEGIN IMMEDIATE"))
-            yield session
+        start = time.monotonic()
+        try:
+            with (
+                Session(self.engine, expire_on_commit=False) as session,
+                session.begin(),
+            ):
+                if self.engine.dialect.name == "sqlite":
+                    session.execute(text("BEGIN IMMEDIATE"))
+                yield session
+        except Exception as error:
+            category = (
+                "lost_lease"
+                if isinstance(error, LostLease)
+                else "state_conflict"
+                if isinstance(error, StateConflict)
+                else "database"
+                if isinstance(error, SQLAlchemyError)
+                else None
+            )
+            if category:
+                self._observe("record", "runtime.failure", {"kind": category})
+            self._observe("transaction", "error", time.monotonic() - start)
+            raise
+        else:
+            # Only a confirmed COMMIT may emit durable state-change counters.
+            for kind, data in session.info.get("runtime_metrics", ()):
+                self._observe("record", kind, data)
+            self._observe("transaction", "committed", time.monotonic() - start)
+
+    def _observe(self, method, *args):
+        if self.metrics is not None:
+            try:
+                getattr(self.metrics, method)(*args)
+            except Exception:
+                pass  # Telemetry is optional; no payloads or exception logs.
+
+    def observe_execution(self, outcome: str, seconds: float) -> None:
+        self._observe("execution", outcome, seconds)
+
+    def _metric(self, session, kind, data):
+        if self.metrics is not None:
+            session.info.setdefault("runtime_metrics", []).append((kind, dict(data)))
 
     def register(self, spec: WorkflowSpec) -> str:
         data = spec.model_dump(mode="json")
@@ -188,6 +230,7 @@ class Store:
         return time.time()
 
     def _event(self, session: Session, run_id: str, kind: str, data: dict) -> None:
+        self._metric(session, kind, data)
         # 事件只保存状态元数据，不写输入正文、凭据、模型提示词或异常消息。
         session.add(
             EventRow(run_id=run_id, kind=kind, data=data, created_at=time.time())

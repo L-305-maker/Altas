@@ -351,7 +351,8 @@ error_code 元数据一同容纳。超限仍 422、整笔回滚，不能静默�
 重新满足新增预留。新预留不能追溯创造旧版本已经用满的空间：旧的逼满会话可能需要更小的显式
 核对请求；连最小审计都无法容纳时需受控的离线留存处理，本阶段不提供删除历史或扩大限额的绕过。
 
-0003 尚未合并，此次在同一迁移内扩展 schema；已经安装早期 PR 预览版 0003 的数据库必须先备份、
+PR4 审核时 0003 尚未合并，当时在同一迁移内扩展 schema；如今 0001–0003 均已合并，不能修改。
+已经安装早期 PR 预览版 0003 的数据库必须先备份、
 停 Worker，使用原预览版本的迁移文件回退到 0002，再切换新版本升级，或重建隔离预览库。
 不能使用新版 downgrade 脚本回退旧版 0003（旧表尚无新增列）；upgrade head 也不会修改已打戳的 0003。
 操作员文本拒绝 PostgreSQL TEXT 不支持的 NUL，输入校验返回 422，不伪装成数据库不可用。
@@ -360,3 +361,21 @@ error_code 元数据一同容纳。超限仍 422、整笔回滚，不能静默�
 0002→0003→0002→0003 数据保留/模型差异检查。Compose CI 停止常规 Worker 后，在 API 容器运行
 `scripts/verify_action_review_compose.py`，使用真实认证 HTTP/PostgreSQL/Worker/Artifact 验证
 批准、拒绝及 UNKNOWN 对账恢复；脚本的通用工具和 MockProvider 只在测试进程注册，不进入部署入口。
+
+## v1 可靠性与发布门禁（PR6）
+
+完整的 12 项故障窗口、现有与新增测试、共享不变量、跨 Worker/DAG 竞争、迁移验收和部署限制见
+[Durable Runtime v1 验收矩阵](durable-runtime-v1-verification.md)。本阶段不增加迁移，也不改变
+Domain、审批授权、UNKNOWN 或模型延期策略。
+
+运行指标复用现有 Prometheus 设施，默认关闭，开启仍使用 AGENTFLOW_TELEMETRY。
+Store 只在事务确认提交后发出状态计数；回滚不计成功，指标故障不影响执行，/metrics 保留认证。
+固定状态/错误 labels 不含 Run/Agent/Action ID 或输入正文，耗时采样截在 60 秒。
+独立 API/Worker 默认各自进程计数；需共享统计时，可在 Python 启动前显式设置
+PROMETHEUS_MULTIPROC_DIR 并共享受保护目录/卷，沿用认证端点，不新增 Worker 服务。
+停止整个部署后才能清理旧指标文件；计数可能少计、重启重置，不作为恢复事实或费用账本。
+
+发布检查运行 `uv run python scripts/verify_postgres.py --bin <PostgreSQL-bin> --release-gates`。
+它在专用临时数据库验证独立事务、旧 token 读写 fencing、提交确认丢失、三方竞争和审计恢复，
+最长 600 秒，退出清理实例。CI 只在 Python 3.13 增加这组门禁，已有两个 Python 版本的基线回归不变。
+数据库连接/语句超时仍由部署者配置；五秒协程清理不能强制停止已进入数据库驱动的同步线程。
