@@ -33,7 +33,11 @@ def build_handlers(
     registry = HandlerRegistry()
     tools = tools or ToolRuntime()
     provider = build_provider(settings)
-    agent_store = SQLAgentStore(store) if store is not None else None
+    agent_store = (
+        SQLAgentStore(store, admission_policy=settings.provider_admission)
+        if store is not None
+        else None
+    )
     if settings.tool_root:
         tools.register(read_text_tool(Path(settings.tool_root)))
     if settings.sandbox_enabled:
@@ -71,7 +75,10 @@ def build_handlers(
             if agent_store is None:
                 raise ValueError("durable mode requires the worker Store")
             return await DurableAgentRunner(
-                agent_store, provider or MockProvider(), tools
+                agent_store,
+                provider or MockProvider(),
+                tools,
+                admission=agent_store if settings.provider_admission else None,
             ).run(task, prompt, allowed=set(allowed))
         if mode is not None:
             raise ValueError("unknown agent mode")

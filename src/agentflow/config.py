@@ -5,6 +5,8 @@ from typing import Literal
 from pydantic import Field, SecretStr
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+from agentflow.application.ports.provider_admission import ProviderAdmissionPolicy
+
 
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_prefix="AGENTFLOW_", extra="ignore")
@@ -15,6 +17,7 @@ class Settings(BaseSettings):
     # 不读取 .env 文件以避免隐式加载；部署工具负责把环境变量传给进程。
     deepseek_api_key: SecretStr | None = None
     model_base_url: str = "https://api.deepseek.com"
+    provider_admission: ProviderAdmissionPolicy | None = None
     concurrency: int = Field(default=4, ge=1, le=64)
     lease_seconds: float = Field(default=30, ge=3, le=600)
     poll_seconds: float = Field(default=0.5, gt=0, le=30)

@@ -409,3 +409,20 @@ RC 能力现已通过审核树差异集成到 main，保留原 PR 历史。Soak 
 本能力是 provider-reported measured usage / soft governance；不是独立确认的账单，也不提供真实费用
 exactly-once 结算。没有可验证的请求前上界预约，仍不启用 `max_resource_units` 硬限制；调用轮次、
 尝试数、工具次数的硬预算不变。UNKNOWN 不重发，不允许为用量补账把它自动改成 FAILED。
+
+## Provider Admission Control v1
+
+可信部署配置可通过 `AGENTFLOW_PROVIDER_ADMISSION` 启用按 provider_key 共享的数据库准入。
+没有配置时保留既有行为；Workflow 输入、Prompt 和工具参数不能提升容量。模型预约与许可、
+Snapshot、ModelCall、ModelAttempt 同事务提交。额度不足仅提交 READY_MODEL 的新 revision、未来
+Step.available_at 和 continuation，释放 token/lease，不消耗模型轮次或尝试预算，也不占 Worker 等待。
+
+许可绑定原 Task token 摘要和单次模型尝试。已确认成功/失败释放活跃容量；429 另外原子保存有界全局
+cooldown。模型 UNKNOWN、取消和崩溃保留至原 TTL，所有预约都继续消耗滑动速率窗口，不退款。
+TTL 到期仅释放逻辑容量，不能证明旧网络请求停止；不保证物理并发绝对上限或 exactly-once 请求。
+Tool UNKNOWN 与模型请求 UNKNOWN 是不同事实，前者的模型许可已在响应确认时释放。
+
+迁移 0005 新增 provider_admissions / provider_permits 和 Session 的可空 provider_key，不修改
+0001–0004。已有库应停 Writer、备份并执行 upgrade head；启用时所有相关 Worker 使用一致策略。
+准入配额、单 Agent 的硬调用预算、供应商用量账本及尚未实现的硬费用预算分别管理。
+详见 [Provider Admission 设计与限制](provider-admission.md)。

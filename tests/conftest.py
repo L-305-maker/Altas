@@ -4,6 +4,26 @@ import pytest
 from runtime_assertions import runtime_invariants as runtime_invariants
 
 
+@pytest.fixture
+def advance_database_clock(monkeypatch):
+    # Preserve immutable permit facts: all Store instances query the real DB
+    # clock with the same test-only offset, without sleeps or worker wall clocks.
+    from agentflow.infrastructure.persistence.store import Store
+
+    original = Store._now
+    offset = 0
+
+    def now(self, db):
+        return original(self, db) + offset
+
+    def advance(seconds):
+        nonlocal offset
+        offset += seconds
+
+    monkeypatch.setattr(Store, "_now", now)
+    return advance
+
+
 def pytest_addoption(parser):
     parser.addoption(
         "--run-live-provider",

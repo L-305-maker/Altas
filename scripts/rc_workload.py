@@ -24,9 +24,12 @@ from agentflow.application.agents.durable_runner import DurableAgentRunner
 from agentflow.application.orchestration.worker import HandlerRegistry, Worker
 from agentflow.application.ports.agent_store import LostLease
 from agentflow.application.ports.model_provider import (
+    ModelOutcomeUnknown,
+    ModelRateLimitedError,
     ModelResponse,
     ModelRetryableError,
 )
+from agentflow.application.ports.provider_admission import ProviderAdmissionPolicy
 from agentflow.application.tools.runtime import Tool, ToolRuntime
 from agentflow.domain.agent.review import ApprovalDecision, ReconciliationDecision
 from agentflow.domain.agent.status import ToolSideEffect
@@ -76,8 +79,12 @@ def record(root, kind, **data):
 
 async def serve(url, root, seconds):
     root = private_records(root)
+    configured = os.environ.get("AGENTFLOW_RC_ADMISSION_POLICY")
+    policy = (
+        ProviderAdmissionPolicy.model_validate_json(configured) if configured else None
+    )
     store = Store(url)  # Independent engine/pool in every OS process.
-    agents, handlers = SQLAgentStore(store), HandlerRegistry()
+    agents, handlers = SQLAgentStore(store, admission_policy=policy), HandlerRegistry()
 
     async def plain(task):
         record(root, "plain", run=task.run_id, step=task.step_id)
@@ -121,6 +128,10 @@ async def serve(url, root, seconds):
         class Provider(MockProvider):
             async def respond(self, messages, tools=None):
                 state = await asyncio.to_thread(agents.load, task)
+                if scenario == "model_unknown":
+                    raise ModelOutcomeUnknown()
+                if scenario == "model_rate_limited":
+                    raise ModelRateLimitedError(retry_after_seconds=5)
                 if scenario == "retry" and state.snapshot.budget.model_attempts == 1:
                     return await MockProvider([ModelRetryableError()]).respond(
                         messages, tools
@@ -149,9 +160,9 @@ async def serve(url, root, seconds):
                     model="rc-mock",
                 )
 
-        return await DurableAgentRunner(agents, Provider(), tools).run(
-            task, "Return a fixed harmless result.", allowed={"echo"}
-        )
+        return await DurableAgentRunner(
+            agents, Provider(), tools, admission=agents if policy else None
+        ).run(task, "Return a fixed harmless result.", allowed={"echo"})
 
     handlers.register("rc-agent", agent)
     handlers.register("rc-plain", plain)
@@ -171,11 +182,12 @@ async def serve(url, root, seconds):
 
 
 class Workload:
-    def __init__(self, url, root):
+    def __init__(self, url, root, *, admission_policy=None):
         self.url, self.root = url, Path(root)
         self.root.mkdir(mode=0o700, exist_ok=True)
         self.store = Store(url)
-        self.agents = SQLAgentStore(self.store)
+        self.admission_policy = admission_policy
+        self.agents = SQLAgentStore(self.store, admission_policy=admission_policy)
         # Reuse the release invariant checker without a second implementation.
         sys.path.insert(0, str(ROOT / "tests"))
         from runtime_assertions import RuntimeInvariants
@@ -201,6 +213,11 @@ class Workload:
                             "agent": {
                                 "retry_base_seconds": retry_seconds,
                                 "retry_max_seconds": retry_seconds,
+                                **(
+                                    {"max_model_attempts": 1}
+                                    if scenario == "model_rate_limited"
+                                    else {}
+                                ),
                             }
                         },
                     ),
@@ -235,6 +252,11 @@ class Workload:
                     AGENTFLOW_RC_DATABASE_URL=self.url,
                     AGENTFLOW_RC_RECORDS=str(self.root),
                     AGENTFLOW_RC_SLOT=slot,
+                    AGENTFLOW_RC_ADMISSION_POLICY=(
+                        self.admission_policy.model_dump_json()
+                        if self.admission_policy
+                        else ""
+                    ),
                 ),
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,

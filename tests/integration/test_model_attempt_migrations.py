@@ -43,9 +43,28 @@ def test_attempt_upgrade_backfills_unmeasured_and_preserves_all_old_facts(
     def facts():
         with store.engine.connect() as db:
             return {
-                t.name: [dict(r) for r in db.execute(select(t)).mappings()]
+                t.name: [
+                    dict(r)
+                    for r in db.execute(
+                        select(
+                            *[
+                                c
+                                for c in t.c
+                                if not (
+                                    t.name == "agent_sessions"
+                                    and c.name == "provider_key"
+                                )
+                            ]
+                        )
+                    ).mappings()
+                ]
                 for t in Base.metadata.sorted_tables
-                if t.name != "agent_model_attempts"
+                if t.name
+                not in {
+                    "agent_model_attempts",
+                    "provider_admissions",
+                    "provider_permits",
+                }
             }
 
     try:
@@ -130,7 +149,7 @@ def test_legacy_pending_attempts_recover_without_reset_or_invented_usage(
         agents.store.engine.url.render_as_string(hide_password=False),
     )
     try:
-        command.stamp(config, "0004")  # Fixture creates the current schema directly.
+        command.stamp(config, "head")  # Fixture creates the current schema directly.
         command.downgrade(config, "0003")
         command.upgrade(config, "head")
         restored = agents.load(task)

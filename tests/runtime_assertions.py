@@ -123,11 +123,22 @@ class RuntimeInvariants:
                         assert snapshot.status == "ready_model"
                         assert state.model_calls[-1].status == "failed"
                         assert saved.continuation and math.isfinite(step.available_at)
+                    if step.error == "ProviderAdmissionDeferred":
+                        assert snapshot.status == "ready_model"
+                        assert state.provider_key is not None and saved.continuation
+                        assert math.isfinite(step.available_at)
                 assert len(artifacts) == int(
                     step.status == "succeeded" and specs[step.key].artifact
                 )
                 assert len(state.model_calls) == snapshot.budget.model_rounds
                 assert len(state.model_attempts) == snapshot.budget.model_attempts
+                permit_attempts = {
+                    (p.model_call_id, p.attempt_index) for p in state.model_permits
+                }
+                assert len(permit_attempts) == len(state.model_permits)
+                assert permit_attempts <= {
+                    (a.model_call_id, a.attempt_index) for a in state.model_attempts
+                }
                 assert [c.round_index for c in state.model_calls] == list(
                     range(1, len(state.model_calls) + 1)
                 )
@@ -171,6 +182,14 @@ class RuntimeInvariants:
                         assert current.accounting == attempt.accounting
                         if attempt.outcome != "inflight":
                             assert current == attempt
+                    permits = {p.id: p for p in state.model_permits}
+                    for permit in old.agent.model_permits:
+                        current = permits[permit.id]
+                        assert current.model_dump(
+                            exclude={"status", "released_at"}
+                        ) == permit.model_dump(exclude={"status", "released_at"})
+                        if permit.status != "active":
+                            assert current == permit
                     for call in old.agent.model_calls:
                         assert calls[call.model_call_id].round_index == call.round_index
                         assert calls[call.model_call_id].attempts >= call.attempts

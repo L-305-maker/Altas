@@ -16,6 +16,7 @@ class CommittedAgentResult:
         "waiting_approval",
         "waiting_reconciliation",
         "retry_scheduled",
+        "admission_deferred",
     ]
     revision: int
 
@@ -29,6 +30,7 @@ class CommittedAgentResult:
                 "waiting_approval",
                 "waiting_reconciliation",
                 "retry_scheduled",
+                "admission_deferred",
             }
             or type(self.revision) is not int
             or self.revision < 1

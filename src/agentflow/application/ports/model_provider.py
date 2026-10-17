@@ -43,6 +43,10 @@ class ModelOutcomeUnknown(ModelError):
     code = "ModelOutcomeUnknown"
 
 
+class ModelRateLimitedError(ModelRetryableError):
+    """Confirmed HTTP 429; distinct from other retryable transport failures."""
+
+
 class ModelProtocolError(ModelError):
     code = "ModelProtocolError"
 

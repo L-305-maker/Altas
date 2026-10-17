@@ -30,6 +30,10 @@ from agentflow.application.ports.model_usage import (
     ModelUsageSummary,
     normalize_usage,
 )
+from agentflow.application.ports.provider_admission import (
+    ModelAdmission,
+    ProviderAdmissionPolicy,
+)
 from agentflow.domain.agent.action import Action, digest_arguments
 from agentflow.domain.agent.review import (
     ActionApproval,
@@ -51,8 +55,16 @@ from agentflow.infrastructure.persistence.models import (
     AgentModelAttemptRow,
     AgentModelCallRow,
     AgentSessionRow,
+    ProviderAdmissionRow,
+    ProviderPermitRow,
     RunRow,
     StepRow,
+)
+from agentflow.infrastructure.persistence.provider_admission import (
+    AdmissionDelay,
+    AdmissionGrant,
+    SQLProviderAdmissionStore,
+    permit_record,
 )
 from agentflow.infrastructure.persistence.store import NotFoundError, Store, json_bytes
 
@@ -83,8 +95,16 @@ def action_key(session_id: str, action_id: str) -> str:
 
 
 class SQLAgentStore:
-    def __init__(self, store: Store) -> None:
+    def __init__(
+        self, store: Store, *, admission_policy: ProviderAdmissionPolicy | None = None
+    ) -> None:
         self.store = store
+        self.admission_policy = (
+            ProviderAdmissionPolicy.model_validate(admission_policy.model_dump())
+            if admission_policy is not None
+            else None
+        )
+        self.admission = SQLProviderAdmissionStore(store)
 
     @contextmanager
     def _owned_transaction(self, task):
@@ -203,6 +223,16 @@ class SQLAgentStore:
             if any(a.model_call_id not in call_order for a in attempts):
                 raise StateConflict("attempt references an unknown model call")
             attempts.sort(key=lambda a: (call_order[a.model_call_id], a.attempt_index))
+            permits = tuple(
+                permit_record(p)
+                for p in db.scalars(
+                    select(ProviderPermitRow)
+                    .where(ProviderPermitRow.session_id == row.id)
+                    .order_by(
+                        ProviderPermitRow.reservation_revision, ProviderPermitRow.id
+                    )
+                )
+            )
             actions = []
             for a in db.scalars(
                 select(AgentActionRow)
@@ -257,6 +287,8 @@ class SQLAgentStore:
                 messages=messages,
                 model_calls=calls,
                 model_attempts=tuple(attempts),
+                provider_key=row.provider_key,
+                model_permits=permits,
                 actions=tuple(actions),
                 approvals=tuple(self._approval(a, actions) for a in approval_rows),
                 reconciliations=tuple(
@@ -331,6 +363,10 @@ class SQLAgentStore:
         ]
         if not data["state"]["model_attempts"]:
             del data["state"]["model_attempts"]
+        if not data["state"]["model_permits"]:
+            del data["state"]["model_permits"]
+        if data["state"]["provider_key"] is None:
+            del data["state"]["provider_key"]
         checked_json(data, MAX_SESSION_BYTES)
         if not reserve or state.snapshot.status.is_terminal:
             return
@@ -415,6 +451,37 @@ class SQLAgentStore:
             raise StateConflict("model history does not match attempt budget")
         if len(state.model_attempts) != snapshot.budget.model_attempts:
             raise StateConflict("attempt ledger does not match attempt budget")
+        attempts_by_id = {
+            (a.model_call_id, a.attempt_index): a for a in state.model_attempts
+        }
+        for permit in state.model_permits:
+            attempt = attempts_by_id.get((permit.model_call_id, permit.attempt_index))
+            if (
+                permit.session_id != snapshot.id
+                or permit.provider_key != state.provider_key
+                or attempt is None
+                or permit.reservation_revision > snapshot.revision
+                or permit.status
+                != {
+                    "inflight": "active",
+                    "unknown": "unknown",
+                    "failed": "released",
+                    "succeeded": "released",
+                }.get(attempt.outcome)
+                or (permit.status == "released") != (permit.released_at is not None)
+            ):
+                raise StateConflict("provider permit differs from model attempt")
+        if (
+            state.provider_key is not None
+            and snapshot.status == AgentStatus.MODEL_INFLIGHT
+        ):
+            latest = state.model_attempts[-1]
+            if not any(
+                p.model_call_id == latest.model_call_id
+                and p.attempt_index == latest.attempt_index
+                for p in state.model_permits
+            ):
+                raise StateConflict("admission-bound model attempt requires a permit")
         for call in calls:
             attempts = [
                 a for a in state.model_attempts if a.model_call_id == call.model_call_id
@@ -603,6 +670,9 @@ class SQLAgentStore:
                     initial_snapshot=data,
                     snapshot=data,
                     revision=0,
+                    provider_key=self.admission_policy.provider_key
+                    if self.admission_policy
+                    else None,
                     created_at=now,
                     updated_at=now,
                 )
@@ -632,7 +702,86 @@ class SQLAgentStore:
         with self._operator_transaction(session_id) as (_db, _run, _step, _row, state):
             return state.usage_summary()
 
-    def _apply(self, db, run, step, row, transition, *, operator=False):
+    def reserve_model_attempt(
+        self, task: Task, transition: AgentTransition
+    ) -> ModelAdmission:
+        if self.admission_policy is None:
+            raise StateConflict("model admission requires a deployment policy")
+        with self._owned_transaction(task) as (db, run, step):
+            row = self._session(db, step)
+            if row is None:
+                raise StateConflict("agent session is not initialized")
+            state = self._read(db, row)
+            old, candidate = state.snapshot, transition.snapshot
+            try:
+                old.advance(candidate)
+            except (ValueError, InvalidStateTransitionError):
+                raise StateConflict(
+                    "invalid model admission revision or transition"
+                ) from None
+            if (
+                old.status != AgentStatus.READY_MODEL
+                or candidate.status != AgentStatus.MODEL_INFLIGHT
+                or transition.model_result is not None
+                or transition.messages
+                or transition.arguments
+                or transition.observations
+                or transition.authorizations
+                or transition.error_code is not None
+                or row.provider_key not in {None, self.admission_policy.provider_key}
+            ):
+                raise StateConflict(
+                    "invalid model admission reservation or provider binding"
+                )
+            row.provider_key = self.admission_policy.provider_key
+            grant = self.admission.acquire(
+                db, self.admission_policy, task, state, candidate
+            )
+            if isinstance(grant, AdmissionDelay):
+                waiting = AgentSnapshot.model_validate(
+                    {
+                        **old.model_dump(),
+                        "revision": old.revision + 1,
+                    }
+                )
+                result = self._apply(
+                    db, run, step, row, AgentTransition(snapshot=waiting), task=task
+                )
+                row.continuation_pending = True
+                step.status, step.error = "ready", "ProviderAdmissionDeferred"
+                step.available_at = grant.available_at
+                step.token, step.lease_until = None, None
+                self.store._event(
+                    db,
+                    run.id,
+                    "agent.admission_deferred",
+                    {
+                        "step": step.key,
+                        "revision": waiting.revision,
+                        "available_at": grant.available_at,
+                        "error_code": "ProviderAdmissionDeferred",
+                    },
+                )
+                answer = ModelAdmission(result, "admission_deferred")
+            else:
+                result = self._apply(
+                    db, run, step, row, transition, task=task, grant=grant
+                )
+                answer = ModelAdmission(result, "reserved", grant.permit)
+        return answer
+
+    def validate_model_dispatch(self, task: Task, permit) -> None:
+        with self._owned_transaction(task) as (db, _run, step):
+            row = self._session(db, step)
+            if row is None:
+                raise StateConflict("agent session is not initialized")
+            self.admission.validate(
+                db, task, self._read(db, row), permit, self.admission_policy
+            )
+
+    def _apply(
+        self, db, run, step, row, transition, *, operator=False, task=None, grant=None
+    ):
         try:
             transition = AgentTransition.model_validate(
                 checked_json(transition.model_dump(mode="json"))
@@ -699,7 +848,7 @@ class SQLAgentStore:
         )
         if changed.rowcount != 1:
             raise StateConflict("agent revision changed concurrently")
-        self._model_update(db, row, old, transition, now)
+        self._model_update(db, row, old, transition, now, task=task, grant=grant)
         dispatched = candidate.budget.tool_calls - old.budget.tool_calls
         if dispatched:
             self.store._metric(db, "agent.action_reserved", {"count": dispatched})
@@ -799,7 +948,7 @@ class SQLAgentStore:
         db.expire(row)
         return self._read(db, row, reserve_capacity=not operator)
 
-    def _model_update(self, db, row, old, transition, now):
+    def _model_update(self, db, row, old, transition, now, *, task=None, grant=None):
         candidate, outcome = transition.snapshot, transition.model_result
         starts = (
             old.status == AgentStatus.READY_MODEL
@@ -814,6 +963,19 @@ class SQLAgentStore:
             .with_for_update()
         )
         if starts:
+            if row.provider_key is not None or self.admission_policy is not None:
+                if (
+                    not isinstance(grant, AdmissionGrant)
+                    or grant.policy != self.admission_policy
+                    or grant.permit.session_id != row.id
+                    or grant.permit.model_call_id != candidate.model_call_id
+                    or grant.permit.reservation_revision != candidate.revision
+                    or grant.permit.provider_key != row.provider_key
+                    or grant.permit.expires_at <= now
+                ):
+                    raise StateConflict(
+                        "model reservation requires an atomic provider permit"
+                    )
             self.store._metric(db, "agent.model", {"outcome": "reserved"})
             if outcome is not None:
                 raise StateConflict("model reservation cannot contain a response")
@@ -853,6 +1015,11 @@ class SQLAgentStore:
                     created_at=now,
                 )
             )
+            if grant is not None:
+                if grant.permit.attempt_index != call.attempts:
+                    raise StateConflict("provider permit attempt index differs")
+                db.flush()
+                self.admission.record(db, grant)
         if outcome is not None:
             self.store._metric(db, "agent.model", {"outcome": outcome.status})
             if (
@@ -927,6 +1094,7 @@ class SQLAgentStore:
                 raw,
                 now,
             )
+            self.admission.confirm(db, row, call, outcome, task)
         elif (
             old.status == AgentStatus.MODEL_INFLIGHT
             and candidate.status != AgentStatus.MODEL_INFLIGHT
@@ -989,7 +1157,7 @@ class SQLAgentStore:
                     raise StateConflict(
                         "deferred retry requires confirmed model failure and remaining attempts"
                     )
-            result = self._apply(db, run, step, row, transition)
+            result = self._apply(db, run, step, row, transition, task=task)
             if mode == "complete":
                 spec = next(
                     s
@@ -1001,6 +1169,14 @@ class SQLAgentStore:
                 row.continuation_pending = True
                 step.status, step.error = "ready", "ModelRetryable"
                 step.available_at = self.store._now(db) + retry_delay_seconds
+                if (
+                    transition.model_result.backpressure is not None
+                    and row.provider_key
+                ):
+                    policy_row = db.get(ProviderAdmissionRow, row.provider_key)
+                    step.available_at = max(
+                        step.available_at, policy_row.cooldown_until
+                    )
                 step.token, step.lease_until = None, None
                 self.store._event(
                     db,

@@ -14,6 +14,11 @@ from agentflow.application.ports.model_usage import (
     ModelUsageSummary,
     TokenUsageTotal,
 )
+from agentflow.application.ports.provider_admission import (
+    ModelPermit,
+    ProviderBackpressure,
+    ProviderKey,
+)
 from agentflow.domain.agent.action import Action, ErrorCode, Identifier
 from agentflow.domain.agent.budget import Counter
 from agentflow.domain.agent.review import (
@@ -59,6 +64,7 @@ class ModelCallResult(BaseModel):
     normalized_usage: ModelUsage | None = None
     model: str | None = Field(default=None, max_length=256)
     request_id: str | None = Field(default=None, max_length=256)
+    backpressure: ProviderBackpressure | None = None
 
 
 class ModelAttemptRecord(BaseModel):
@@ -150,6 +156,8 @@ class AgentSession(BaseModel):
     approvals: tuple[ActionApproval, ...] = ()
     reconciliations: tuple[ActionReconciliation, ...] = ()
     model_attempts: tuple[ModelAttemptRecord, ...] = ()
+    provider_key: ProviderKey | None = None
+    model_permits: tuple[ModelPermit, ...] = ()
 
     def usage_summary(self) -> ModelUsageSummary:
         totals = {}

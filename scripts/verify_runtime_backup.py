@@ -13,6 +13,7 @@ from rc_support import TemporaryPostgres, migrate, run
 from rc_workload import Workload
 from sqlalchemy import select, text
 
+from agentflow.application.ports.provider_admission import ProviderAdmissionPolicy
 from agentflow.infrastructure.persistence.models import Base
 from agentflow.infrastructure.persistence.store import json_bytes
 
@@ -33,7 +34,17 @@ def drill(cluster):
     source_url = cluster.database("agentflow_rc_source")
     target_url = cluster.database("agentflow_rc_restored")
     migrate(source_url)
-    source = Workload(source_url, cluster.root / "source-records")
+    admission = ProviderAdmissionPolicy(
+        provider_key="rc-backup",
+        max_concurrent_requests=2,
+        max_requests_per_window=1000,
+        window_seconds=60,
+        permit_ttl_seconds=10,
+        policy_version="1",
+    )
+    source = Workload(
+        source_url, cluster.root / "source-records", admission_policy=admission
+    )
     target = None
     try:
         source.start(seconds=120)
@@ -62,6 +73,19 @@ def drill(cluster):
                 else None
             )
         )
+        unknown_model = source.submit("model_unknown")
+        source.wait(lambda: source.status(unknown_model, "failed"))
+        limited_model = source.submit("model_rate_limited")
+        source.wait(lambda: source.status(limited_model, "exhausted"))
+        admission_delayed = source.submit("final")
+        source.wait(
+            lambda: (
+                s
+                if (s := source.state(admission_delayed))
+                and s.step["error"] == "ProviderAdmissionDeferred"
+                else None
+            )
+        )
         source.stop()  # Stop writers before taking the logical backup.
         source.reconcile(resolved)
         before = source.check()
@@ -69,8 +93,13 @@ def drill(cluster):
         checkpoints = {r: source.state(r) for r in source.runs}
         assert checkpoints[done].agent.usage_summary().total_tokens.value == 20
         assert facts["agent_model_attempts"]
+        assert facts["provider_admissions"] and facts["provider_permits"]
+        assert facts["provider_admissions"][0]["cooldown_until"] > 0
+        held = checkpoints[unknown_model].agent.model_permits[0]
+        assert held.status == "unknown" and held.released_at is None
+        assert checkpoints[admission_delayed].agent.snapshot.budget.model_attempts == 0
         with source.store.engine.connect() as db:
-            assert db.scalar(text("SELECT version_num FROM alembic_version")) == "0004"
+            assert db.scalar(text("SELECT version_num FROM alembic_version")) == "0005"
         for artifact in facts["artifacts"]:
             assert (
                 artifact["digest"]
@@ -110,13 +139,15 @@ def drill(cluster):
             ],
             timeout=60,
         )
-        target = Workload(target_url, cluster.root / "restored-records")
+        target = Workload(
+            target_url, cluster.root / "restored-records", admission_policy=admission
+        )
         target.runs = list(source.runs)
         target.scenarios = dict(source.scenarios)
         assert inventory(target.store) == facts, "RestoreFactMismatch"
         migrate(target_url)
         with target.store.engine.connect() as db:
-            assert db.scalar(text("SELECT version_num FROM alembic_version")) == "0004"
+            assert db.scalar(text("SELECT version_num FROM alembic_version")) == "0005"
         assert not audit(target.store.engine)["severe"]
         for r, checkpoint in checkpoints.items():
             assert target.state(r) == checkpoint
@@ -124,6 +155,12 @@ def drill(cluster):
         target.start(seconds=120)
         target.wait(lambda: target.status(resolved, "succeeded"))
         target.wait(lambda: target.store.get_run(resolved)["status"] == "succeeded")
+        target.wait(
+            lambda: target.store.get_run(admission_delayed)["status"] == "succeeded"
+        )
+        assert target.state(unknown_model).agent == checkpoints[unknown_model].agent
+        assert target.state(limited_model).agent == checkpoints[limited_model].agent
+        assert target.state(admission_delayed).agent.snapshot.budget.model_attempts == 1
         assert target.state(unresolved).agent == checkpoints[unresolved].agent
         assert target.state(cancelled).agent == checkpoints[cancelled].agent
         assert target.state(pending).agent == checkpoints[pending].agent
@@ -157,12 +194,13 @@ def drill(cluster):
         target.check()
         return {
             "status": "PASS",
-            "alembic": "0004",
+            "alembic": "0005",
             "tables_compared": len(facts),
             "source": before,
             "restored_runs": len(target.runs),
             "newly_approved_dispatches": 1,
             "replayed_tool_dispatches": 0,
+            "admission_restored": True,
             "backup": "logical pg_dump/pg_restore; not HA/PITR",
         }
     finally:

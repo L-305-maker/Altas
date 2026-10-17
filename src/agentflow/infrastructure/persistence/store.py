@@ -403,6 +403,7 @@ class Store:
                 "waiting_approval": "waiting",
                 "waiting_reconciliation": "waiting",
                 "retry_scheduled": "ready",
+                "admission_deferred": "ready",
             }
             if (
                 snapshot.revision != result.revision
@@ -410,7 +411,7 @@ class Store:
                 or snapshot.status.value
                 != (
                     "ready_model"
-                    if result.status == "retry_scheduled"
+                    if result.status in {"retry_scheduled", "admission_deferred"}
                     else result.status
                 )
                 or step.status != expected[result.status]
@@ -433,6 +434,13 @@ class Store:
                     or call.status != "failed"
                 ):
                     raise StateConflict("agent retry is not durably scheduled")
+            if result.status == "admission_deferred" and (
+                not agent.continuation_pending
+                or step.error != "ProviderAdmissionDeferred"
+                or not math.isfinite(step.available_at)
+                or agent.provider_key is None
+            ):
+                raise StateConflict("agent admission deferral is not durably scheduled")
 
     def complete(self, task: Task, output: Any) -> bool:
         encoded = json_bytes(output)

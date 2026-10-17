@@ -18,6 +18,7 @@ from agentflow.domain.workflow.spec import StepSpec, WorkflowSpec
 from agentflow.domain.agent.run import AgentSnapshot
 from agentflow.infrastructure.persistence.models import AgentSessionRow
 from agentflow.infrastructure.persistence.agent_store import SQLAgentStore
+from agentflow.application.ports.provider_admission import ProviderAdmissionPolicy
 from agentflow.interfaces.api.app import create_app as core_app
 from sqlalchemy import select
 from applications.living_guideline.bootstrap import build_handlers, create_app
@@ -40,7 +41,9 @@ try:
         assert store.get_run(run_id)["status"] == "succeeded"
         assert store.artifacts(run_id)[0]["content"]["citations"][0]["quote"] == "evidence"
     # Exercise installed core modules and the existing authenticated metrics endpoint.
-    observed = Settings(provider="mock", telemetry=True, api_token=SecretStr("wheel-smoke-test-token"))
+    observed = Settings(provider="mock", telemetry=True, api_token=SecretStr("wheel-smoke-test-token"), provider_admission=ProviderAdmissionPolicy(
+        provider_key="wheel-fixture", max_concurrent_requests=1, max_requests_per_window=2, window_seconds=60, policy_version="1",
+    ))
     with TestClient(core_app(observed, store)) as client:
         run_id = store.submit(store.register(WorkflowSpec(name="installed-durable", steps=(
             StepSpec(id="agent", handler="agent", artifact=True, parameters={"prompt":"wheel goal", "agent":{"mode":"durable_v1"}}),
@@ -55,6 +58,8 @@ try:
         summary = SQLAgentStore(store).usage_summary(snapshot.id)
         assert summary.attempts == summary.unavailable_usage_attempts == 1
         assert summary.total_tokens.value is None
+        with SQLAgentStore(store)._operator_transaction(snapshot.id) as (_, _, _, _, session):
+            assert len(session.model_permits) == 1 and session.model_permits[0].status == "released"
         assert client.get("/metrics").status_code == 401
         response = client.get("/metrics", headers={"Authorization":"Bearer wheel-smoke-test-token"})
         assert response.status_code == 200

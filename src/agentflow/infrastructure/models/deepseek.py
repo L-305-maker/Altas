@@ -13,6 +13,7 @@ from agentflow.application.ports.model_provider import (
     ModelError,
     ModelOutcomeUnknown,
     ModelProtocolError,
+    ModelRateLimitedError,
     ModelResponse,
     ModelRetryableError,
 )
@@ -103,7 +104,7 @@ class DeepSeekProvider:
                         hint = float(response.headers.get("Retry-After", ""))
                     except ValueError:
                         hint = None
-                    raise ModelRetryableError(retry_after_seconds=hint)
+                    raise ModelRateLimitedError(retry_after_seconds=hint)
                 if 400 <= response.status_code < 500:
                     raise ModelConfigurationError()
                 if not response.is_success:

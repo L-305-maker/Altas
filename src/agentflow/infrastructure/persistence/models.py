@@ -8,6 +8,7 @@ from typing import Any
 
 from sqlalchemy import (
     JSON,
+    BigInteger,
     Boolean,
     CheckConstraint,
     Float,
@@ -105,6 +106,7 @@ class AgentSessionRow(Base):
     continuation_pending: Mapped[bool] = mapped_column(
         Boolean, default=False, server_default=text("false")
     )
+    provider_key: Mapped[str | None] = mapped_column(String(80))
     created_at: Mapped[float] = mapped_column(Float)
     updated_at: Mapped[float] = mapped_column(Float)
 
@@ -161,6 +163,58 @@ class AgentModelAttemptRow(Base):
     usage: Mapped[dict[str, Any]] = mapped_column(JSON)
     created_at: Mapped[float | None] = mapped_column(Float)
     confirmed_at: Mapped[float | None] = mapped_column(Float)
+
+
+class ProviderAdmissionRow(Base):
+    __tablename__ = "provider_admissions"
+    __table_args__ = (
+        CheckConstraint("revision >= 0", name="ck_provider_admission_revision"),
+    )
+    provider_key: Mapped[str] = mapped_column(String(80), primary_key=True)
+    policy: Mapped[dict[str, Any]] = mapped_column(JSON)
+    cooldown_until: Mapped[float] = mapped_column(Float)
+    revision: Mapped[int] = mapped_column(
+        BigInteger, default=0, server_default=text("0")
+    )
+    created_at: Mapped[float] = mapped_column(Float)
+
+
+class ProviderPermitRow(Base):
+    __tablename__ = "provider_permits"
+    __table_args__ = (
+        ForeignKeyConstraint(
+            ["session_id", "model_call_id", "attempt_index"],
+            [
+                "agent_model_attempts.session_id",
+                "agent_model_attempts.model_call_id",
+                "agent_model_attempts.attempt_index",
+            ],
+        ),
+        UniqueConstraint("session_id", "model_call_id", "attempt_index"),
+        Index("ix_provider_permit_window", "provider_key", "created_at"),
+        Index("ix_provider_permit_active", "provider_key", "status", "expires_at"),
+        CheckConstraint(
+            "status IN ('active','released','unknown')",
+            name="ck_provider_permit_status",
+        ),
+        CheckConstraint(
+            "attempt_index >= 1 AND reservation_revision >= 1",
+            name="ck_provider_permit_counts",
+        ),
+    )
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    provider_key: Mapped[str] = mapped_column(
+        ForeignKey("provider_admissions.provider_key")
+    )
+    session_id: Mapped[str] = mapped_column(String(128))
+    model_call_id: Mapped[str] = mapped_column(String(128))
+    attempt_index: Mapped[int] = mapped_column(Integer)
+    reservation_revision: Mapped[int] = mapped_column(Integer)
+    token_digest: Mapped[str] = mapped_column(String(64))
+    status: Mapped[str] = mapped_column(String(16))
+    created_at: Mapped[float] = mapped_column(Float)
+    expires_at: Mapped[float] = mapped_column(Float)
+    released_at: Mapped[float | None] = mapped_column(Float)
 
 
 class AgentMessageRow(Base):

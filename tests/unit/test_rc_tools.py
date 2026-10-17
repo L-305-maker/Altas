@@ -119,7 +119,7 @@ async def test_worker_diagnostics_exclude_private_task_data(
             pass
 
     class FakeRunner:
-        def __init__(self, *args):
+        def __init__(self, *args, **kwargs):
             pass
 
         async def run(self, *args, **kwargs):
@@ -134,7 +134,7 @@ async def test_worker_diagnostics_exclude_private_task_data(
             raise TimeoutError
 
     monkeypatch.setattr(module, "Store", lambda url: FakeStore())
-    monkeypatch.setattr(module, "SQLAgentStore", lambda store: store)
+    monkeypatch.setattr(module, "SQLAgentStore", lambda store, **kwargs: store)
     monkeypatch.setattr(module, "DurableAgentRunner", FakeRunner)
     monkeypatch.setattr(module, "Worker", FakeWorker)
     await module.serve("unused", tmp_path, 1)

@@ -32,8 +32,14 @@ from agentflow.application.ports.model_provider import (
     DurableModelProvider,
     ModelConfigurationError,
     ModelProtocolError,
+    ModelRateLimitedError,
     ModelResponse,
     ModelRetryableError,
+)
+from agentflow.application.ports.provider_admission import (
+    MAX_COOLDOWN_SECONDS,
+    ProviderAdmissionStore,
+    ProviderBackpressure,
 )
 from agentflow.application.tools.runtime import (
     ToolApprovalRequired,
@@ -139,9 +145,11 @@ class DurableAgentRunner:
         tools: ToolRuntime,
         *,
         context: AgentContextBuilder | None = None,
+        admission: ProviderAdmissionStore | None = None,
     ):
         self.store, self.provider, self.tools = store, provider, tools
         self.context = context or AgentContextBuilder()
+        self.admission = admission
 
     async def run(
         self, task: Task, prompt: str, *, allowed: set[str]
@@ -209,7 +217,7 @@ class DurableAgentRunner:
             state.snapshot.revision,
         )
 
-    def _model_result(self, state, status, response=None):
+    def _model_result(self, state, status, response=None, backpressure=None):
         return ModelCallResult(
             model_call_id=state.snapshot.model_call_id,
             status=status,
@@ -217,17 +225,26 @@ class DurableAgentRunner:
             normalized_usage=response.normalized_usage if response else None,
             model=response.model if response else None,
             request_id=response.request_id if response else None,
+            backpressure=backpressure,
         )
 
     async def _fail(
-        self, task, state, code, *, exhausted=False, model_status=None, response=None
+        self,
+        task,
+        state,
+        code,
+        *,
+        exhausted=False,
+        model_status=None,
+        response=None,
+        backpressure=None,
     ):
         transition = AgentTransition(
             snapshot=successor(
                 state.snapshot,
                 status=AgentStatus.EXHAUSTED if exhausted else AgentStatus.FAILED,
             ),
-            model_result=self._model_result(state, model_status, response)
+            model_result=self._model_result(state, model_status, response, backpressure)
             if model_status
             else None,
             error_code=code,
@@ -257,13 +274,29 @@ class DurableAgentRunner:
                 budget=budget,
             )
         )
+        permit = None
         try:
-            state = await asyncio.to_thread(
-                self.store.commit_transition, task, reservation
-            )
+            if self.admission is None:
+                state = await asyncio.to_thread(
+                    self.store.commit_transition, task, reservation
+                )
+            else:
+                admitted = await asyncio.to_thread(
+                    self.admission.reserve_model_attempt, task, reservation
+                )
+                state = admitted.state
+                if admitted.status == "admission_deferred":
+                    return state, self._result(task, state, status="admission_deferred")
+                if admitted.status != "reserved" or admitted.permit is None:
+                    raise StateConflict("invalid model admission result")
+                permit = admitted.permit
         except AgentDataError:
             return state, await self._fail(task, state, "AgentStorageLimit")
         await asyncio.to_thread(self.store.load, task)
+        if permit is not None:
+            await asyncio.to_thread(
+                self.admission.validate_model_dispatch, task, permit
+            )
         response = None
         try:
             received = await self.provider.respond(context, schemas)
@@ -272,12 +305,26 @@ class DurableAgentRunner:
             response = ModelResponse.model_validate(received.model_dump(mode="json"))
             finite_json(response.model_dump(mode="json"))
         except ModelRetryableError as error:
+            backpressure = (
+                ProviderBackpressure(
+                    retry_after_seconds=min(
+                        MAX_COOLDOWN_SECONDS, error.retry_after_seconds or 0
+                    )
+                )
+                if isinstance(error, ModelRateLimitedError)
+                else None
+            )
             if (
                 state.snapshot.budget.model_attempts
                 >= state.snapshot.budget.max_model_attempts
             ):
                 return state, await self._fail(
-                    task, state, "AgentExhausted", exhausted=True, model_status="failed"
+                    task,
+                    state,
+                    "AgentExhausted",
+                    exhausted=True,
+                    model_status="failed",
+                    backpressure=backpressure,
                 )
             saved = await asyncio.to_thread(
                 self.store.defer_model_retry,
@@ -285,7 +332,9 @@ class DurableAgentRunner:
                 AgentTransition(
                     snapshot=successor(state.snapshot, status=AgentStatus.READY_MODEL),
                     model_result=ModelCallResult(
-                        model_call_id=state.snapshot.model_call_id, status="failed"
+                        model_call_id=state.snapshot.model_call_id,
+                        status="failed",
+                        backpressure=backpressure,
                     ),
                     error_code="ModelRetryable",
                 ),
