@@ -1,5 +1,4 @@
 import pytest
-
 from runtime_assertions import runtime_invariants as runtime_invariants
 
 
