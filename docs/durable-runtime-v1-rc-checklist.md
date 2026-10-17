@@ -20,7 +20,7 @@ NOT APPLICABLE 只用于明确不适用的部署项并注明理由，不用来�
 | AgentStore CAS / fencing / Worker 取消 | PASS | 真实临时 PostgreSQL release-gates（结果见下） |
 | Runner、审批、UNKNOWN 对账、重试、上下文 | PASS | 完整回归、真实 PG 及 soak 组合验证 |
 | PostgreSQL 备份恢复 | PASS | 实际 pg_dump/pg_restore，12 表、7 Run 全量事实一致；已执行工具重派 0，待审批新批准派发 1 |
-| 单机独立 Worker 稳定性 | PASS | 180 秒目标实际 194.97 秒，29 波、179 Run、91 Action、298 次领取；另跑最终记录检查 35.58 秒 |
+| 单机独立 Worker 稳定性 | PASS | 180 秒目标实际 194.97 秒，29 波、179 Run、91 Action、298 次领取；最终短样本 34.24 秒 |
 | 跨主机部署 / 网络分区 | NOT VERIFIED | 无双宿主；见 recovery runbook 的 staging 入口 |
 | 真实 DeepSeek API | NOT VERIFIED | 未提供专用付费授权/Key，本轮真实请求 0；默认 live 跳过 |
 | 指标故障与只读核查 | PASS | COMMIT 后真进程退出、三进程共享目录/API、坏目录、本地重启与只读审计 |
@@ -40,7 +40,7 @@ NOT APPLICABLE 只用于明确不适用的部署项并注明理由，不用来�
 | `uv run ruff format --check src tests scripts migrations evals` | 116 files already formatted |
 | `uv run python scripts/verify_postgres.py --bin D:/PSQL/bin --release-gates` | 394 passed，零跳过，241.73 秒；真实临时 PG，含 SQLite 对照 |
 | `uv run python scripts/verify_durable_soak.py --bin D:/PSQL/bin --seconds 180 --workload 6 --seed 7` | PASS；194.97 秒、29 波、179 Run、91 不同 Action 派发、298 次领取 |
-| 同脚本 `--seconds 30 --workload 6 --seed 7` | PASS；35.58 秒、3 波、23 Run、13 Action、42 次领取；最终严格记录/权限检查 |
+| 同脚本 `--seconds 30 --workload 6 --seed 7` | PASS；34.24 秒、3 波、23 Run、13 Action、41 次领取；最终记录/权限/deadline 检查 |
 | `uv run python scripts/verify_runtime_backup.py --bin D:/PSQL/bin` | PASS；12 表、0003、7 Run；已完成 Action 重派 0，原待审批 Action 明确批准后新派发 1 |
 | `uv build` | wheel + sdist 成功 |
 | `uv run python scripts/verify_wheel.py dist/agentflow-1.0.0-py3-none-any.whl` | 仓库外安装、参考应用、Durable Step/Artifact、认证指标及离线评估成功 |

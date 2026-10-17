@@ -52,9 +52,11 @@ def exercise(cluster, workload, *, seconds, count, seed):
     workload.stop()
     workload.start(seconds=seconds + 120)
     while True:
+        state = workload.state(retry)
+        # Read the clock after the checkpoint, so crossing the deadline between
+        # reads cannot misclassify a legal reservation as an early retry.
         with workload.store.transaction() as db:
             now = workload.store._now(db)
-        state = workload.state(retry)
         if now >= deadline:
             break
         assert state.step["available_at"] == deadline
