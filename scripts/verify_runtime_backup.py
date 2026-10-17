@@ -67,8 +67,10 @@ def drill(cluster):
         before = source.check()
         facts = inventory(source.store)
         checkpoints = {r: source.state(r) for r in source.runs}
+        assert checkpoints[done].agent.usage_summary().total_tokens.value == 20
+        assert facts["agent_model_attempts"]
         with source.store.engine.connect() as db:
-            assert db.scalar(text("SELECT version_num FROM alembic_version")) == "0003"
+            assert db.scalar(text("SELECT version_num FROM alembic_version")) == "0004"
         for artifact in facts["artifacts"]:
             assert (
                 artifact["digest"]
@@ -114,7 +116,7 @@ def drill(cluster):
         assert inventory(target.store) == facts, "RestoreFactMismatch"
         migrate(target_url)
         with target.store.engine.connect() as db:
-            assert db.scalar(text("SELECT version_num FROM alembic_version")) == "0003"
+            assert db.scalar(text("SELECT version_num FROM alembic_version")) == "0004"
         assert not audit(target.store.engine)["severe"]
         for r, checkpoint in checkpoints.items():
             assert target.state(r) == checkpoint
@@ -155,7 +157,7 @@ def drill(cluster):
         target.check()
         return {
             "status": "PASS",
-            "alembic": "0003",
+            "alembic": "0004",
             "tables_compared": len(facts),
             "source": before,
             "restored_runs": len(target.runs),

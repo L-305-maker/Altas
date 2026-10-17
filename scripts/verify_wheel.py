@@ -17,6 +17,7 @@ from agentflow.bootstrap import build_handlers as core_handlers
 from agentflow.domain.workflow.spec import StepSpec, WorkflowSpec
 from agentflow.domain.agent.run import AgentSnapshot
 from agentflow.infrastructure.persistence.models import AgentSessionRow
+from agentflow.infrastructure.persistence.agent_store import SQLAgentStore
 from agentflow.interfaces.api.app import create_app as core_app
 from sqlalchemy import select
 from applications.living_guideline.bootstrap import build_handlers, create_app
@@ -51,6 +52,9 @@ try:
         with store.transaction() as db:
             snapshot = AgentSnapshot.model_validate(db.scalar(select(AgentSessionRow)).snapshot)
         assert snapshot.status == "succeeded" and snapshot.budget.model_attempts == 1
+        summary = SQLAgentStore(store).usage_summary(snapshot.id)
+        assert summary.attempts == summary.unavailable_usage_attempts == 1
+        assert summary.total_tokens.value is None
         assert client.get("/metrics").status_code == 401
         response = client.get("/metrics", headers={"Authorization":"Bearer wheel-smoke-test-token"})
         assert response.status_code == 200

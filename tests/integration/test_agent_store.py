@@ -462,16 +462,24 @@ def test_model_crash_recovery_keeps_call_id_and_accumulated_attempts(agents):
     recovered = agents.load(new)
     assert recovered.model_calls[0].status == "unknown"
     assert recovered.snapshot.budget.model_attempts == 1
-    ready = agents.commit_transition(
+    with pytest.raises(StateConflict):
+        agents.commit_transition(
+            new,
+            AgentTransition(
+                snapshot=candidate(recovered.snapshot, status=AgentStatus.READY_MODEL),
+                model_result=ModelCallResult(model_call_id="model-1", status="failed"),
+            ),
+        )
+    terminated = agents.fail_agent_step(
         new,
         AgentTransition(
-            snapshot=candidate(recovered.snapshot, status=AgentStatus.READY_MODEL),
-            model_result=ModelCallResult(model_call_id="model-1", status="failed"),
+            snapshot=candidate(recovered.snapshot, status=AgentStatus.FAILED),
+            model_result=ModelCallResult(model_call_id="model-1", status="unknown"),
         ),
     )
-    retried = reserve(agents, new, ready)
-    assert retried.model_calls[0].attempts == 2
-    assert retried.snapshot.budget.model_rounds == 1
+    assert terminated.model_attempts == recovered.model_attempts
+    assert terminated.snapshot.budget.model_attempts == 1
+    assert terminated.snapshot.budget.model_rounds == 1
 
 
 @pytest.mark.parametrize("value", [float("nan"), float("inf"), -float("inf")])

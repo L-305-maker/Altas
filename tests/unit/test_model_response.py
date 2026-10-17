@@ -39,6 +39,14 @@ def test_duplicate_provider_ids_rejected():
         response(assistant_message={"role": "assistant", "tool_calls": [call, call]})
 
 
+@pytest.mark.parametrize(
+    "raw", [{"total_tokens": float("nan")}, {"x": float("inf")}, {"x": "x" * 16_000}]
+)
+def test_unsafe_or_oversized_usage_is_rejected(raw):
+    with pytest.raises(ValidationError):
+        response(usage=raw)
+
+
 @pytest.mark.asyncio
 async def test_mock_typed_responses_errors_and_legacy():
     provider = MockProvider(
@@ -66,7 +74,12 @@ async def test_deepseek_metadata_and_no_hidden_retry():
             json={
                 "id": "req",
                 "model": "model",
-                "usage": {"total_tokens": 12},
+                "usage": {
+                    "prompt_tokens": 8,
+                    "completion_tokens": 4,
+                    "total_tokens": 12,
+                    "prompt_cache_hit_tokens": 2,
+                },
                 "choices": [
                     {
                         "message": {"role": "assistant", "content": "ok"},
@@ -80,7 +93,10 @@ async def test_deepseek_metadata_and_no_hidden_retry():
         "test-key", "model", transport=httpx.MockTransport(handle)
     )
     result = await provider.respond([])
-    assert result.usage == {"total_tokens": 12}
+    assert result.usage["prompt_cache_hit_tokens"] == 2
+    assert result.normalized_usage.input_tokens == 8
+    assert result.normalized_usage.output_tokens == 4
+    assert result.normalized_usage.total_tokens == 12
     assert result.request_id == "req"
     assert len(requests) == 1
 

@@ -18,10 +18,17 @@ from agentflow.application.ports.agent_store import (
     AgentStoreUnavailable,
     AgentTransition,
     LostLease,
+    ModelAttemptRecord,
     ModelCallRecord,
     ModelCallResult,
     StateConflict,
     StoredAction,
+)
+from agentflow.application.ports.model_usage import (
+    MAX_USAGE_BYTES,
+    ModelUsage,
+    ModelUsageSummary,
+    normalize_usage,
 )
 from agentflow.domain.agent.action import Action, digest_arguments
 from agentflow.domain.agent.review import (
@@ -41,6 +48,7 @@ from agentflow.infrastructure.persistence.models import (
     AgentActionReconciliationRow,
     AgentActionRow,
     AgentMessageRow,
+    AgentModelAttemptRow,
     AgentModelCallRow,
     AgentSessionRow,
     RunRow,
@@ -166,6 +174,35 @@ class SQLAgentStore:
                 )
             )
             call_order = {call.model_call_id: call.round_index for call in calls}
+            attempts = [
+                ModelAttemptRecord(
+                    session_id=a.session_id,
+                    model_call_id=a.model_call_id,
+                    attempt_index=a.attempt_index,
+                    outcome=a.outcome,
+                    accounting=a.accounting,
+                    model=a.model,
+                    request_id=a.request_id,
+                    raw_usage=checked_json(a.raw_usage, MAX_USAGE_BYTES),
+                    usage=ModelUsage.model_validate(
+                        checked_json(a.usage, MAX_USAGE_BYTES)
+                    ),
+                    created_at=a.created_at,
+                    confirmed_at=a.confirmed_at,
+                )
+                for a in db.scalars(
+                    select(AgentModelAttemptRow)
+                    .where(AgentModelAttemptRow.session_id == row.id)
+                    .order_by(
+                        AgentModelAttemptRow.model_call_id,
+                        AgentModelAttemptRow.attempt_index,
+                    )
+                    .with_for_update()
+                )
+            ]
+            if any(a.model_call_id not in call_order for a in attempts):
+                raise StateConflict("attempt references an unknown model call")
+            attempts.sort(key=lambda a: (call_order[a.model_call_id], a.attempt_index))
             actions = []
             for a in db.scalars(
                 select(AgentActionRow)
@@ -219,6 +256,7 @@ class SQLAgentStore:
                 snapshot=snapshot,
                 messages=messages,
                 model_calls=calls,
+                model_attempts=tuple(attempts),
                 actions=tuple(actions),
                 approvals=tuple(self._approval(a, actions) for a in approval_rows),
                 reconciliations=tuple(
@@ -286,6 +324,13 @@ class SQLAgentStore:
             "initial": initial.model_dump(mode="json"),
             "state": state.model_dump(mode="json"),
         }
+        # Backfilled metadata must not make previously valid legacy sessions
+        # unreadable. All newly reserved attempts count toward the session quota.
+        data["state"]["model_attempts"] = [
+            a for a in data["state"]["model_attempts"] if a["accounting"] == "recorded"
+        ]
+        if not data["state"]["model_attempts"]:
+            del data["state"]["model_attempts"]
         checked_json(data, MAX_SESSION_BYTES)
         if not reserve or state.snapshot.status.is_terminal:
             return
@@ -324,10 +369,13 @@ class SQLAgentStore:
         for call in projected["model_calls"]:
             if call["status"] == "inflight":
                 call["status"] = "unknown"
+        pending_attempts = sum(a.outcome == "inflight" for a in state.model_attempts)
         AgentSnapshot.model_validate(snapshot)
         checked_json(snapshot, 2_000_000 - 1024)
         data["control_margin"] = "x" * 1024
-        remaining = 0
+        # Latest-call raw usage, attempt raw usage and normalized integers can
+        # each grow by the bounded usage size. Admission reserves result space.
+        remaining = pending_attempts * (3 * MAX_USAGE_BYTES + 4096)
         approvals = {a.action_id: a for a in state.approvals}
         for stored in state.actions:
             if stored.action.status not in {
@@ -365,6 +413,26 @@ class SQLAgentStore:
             raise StateConflict("model history does not match model round budget")
         if sum(c.attempts for c in calls) != snapshot.budget.model_attempts:
             raise StateConflict("model history does not match attempt budget")
+        if len(state.model_attempts) != snapshot.budget.model_attempts:
+            raise StateConflict("attempt ledger does not match attempt budget")
+        for call in calls:
+            attempts = [
+                a for a in state.model_attempts if a.model_call_id == call.model_call_id
+            ]
+            if (
+                [a.attempt_index for a in attempts] != list(range(1, call.attempts + 1))
+                or any(a.session_id != snapshot.id for a in attempts)
+                or attempts[-1].outcome != call.status
+                or any(
+                    a.outcome not in {"failed", "LEGACY_UNMEASURED"}
+                    for a in attempts[:-1]
+                )
+                or (
+                    attempts[-1].accounting == "recorded"
+                    and attempts[-1].raw_usage != call.usage
+                )
+            ):
+                raise StateConflict("attempt ledger differs from logical model call")
         if calls and calls[-1].model_call_id != snapshot.model_call_id:
             raise StateConflict("snapshot does not reference the latest model call")
         if (
@@ -559,6 +627,10 @@ class SQLAgentStore:
                 raise StateConflict("agent session is not initialized")
             result = self._read(db, row)
         return result
+
+    def usage_summary(self, session_id: str) -> ModelUsageSummary:
+        with self._operator_transaction(session_id) as (_db, _run, _step, _row, state):
+            return state.usage_summary()
 
     def _apply(self, db, run, step, row, transition, *, operator=False):
         try:
@@ -769,6 +841,18 @@ class SQLAgentStore:
                     None,
                     now,
                 )
+            db.flush()  # ModelCall precedes Attempt (composite foreign key).
+            db.add(
+                AgentModelAttemptRow(
+                    session_id=row.id,
+                    model_call_id=call.model_call_id,
+                    attempt_index=call.attempts,
+                    outcome="inflight",
+                    accounting="recorded",
+                    usage=ModelUsage().model_dump(mode="json"),
+                    created_at=now,
+                )
+            )
         if outcome is not None:
             self.store._metric(db, "agent.model", {"outcome": outcome.status})
             if (
@@ -777,6 +861,45 @@ class SQLAgentStore:
                 or call.status not in {"inflight", "unknown"}
             ):
                 raise StateConflict("model outcome does not match a pending call")
+            attempt = db.scalar(
+                select(AgentModelAttemptRow)
+                .where(
+                    AgentModelAttemptRow.session_id == row.id,
+                    AgentModelAttemptRow.model_call_id == call.model_call_id,
+                    AgentModelAttemptRow.attempt_index == call.attempts,
+                )
+                .with_for_update()
+            )
+            if attempt is None:
+                raise StateConflict("model attempt reservation is missing")
+            raw = checked_json(outcome.usage, MAX_USAGE_BYTES)
+            usage = outcome.normalized_usage or normalize_usage(raw)
+            checked_json(usage.model_dump(mode="json"), MAX_USAGE_BYTES)
+            if raw is None and usage.source != "unavailable":
+                raise AgentDataError("normalized usage requires raw measurements")
+            if outcome.status == "unknown" and (
+                raw is not None or usage != ModelUsage()
+            ):
+                raise StateConflict("unknown outcome cannot claim measured usage")
+            if attempt.outcome == "unknown":
+                if (
+                    outcome.status != "unknown"
+                    or raw is not None
+                    or (outcome.model is not None or outcome.request_id is not None)
+                ):
+                    raise StateConflict(
+                        "unknown attempt cannot be automatically confirmed"
+                    )
+            elif attempt.outcome == "inflight":
+                attempt.outcome, attempt.raw_usage, attempt.usage = (
+                    outcome.status,
+                    raw,
+                    usage.model_dump(mode="json"),
+                )
+                attempt.model, attempt.request_id = outcome.model, outcome.request_id
+                attempt.confirmed_at = now
+            else:
+                raise StateConflict("model attempt already confirmed")
             if outcome.status == "succeeded" and candidate.status not in {
                 AgentStatus.ACTIONS_PENDING,
                 AgentStatus.SUCCEEDED,
@@ -801,7 +924,7 @@ class SQLAgentStore:
                 raise StateConflict("unknown model outcome cannot authorize a retry")
             call.status, call.usage, call.updated_at = (
                 outcome.status,
-                checked_json(outcome.usage, MAX_MESSAGE_BYTES),
+                raw,
                 now,
             )
         elif (

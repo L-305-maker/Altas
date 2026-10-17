@@ -20,7 +20,7 @@ Worker 及连接、停止临时实例并删除合成备份。Windows 关闭的�
 
 备份演练先停止 Writer，保留已完成结果、待审批与已消耗审批、已应用对账、未解决 UNKNOWN、未来重试、
 取消 Run。实际执行 custom-format `pg_dump`，向新库 `pg_restore --exit-on-error`，比对全部业务表
-以及 Alembic 0003。比对包括消息、revision、预算、模型 ID、Action/幂等键/绑定、审批/审计、时间和
+以及 Alembic 0004。比对包括逐次模型尝试/用量、消息、revision、预算、模型 ID、Action/幂等键/绑定、审批/审计、时间和
 Artifact 内容/digest；内容仅在进程内比较，不写报告。恢复 Worker 不重派已执行工具；待审批行动
 在恢复后明确批准才首次执行；未解决
 UNKNOWN 经显式操作员对账后继续，延迟重试按原数据库 deadline 自然到期。
@@ -103,7 +103,7 @@ Prometheus 是 best-effort 信号，COMMIT 后指标前退出会少计，默认�
 
 需要两台独立宿主及一个**专用** PostgreSQL，数据库名必须以 `agentflow_rc_` 开头，例如
 `agentflow_rc_staging_<deployment-id>`；仅给测试角色访问该库。部署匹配代码/工具版本，设置 TLS、
-connect_timeout、statement_timeout、lock_timeout；用已有 Alembic 初始化到 0003。禁止指向生产库。
+connect_timeout、statement_timeout、lock_timeout；用已有 Alembic 初始化到 0004。禁止指向生产库。
 
 协调主机在仓库根目录可使用以下显式夹具（环境 URL 来自受保护 Secret，输出只有合成 Run ID）：
 

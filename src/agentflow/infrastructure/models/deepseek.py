@@ -16,6 +16,7 @@ from agentflow.application.ports.model_provider import (
     ModelResponse,
     ModelRetryableError,
 )
+from agentflow.application.ports.model_usage import normalize_usage
 
 
 class DeepSeekProvider:
@@ -68,6 +69,11 @@ class DeepSeekProvider:
                 assistant_message=choice["message"],
                 finish_reason=choice["finish_reason"],
                 usage=data.get("usage"),
+                normalized_usage=normalize_usage(
+                    data.get("usage"),
+                    input_field="prompt_tokens",
+                    output_field="completion_tokens",
+                ),
                 model=data.get("model"),
                 request_id=data.get("id"),
             )

@@ -393,3 +393,19 @@ RC 能力现已通过审核树差异集成到 main，保留原 PR 历史。Soak 
 不序列化 Task 的输入、依赖或 Prompt；审计支持不暴露 UUID 的有界整数分页，各页是独立快照。
 普通 pytest 必须显式加 --run-live-provider，且授权环境变量和专用 Key 同时存在才会运行付费验收；
 环境变量单独存在时仍跳过。独立脚本的 --allow-paid-request 和手动工作流默认关闭策略保持不变。
+
+## 逐次模型尝试与用量事实
+
+`0004_agent_model_attempt_usage` 新增逐尝试账本，保留已有逻辑调用及全部行动/审批/对账数据。
+预约、结果、延期重试和取消/租约恢复继续在同一 CAS/fencing 事务内更新。旧的逐次用量无法从
+逻辑调用总数恢复，明确标记 `LEGACY_UNMEASURED`，不推算为零。部署先停 Writer/Worker、备份，
+执行 `alembic upgrade head`；已有数据库不能用 `create_schema()` 代替数据迁移。
+
+`AgentSession.model_attempts` 返回完整历史，`AgentSession.usage_summary()` 和
+`AgentStore.usage_summary(session_id)` 提供按字段的已报告和未报告覆盖数。只读查询调用方负责访问授权，
+本阶段不新增公开 HTTP 接口。Prometheus 仍不是账本，事件不包含 usage、供应商 request_id 或响应正文。
+详见[尝试与用量契约](model-attempt-usage.md)，包括迁移回退、容量限制及已知/未知消耗的区别。
+
+本能力是 provider-reported measured usage / soft governance；不是独立确认的账单，也不提供真实费用
+exactly-once 结算。没有可验证的请求前上界预约，仍不启用 `max_resource_units` 硬限制；调用轮次、
+尝试数、工具次数的硬预算不变。UNKNOWN 不重发，不允许为用量补账把它自动改成 FAILED。

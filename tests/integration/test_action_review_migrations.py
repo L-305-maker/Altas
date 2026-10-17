@@ -66,6 +66,7 @@ def test_review_upgrade_downgrade_preserves_old_agent_data(
                 )
             )
         command.upgrade(config, "0003")
+        command.upgrade(config, "head")
         command.check(config)
         with store.engine.connect() as db:
             assert db.execute(
@@ -87,6 +88,7 @@ def test_review_upgrade_downgrade_preserves_old_agent_data(
             c["name"] for c in inspect(store.engine).get_columns("agent_sessions")
         }
         command.upgrade(config, "0003")
+        command.upgrade(config, "head")
         command.check(config)
         with store.engine.connect() as db:
             for table in [

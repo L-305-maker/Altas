@@ -5,10 +5,15 @@
 所有写入先持久化预约，再由调用方在事务外执行外部操作。
 """
 
-from typing import Annotated, Literal, Protocol
+from typing import Annotated, Literal, Protocol, Self
 
-from pydantic import BaseModel, ConfigDict, Field, JsonValue
+from pydantic import BaseModel, ConfigDict, Field, JsonValue, model_validator
 
+from agentflow.application.ports.model_usage import (
+    ModelUsage,
+    ModelUsageSummary,
+    TokenUsageTotal,
+)
 from agentflow.domain.agent.action import Action, ErrorCode, Identifier
 from agentflow.domain.agent.budget import Counter
 from agentflow.domain.agent.review import (
@@ -51,6 +56,43 @@ class ModelCallResult(BaseModel):
     model_call_id: Identifier
     status: Literal["succeeded", "failed", "unknown"]
     usage: dict[str, JsonValue] | None = None
+    normalized_usage: ModelUsage | None = None
+    model: str | None = Field(default=None, max_length=256)
+    request_id: str | None = Field(default=None, max_length=256)
+
+
+class ModelAttemptRecord(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+    session_id: Identifier
+    model_call_id: Identifier
+    attempt_index: Annotated[int, Field(ge=1, strict=True)]
+    outcome: Literal["inflight", "succeeded", "failed", "unknown", "LEGACY_UNMEASURED"]
+    accounting: Literal["recorded", "LEGACY_UNMEASURED"] = "recorded"
+    model: str | None = Field(default=None, max_length=256)
+    request_id: str | None = Field(default=None, max_length=256)
+    raw_usage: dict[str, JsonValue] | None = None
+    usage: ModelUsage = Field(default_factory=ModelUsage)
+    created_at: float | None = Field(default=None, ge=0, allow_inf_nan=False)
+    confirmed_at: float | None = Field(default=None, ge=0, allow_inf_nan=False)
+
+    @model_validator(mode="after")
+    def consistent_measurements(self) -> Self:
+        if self.accounting == "recorded":
+            if self.outcome == "LEGACY_UNMEASURED" or self.created_at is None:
+                raise ValueError("recorded attempts require reservation facts")
+            if (self.outcome == "inflight") != (self.confirmed_at is None):
+                raise ValueError("attempt outcome and confirmation must agree")
+        if self.outcome in {"inflight", "unknown", "LEGACY_UNMEASURED"} or (
+            self.accounting == "LEGACY_UNMEASURED"
+        ):
+            if self.raw_usage is not None or self.usage != ModelUsage():
+                raise ValueError("unmeasured attempts cannot invent usage")
+        if self.raw_usage is None and self.usage.source != "unavailable":
+            raise ValueError("normalized usage requires raw provider measurements")
+        if self.created_at is not None and self.confirmed_at is not None:
+            if self.confirmed_at < self.created_at:
+                raise ValueError("attempt cannot be confirmed before reservation")
+        return self
 
 
 class ModelCallRecord(BaseModel):
@@ -107,9 +149,40 @@ class AgentSession(BaseModel):
     actions: tuple[StoredAction, ...]
     approvals: tuple[ActionApproval, ...] = ()
     reconciliations: tuple[ActionReconciliation, ...] = ()
+    model_attempts: tuple[ModelAttemptRecord, ...] = ()
+
+    def usage_summary(self) -> ModelUsageSummary:
+        totals = {}
+        for field in ("input_tokens", "output_tokens", "total_tokens"):
+            values = [
+                value
+                for attempt in self.model_attempts
+                if (value := getattr(attempt.usage, field)) is not None
+            ]
+            totals[field] = TokenUsageTotal(
+                value=sum(values) if values else None,
+                reported_attempts=len(values),
+                unreported_attempts=len(self.model_attempts) - len(values),
+            )
+        return ModelUsageSummary(
+            attempts=len(self.model_attempts),
+            inflight_attempts=sum(a.outcome == "inflight" for a in self.model_attempts),
+            unknown_outcomes=sum(a.outcome == "unknown" for a in self.model_attempts),
+            legacy_unmeasured_attempts=sum(
+                a.accounting == "LEGACY_UNMEASURED" for a in self.model_attempts
+            ),
+            unavailable_usage_attempts=sum(
+                a.usage.source == "unavailable" for a in self.model_attempts
+            ),
+            **totals,
+        )
 
 
 class AgentStore(Protocol):
+    def usage_summary(self, session_id: str) -> ModelUsageSummary:
+        """Read persisted facts, including terminal sessions; caller controls access."""
+        ...
+
     def request_action_approval(
         self, task: Task, action_id: str, expected_revision: int
     ) -> AgentSession: ...

@@ -127,6 +127,7 @@ class RuntimeInvariants:
                     step.status == "succeeded" and specs[step.key].artifact
                 )
                 assert len(state.model_calls) == snapshot.budget.model_rounds
+                assert len(state.model_attempts) == snapshot.budget.model_attempts
                 assert [c.round_index for c in state.model_calls] == list(
                     range(1, len(state.model_calls) + 1)
                 )
@@ -158,6 +159,18 @@ class RuntimeInvariants:
                         state.messages[: len(old.agent.messages)] == old.agent.messages
                     )
                     calls = {c.model_call_id: c for c in state.model_calls}
+                    attempts = {
+                        (a.model_call_id, a.attempt_index): a
+                        for a in state.model_attempts
+                    }
+                    for attempt in old.agent.model_attempts:
+                        current = attempts[
+                            (attempt.model_call_id, attempt.attempt_index)
+                        ]
+                        assert current.created_at == attempt.created_at
+                        assert current.accounting == attempt.accounting
+                        if attempt.outcome != "inflight":
+                            assert current == attempt
                     for call in old.agent.model_calls:
                         assert calls[call.model_call_id].round_index == call.round_index
                         assert calls[call.model_call_id].attempts >= call.attempts

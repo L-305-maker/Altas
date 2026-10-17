@@ -158,6 +158,16 @@ def test_real_process_crash_and_new_worker(
         if stage == "before_model_reservation":
             assert checkpoint.agent.snapshot.budget.model_attempts == 0
             assert checkpoint.agent.snapshot.revision == 0
+            assert checkpoint.agent.model_attempts == ()
+        else:
+            assert len(checkpoint.agent.model_attempts) == 1
+            assert checkpoint.agent.model_attempts[0].outcome == (
+                "inflight"
+                if stage == "model_reservation"
+                else "failed"
+                if stage == "retry_scheduled"
+                else "succeeded"
+            )
         with store.transaction() as db:
             ids = list(db.scalars(select(AgentActionRow.id)))
             if stage == "retry_scheduled":
@@ -241,6 +251,17 @@ def test_real_process_crash_and_new_worker(
             }
             else 1
         )
-        runtime_invariants(store, run)
+        restored = runtime_invariants(store, run)["work"].agent
+        if stage == "model_reservation":
+            assert restored.model_attempts[0].outcome == "unknown"
+            assert restored.model_attempts[0].raw_usage is None
+            assert (
+                restored.model_attempts[0].created_at
+                == checkpoint.agent.model_attempts[0].created_at
+            )
+        elif stage == "retry_scheduled":
+            assert [a.attempt_index for a in restored.model_attempts] == [1, 2]
+            assert len({a.model_call_id for a in restored.model_attempts}) == 1
+            assert restored.model_attempts[0] == checkpoint.agent.model_attempts[0]
     finally:
         store.close()

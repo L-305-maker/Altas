@@ -209,15 +209,25 @@ class DurableAgentRunner:
             state.snapshot.revision,
         )
 
-    async def _fail(self, task, state, code, *, exhausted=False, model_status=None):
+    def _model_result(self, state, status, response=None):
+        return ModelCallResult(
+            model_call_id=state.snapshot.model_call_id,
+            status=status,
+            usage=response.usage if response else None,
+            normalized_usage=response.normalized_usage if response else None,
+            model=response.model if response else None,
+            request_id=response.request_id if response else None,
+        )
+
+    async def _fail(
+        self, task, state, code, *, exhausted=False, model_status=None, response=None
+    ):
         transition = AgentTransition(
             snapshot=successor(
                 state.snapshot,
                 status=AgentStatus.EXHAUSTED if exhausted else AgentStatus.FAILED,
             ),
-            model_result=ModelCallResult(
-                model_call_id=state.snapshot.model_call_id, status=model_status
-            )
+            model_result=self._model_result(state, model_status, response)
             if model_status
             else None,
             error_code=code,
@@ -254,11 +264,12 @@ class DurableAgentRunner:
         except AgentDataError:
             return state, await self._fail(task, state, "AgentStorageLimit")
         await asyncio.to_thread(self.store.load, task)
+        response = None
         try:
-            response = await self.provider.respond(context, schemas)
-            if not isinstance(response, ModelResponse):
+            received = await self.provider.respond(context, schemas)
+            if not isinstance(received, ModelResponse):
                 raise ModelProtocolError()
-            response = ModelResponse.model_validate(response.model_dump(mode="json"))
+            response = ModelResponse.model_validate(received.model_dump(mode="json"))
             finite_json(response.model_dump(mode="json"))
         except ModelRetryableError as error:
             if (
@@ -294,6 +305,7 @@ class DurableAgentRunner:
                 state,
                 getattr(error, "code", "ModelProtocolError"),
                 model_status="failed",
+                response=response,
             )
         except asyncio.CancelledError:
             await _cancel_cleanup(
@@ -308,13 +320,21 @@ class DurableAgentRunner:
         if message.tool_calls:
             if response.finish_reason != "tool_calls":
                 return state, await self._fail(
-                    task, state, "ModelProtocolError", model_status="failed"
+                    task,
+                    state,
+                    "ModelProtocolError",
+                    model_status="failed",
+                    response=response,
                 )
             try:
                 transition = self._proposals(state, response)
             except (ValueError, AgentDataError):
                 return state, await self._fail(
-                    task, state, "ModelProtocolError", model_status="failed"
+                    task,
+                    state,
+                    "ModelProtocolError",
+                    model_status="failed",
+                    response=response,
                 )
             try:
                 saved = await asyncio.to_thread(
@@ -322,7 +342,11 @@ class DurableAgentRunner:
                 )
             except AgentDataError:
                 return state, await self._fail(
-                    task, state, "AgentStorageLimit", model_status="failed"
+                    task,
+                    state,
+                    "AgentStorageLimit",
+                    model_status="failed",
+                    response=response,
                 )
             return saved, None
         if (
@@ -331,16 +355,16 @@ class DurableAgentRunner:
             or not message.content.strip()
         ):
             return state, await self._fail(
-                task, state, "ModelInvalidFinal", model_status="failed"
+                task,
+                state,
+                "ModelInvalidFinal",
+                model_status="failed",
+                response=response,
             )
         transition = AgentTransition(
             snapshot=successor(state.snapshot, status=AgentStatus.SUCCEEDED),
             messages=(self._assistant(state, response, []),),
-            model_result=ModelCallResult(
-                model_call_id=state.snapshot.model_call_id,
-                status="succeeded",
-                usage=response.usage,
-            ),
+            model_result=self._model_result(state, "succeeded", response),
         )
         try:
             saved = await asyncio.to_thread(
@@ -351,7 +375,11 @@ class DurableAgentRunner:
             )
         except AgentDataError:
             return state, await self._fail(
-                task, state, "AgentStorageLimit", model_status="failed"
+                task,
+                state,
+                "AgentStorageLimit",
+                model_status="failed",
+                response=response,
             )
         return saved, self._result(task, saved)
 
@@ -409,11 +437,7 @@ class DurableAgentRunner:
             messages=(
                 self._assistant(state, response, [a.id for a in actions], invalid),
             ),
-            model_result=ModelCallResult(
-                model_call_id=state.snapshot.model_call_id,
-                status="succeeded",
-                usage=response.usage,
-            ),
+            model_result=self._model_result(state, "succeeded", response),
             arguments=tuple(arguments),
         )
 

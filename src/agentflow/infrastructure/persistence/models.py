@@ -133,6 +133,36 @@ class AgentModelCallRow(Base):
     updated_at: Mapped[float] = mapped_column(Float)
 
 
+class AgentModelAttemptRow(Base):
+    __tablename__ = "agent_model_attempts"
+    __table_args__ = (
+        ForeignKeyConstraint(
+            ["session_id", "model_call_id"],
+            ["agent_model_calls.session_id", "agent_model_calls.model_call_id"],
+        ),
+        CheckConstraint("attempt_index >= 1", name="ck_model_attempt_index"),
+        CheckConstraint(
+            "outcome IN ('inflight','succeeded','failed','unknown','LEGACY_UNMEASURED')",
+            name="ck_model_attempt_outcome",
+        ),
+        CheckConstraint(
+            "accounting IN ('recorded','LEGACY_UNMEASURED')",
+            name="ck_model_attempt_accounting",
+        ),
+    )
+    session_id: Mapped[str] = mapped_column(String(128), primary_key=True)
+    model_call_id: Mapped[str] = mapped_column(String(128), primary_key=True)
+    attempt_index: Mapped[int] = mapped_column(Integer, primary_key=True)
+    outcome: Mapped[str] = mapped_column(String(24))
+    accounting: Mapped[str] = mapped_column(String(24))
+    model: Mapped[str | None] = mapped_column(String(256))
+    request_id: Mapped[str | None] = mapped_column(String(256))
+    raw_usage: Mapped[dict[str, Any] | None] = mapped_column(JSON)
+    usage: Mapped[dict[str, Any]] = mapped_column(JSON)
+    created_at: Mapped[float | None] = mapped_column(Float)
+    confirmed_at: Mapped[float | None] = mapped_column(Float)
+
+
 class AgentMessageRow(Base):
     __tablename__ = "agent_messages"
     __table_args__ = (

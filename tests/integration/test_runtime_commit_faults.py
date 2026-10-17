@@ -10,7 +10,10 @@ from test_durable_agent_runner import store as store
 from agentflow.application.agents.durable_runner import DurableAgentRunner
 from agentflow.application.orchestration.worker import HandlerRegistry, Worker
 from agentflow.application.ports.agent_store import AgentStoreUnavailable
-from agentflow.application.ports.model_provider import ModelRetryableError
+from agentflow.application.ports.model_provider import (
+    ModelResponse,
+    ModelRetryableError,
+)
 from agentflow.infrastructure.models.mock import MockProvider
 from agentflow.infrastructure.persistence.agent_store import SQLAgentStore
 from agentflow.infrastructure.persistence.models import StepRow
@@ -34,10 +37,15 @@ async def test_worker_commit_fault_recovers_persisted_facts(
     async with asyncio.timeout(15):
         run = submit(store, retry_base_seconds=60)
         agents = SQLAgentStore(store)
+        measured = ModelResponse(
+            assistant_message=final(),
+            finish_reason="stop",
+            usage={"total_tokens": 13},
+        )
         provider = MockProvider(
-            [ModelRetryableError(), final()]
+            [ModelRetryableError(), measured]
             if point == "retry_lost_ack"
-            else [proposal(), final()]
+            else [proposal(), measured]
         )
         invocations, tasks = [], []
 
@@ -116,6 +124,9 @@ async def test_worker_commit_fault_recovers_persisted_facts(
             assert before.agent.snapshot.status == "model_inflight"
             assert after.agent.snapshot.status == "failed"
             assert after.agent.model_calls[-1].status == "unknown"
+            assert after.agent.model_attempts[-1].outcome == "unknown"
+            assert after.agent.model_attempts[-1].raw_usage is None
+            assert after.agent.usage_summary().total_tokens.value is None
             assert not after.artifacts  # 已收到的响应不能在未持久化后凭空复原。
             assert provider.calls == (1 if point.startswith("response") else 2)
         else:
@@ -123,6 +134,9 @@ async def test_worker_commit_fault_recovers_persisted_facts(
             assert len(after.artifacts) == 1
             assert len(invocations) == int(point != "retry_lost_ack")
             assert after.agent.snapshot.budget.tool_calls == len(invocations)
+            assert after.agent.usage_summary().total_tokens.value == 13
+            assert after.agent.usage_summary().total_tokens.reported_attempts == 1
+            assert len(after.agent.model_attempts) == 2
         runtime_invariants.fenced(agents, tasks[0])
 
 

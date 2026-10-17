@@ -23,7 +23,10 @@ from sqlalchemy.exc import SQLAlchemyError
 from agentflow.application.agents.durable_runner import DurableAgentRunner
 from agentflow.application.orchestration.worker import HandlerRegistry, Worker
 from agentflow.application.ports.agent_store import LostLease
-from agentflow.application.ports.model_provider import ModelRetryableError
+from agentflow.application.ports.model_provider import (
+    ModelResponse,
+    ModelRetryableError,
+)
 from agentflow.application.tools.runtime import Tool, ToolRuntime
 from agentflow.domain.agent.review import ApprovalDecision, ReconciliationDecision
 from agentflow.domain.agent.status import ToolSideEffect
@@ -137,7 +140,14 @@ async def serve(url, root, seconds):
                     }
                 else:
                     response = {"role": "assistant", "content": "RC complete"}
-                return await MockProvider([response]).respond(messages, tools)
+                return ModelResponse(
+                    assistant_message=response,
+                    finish_reason="tool_calls"
+                    if response.get("tool_calls")
+                    else "stop",
+                    usage={"input_tokens": 9, "output_tokens": 1, "total_tokens": 10},
+                    model="rc-mock",
+                )
 
         return await DurableAgentRunner(agents, Provider(), tools).run(
             task, "Return a fixed harmless result.", allowed={"echo"}

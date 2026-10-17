@@ -89,6 +89,8 @@ def main():
                     "tests/integration/test_agent_migrations.py",
                     "tests/integration/test_durable_agent_runner.py",
                     "tests/integration/test_model_governance.py",
+                    "tests/integration/test_model_attempt_usage.py",
+                    "tests/integration/test_model_attempt_migrations.py",
                     "tests/integration/test_agent_cancellation.py",
                     "tests/integration/test_action_review_migrations.py",
                     "tests/integration/test_action_reviews.py",

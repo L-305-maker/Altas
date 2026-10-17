@@ -13,6 +13,8 @@ from pydantic import (
     model_validator,
 )
 
+from agentflow.application.ports.model_usage import MAX_USAGE_BYTES, ModelUsage
+
 
 class ModelError(Exception):
     code = "ModelError"
@@ -88,12 +90,17 @@ class ModelResponse(BaseModel):
     assistant_message: AssistantMessage
     finish_reason: str = Field(min_length=1)
     usage: dict[str, JsonValue] | None = None
-    model: str | None = None
-    request_id: str | None = None
+    normalized_usage: ModelUsage | None = None
+    model: str | None = Field(default=None, max_length=256)
+    request_id: str | None = Field(default=None, max_length=256)
 
     @model_validator(mode="after")
     def finite_usage(self) -> Self:
-        json.dumps(self.usage, allow_nan=False)
+        encoded = json.dumps(self.usage, ensure_ascii=False, allow_nan=False)
+        if len(encoded.encode("utf-8")) > MAX_USAGE_BYTES:
+            raise ValueError("provider usage exceeds storage limit")
+        if self.usage is None and self.normalized_usage not in {None, ModelUsage()}:
+            raise ValueError("normalized usage requires raw provider measurements")
         return self
 
 
