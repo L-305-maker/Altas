@@ -93,7 +93,11 @@ class DeepSeekProvider:
                     headers={"Authorization": f"Bearer {self._key}"},
                 )
                 if response.status_code == 429:
-                    raise ModelRetryableError()
+                    try:
+                        hint = float(response.headers.get("Retry-After", ""))
+                    except ValueError:
+                        hint = None
+                    raise ModelRetryableError(retry_after_seconds=hint)
                 if 400 <= response.status_code < 500:
                     raise ModelConfigurationError()
                 if not response.is_success:

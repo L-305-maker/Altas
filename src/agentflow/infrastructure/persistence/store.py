@@ -24,6 +24,7 @@ from agentflow.domain.agent.run import AgentSnapshot
 from agentflow.domain.execution.task import Task
 from agentflow.domain.workflow.spec import WorkflowSpec
 from agentflow.infrastructure.persistence.models import (
+    AgentModelCallRow,
     AgentSessionRow,
     ApprovalRow,
     ArtifactRow,
@@ -358,16 +359,37 @@ class Store:
                 "exhausted": "failed",
                 "waiting_approval": "waiting",
                 "waiting_reconciliation": "waiting",
+                "retry_scheduled": "ready",
             }
             if (
                 snapshot.revision != result.revision
                 or agent.revision != result.revision
-                or snapshot.status.value != result.status
+                or snapshot.status.value
+                != (
+                    "ready_model"
+                    if result.status == "retry_scheduled"
+                    else result.status
+                )
                 or step.status != expected[result.status]
                 or step.token is not None
                 or step.lease_until is not None
             ):
                 raise StateConflict("agent result differs from committed step state")
+            if result.status == "retry_scheduled":
+                call = session.scalar(
+                    select(AgentModelCallRow).where(
+                        AgentModelCallRow.session_id == agent.id,
+                        AgentModelCallRow.model_call_id == snapshot.model_call_id,
+                    )
+                )
+                if (
+                    not agent.continuation_pending
+                    or step.error != "ModelRetryable"
+                    or not math.isfinite(step.available_at)
+                    or call is None
+                    or call.status != "failed"
+                ):
+                    raise StateConflict("agent retry is not durably scheduled")
 
     def complete(self, task: Task, output: Any) -> bool:
         encoded = json_bytes(output)

@@ -169,6 +169,12 @@ async def test_ordered_tools_history_and_budget(store):
 async def test_confirmed_model_failure_retries_same_logical_id(store):
     submit(store)
     provider = MockProvider([ModelRetryableError(), final()])
+    result = await DurableAgentRunner(
+        SQLAgentStore(store), provider, ToolRuntime()
+    ).run(store.claim(300), "goal", allowed=set())
+    assert result.status == "retry_scheduled" and provider.calls == 1
+    with store.transaction() as db:
+        db.execute(update(StepRow).values(available_at=store._now(db) - 1))
     await DurableAgentRunner(SQLAgentStore(store), provider, ToolRuntime()).run(
         store.claim(300), "goal", allowed=set()
     )
@@ -320,6 +326,12 @@ async def test_protected_tools_wait_and_unauthorized_tools_are_denied(store, pol
 async def test_retry_budget_is_bounded(store):
     run = submit(store, max_model_attempts=2)
     provider = MockProvider([ModelRetryableError()] * 3)
+    await DurableAgentRunner(SQLAgentStore(store), provider, ToolRuntime()).run(
+        store.claim(300), "goal", allowed=set()
+    )
+    assert provider.calls == 1
+    with store.transaction() as db:
+        db.execute(update(StepRow).values(available_at=store._now(db) - 1))
     await DurableAgentRunner(SQLAgentStore(store), provider, ToolRuntime()).run(
         store.claim(300), "goal", allowed=set()
     )

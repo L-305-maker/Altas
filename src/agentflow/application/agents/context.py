@@ -8,6 +8,18 @@ from agentflow.application.ports.agent_store import AgentSession, StateConflict
 from agentflow.application.ports.model_provider import AssistantMessage, ModelToolCall
 
 
+def context_bytes(messages: list[dict], tools: list[dict]) -> int:
+    """完整消息与工具 Schema 的紧凑 JSON UTF-8 大小；不包含供应商配置。"""
+    payload = {"messages": messages}
+    if tools:
+        payload["tools"] = tools
+    return len(
+        json.dumps(
+            payload, ensure_ascii=False, allow_nan=False, separators=(",", ":")
+        ).encode("utf-8")
+    )
+
+
 def parse_tool_arguments(text: str) -> dict:
     def unique(pairs):
         result = {}

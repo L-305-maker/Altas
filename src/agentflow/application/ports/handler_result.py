@@ -10,7 +10,12 @@ class CommittedAgentResult:
     step_id: str
     token: str
     status: Literal[
-        "succeeded", "failed", "exhausted", "waiting_approval", "waiting_reconciliation"
+        "succeeded",
+        "failed",
+        "exhausted",
+        "waiting_approval",
+        "waiting_reconciliation",
+        "retry_scheduled",
     ]
     revision: int
 
@@ -23,6 +28,7 @@ class CommittedAgentResult:
                 "exhausted",
                 "waiting_approval",
                 "waiting_reconciliation",
+                "retry_scheduled",
             }
             or type(self.revision) is not int
             or self.revision < 1
