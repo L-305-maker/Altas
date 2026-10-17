@@ -143,7 +143,9 @@ def test_live_pytest_does_not_run_on_environment_variables_alone():
     )
     assert completed.returncode == 0
     assert "1 skipped" in completed.stdout
-    assert "paid provider tests require explicit --run-live-provider" in completed.stdout
+    assert (
+        "paid provider tests require explicit --run-live-provider" in completed.stdout
+    )
     assert env["AGENTFLOW_DEEPSEEK_API_KEY"] not in (
         completed.stdout + completed.stderr
     )
