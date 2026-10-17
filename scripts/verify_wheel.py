@@ -69,19 +69,13 @@ def main():
         root = Path(directory)
         venv = root / "venv"
         subprocess.run(
-            ["uv", "venv", str(venv), "--python", sys.executable],
-            check=True,
-            timeout=60,
+            ["uv", "venv", str(venv), "--python", sys.executable], check=True
         )
         python = venv / ("Scripts/python.exe" if os.name == "nt" else "bin/python")
         subprocess.run(
-            ["uv", "pip", "install", "--python", str(python), str(wheel)],
-            check=True,
-            timeout=180,
+            ["uv", "pip", "install", "--python", str(python), str(wheel)], check=True
         )
-        subprocess.run(
-            [str(python), "-I", "-c", SMOKE], cwd=root, check=True, timeout=120
-        )
+        subprocess.run([str(python), "-I", "-c", SMOKE], cwd=root, check=True)
 
 
 if __name__ == "__main__":

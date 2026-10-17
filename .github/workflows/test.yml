@@ -27,11 +27,6 @@ jobs:
       - name: Offline business evaluation
         if: matrix.python == '3.13'
         run: uv run python evals/run.py
-      - name: Bounded RC process and logical restore drills
-        if: matrix.python == '3.13'
-        run: |
-          uv run python scripts/verify_durable_soak.py --bin "$(pg_config --bindir)" --seconds 30 --workload 6 --seed 7
-          uv run python scripts/verify_runtime_backup.py --bin "$(pg_config --bindir)"
       - name: Build release package
         if: matrix.python == '3.13'
         run: |

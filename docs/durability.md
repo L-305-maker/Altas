@@ -379,12 +379,3 @@ PROMETHEUS_MULTIPROC_DIR 并共享受保护目录/卷，沿用认证端点，不
 它在专用临时数据库验证独立事务、旧 token 读写 fencing、提交确认丢失、三方竞争和审计恢复，
 最长 600 秒，退出清理实例。CI 只在 Python 3.13 增加这组门禁，已有两个 Python 版本的基线回归不变。
 数据库连接/语句超时仍由部署者配置；五秒协程清理不能强制停止已进入数据库驱动的同步线程。
-
-## Production RC 运维验收（PR7）
-
-[RC checklist](durable-runtime-v1-rc-checklist.md) 区分实际 PASS、FAIL、NOT VERIFIED 和不适用项；
-代码合并不代表生产环境已获放行。[恢复 runbook](production-recovery-runbook.md) 提供有界三进程
-稳定性、真实 pg_dump/pg_restore、只读持久核查、双宿主 staging 与显式付费 Provider 入口。
-普通 CI 不发真实模型请求；长测独立手动运行，不用单机多进程冒充跨主机网络分区验证。
-指标采集前退出可以少计、Collector 故障不影响数据库事实；审计输出不是精确计费或 Counter 补账机制。
-本轮无新表/迁移，不放宽审批、UNKNOWN、CAS、fencing、取消传播或普通 Handler 语义。

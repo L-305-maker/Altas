@@ -96,29 +96,7 @@ class RuntimeInvariants:
                 if step.status != "running":
                     assert step.token is None and step.lease_until is None
                 if step.status == "ready":
-                    # A reconciled crashed lease is a real bounded Step retry.
-                    # _ready_review clears its error but keeps continuation false.
-                    reconciled_crash_retry = (
-                        snapshot.status == "actions_pending"
-                        and step.attempts < specs[step.key].max_attempts
-                        and any(
-                            r.applied
-                            and r.action_id in {a.id for a in snapshot.actions}
-                            and any(
-                                m.role == "tool"
-                                and m.payload.get("action_id") == r.action_id
-                                and m.payload.get("status") == "unknown"
-                                and m.payload.get("error_code") == "LeaseExpired"
-                                for m in state.messages
-                            )
-                            for r in state.reconciliations
-                        )
-                    )
-                    assert (
-                        saved.continuation
-                        or step.error == "LeaseExpired"
-                        or reconciled_crash_retry
-                    )
+                    assert saved.continuation or step.error == "LeaseExpired"
                     if step.error == "ModelRetryable":
                         assert snapshot.status == "ready_model"
                         assert state.model_calls[-1].status == "failed"

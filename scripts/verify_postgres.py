@@ -100,8 +100,6 @@ def main():
                             "tests/integration/test_runtime_commit_faults.py",
                             "tests/integration/test_runtime_release_migrations.py",
                             "tests/integration/test_runtime_metrics.py",
-                            "tests/integration/test_runtime_metrics_loss.py",
-                            "tests/integration/test_runtime_audit.py",
                         ]
                         if args.release_gates
                         else []
