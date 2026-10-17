@@ -116,7 +116,7 @@ def test_soak_fence_log_does_not_serialize_task_payload(monkeypatch):
     assert "PRIVATE" not in json.dumps(record)
 
 
-def test_live_pytest_does_not_run_on_environment_variables_alone(tmp_path):
+def test_live_pytest_does_not_run_on_environment_variables_alone():
     import os
     import subprocess
 
@@ -143,7 +143,7 @@ def test_live_pytest_does_not_run_on_environment_variables_alone(tmp_path):
     )
     assert completed.returncode == 0
     assert "1 skipped" in completed.stdout
-    assert "requires explicit --run-live-provider" in completed.stdout
+    assert "paid provider tests require explicit --run-live-provider" in completed.stdout
     assert env["AGENTFLOW_DEEPSEEK_API_KEY"] not in (
         completed.stdout + completed.stderr
     )
