@@ -21,6 +21,7 @@ from agentflow.application.ports.agent_store import (
     ModelAttemptRecord,
     ModelCallRecord,
     ModelCallResult,
+    ObservedUsageBlocked,
     StateConflict,
     StoredAction,
 )
@@ -28,7 +29,13 @@ from agentflow.application.ports.model_usage import (
     MAX_USAGE_BYTES,
     ModelUsage,
     ModelUsageSummary,
-    normalize_usage,
+    UsageMappingRegistry,
+)
+from agentflow.application.ports.observed_usage import (
+    ObservedUsagePolicy,
+    UsageGovernanceBinding,
+    assess_usage,
+    stricter_policy,
 )
 from agentflow.application.ports.provider_admission import (
     ModelAdmission,
@@ -96,7 +103,12 @@ def action_key(session_id: str, action_id: str) -> str:
 
 class SQLAgentStore:
     def __init__(
-        self, store: Store, *, admission_policy: ProviderAdmissionPolicy | None = None
+        self,
+        store: Store,
+        *,
+        admission_policy: ProviderAdmissionPolicy | None = None,
+        observed_usage_policy: ObservedUsagePolicy | None = None,
+        usage_mappings: UsageMappingRegistry | None = None,
     ) -> None:
         self.store = store
         self.admission_policy = (
@@ -105,6 +117,36 @@ class SQLAgentStore:
             else None
         )
         self.admission = SQLProviderAdmissionStore(store)
+        self.observed_usage_policy = (
+            ObservedUsagePolicy.model_validate(observed_usage_policy.model_dump())
+            if observed_usage_policy is not None
+            else None
+        )
+        self.usage_mappings = usage_mappings or UsageMappingRegistry()
+
+    def _usage_policy(self, db, row, *, check_deployment=False):
+        step = db.get(StepRow, row.step_row_id)
+        run = db.get(RunRow, step.run_id)
+        binding = UsageGovernanceBinding.model_validate(run.usage_governance or {})
+        if check_deployment and (
+            binding.deployment_policy != self.observed_usage_policy
+            or (
+                binding.usage_mappings is not None
+                and binding.usage_mappings != self.usage_mappings.definitions
+            )
+        ):
+            raise StateConflict("observed usage configuration differs from Run binding")
+        spec = next(
+            s for s in WorkflowSpec.model_validate(run.spec).steps if s.id == step.key
+        )
+        raw = spec.parameters.get("agent", {}).get("observed_usage")
+        workflow = ObservedUsagePolicy.model_validate(raw) if raw is not None else None
+        return stricter_policy(binding.deployment_policy, workflow)
+
+    def _check_observed_usage(self, db, row, state):
+        self._usage_policy(db, row, check_deployment=True)
+        if state.observed_usage is not None and state.observed_usage.blocked:
+            raise ObservedUsageBlocked(state.observed_usage)
 
     @contextmanager
     def _owned_transaction(self, task):
@@ -223,6 +265,18 @@ class SQLAgentStore:
             if any(a.model_call_id not in call_order for a in attempts):
                 raise StateConflict("attempt references an unknown model call")
             attempts.sort(key=lambda a: (call_order[a.model_call_id], a.attempt_index))
+            # Unversioned historical numbers remain untouched. Versioned facts
+            # are checked against persisted rules, not today's registry.
+            # Cancellation/recovery must not need a live provider registration.
+            for attempt in attempts:
+                if attempt.usage.mapping is not None:
+                    if (
+                        attempt.usage.mapping.normalize(attempt.raw_usage)
+                        != attempt.usage
+                    ):
+                        raise StateConflict(
+                            "stored usage mapping is inconsistent"
+                        ) from None
             permits = tuple(
                 permit_record(p)
                 for p in db.scalars(
@@ -289,6 +343,9 @@ class SQLAgentStore:
                 model_attempts=tuple(attempts),
                 provider_key=row.provider_key,
                 model_permits=permits,
+                observed_usage=assess_usage(attempts, policy)
+                if (policy := self._usage_policy(db, row)) is not None
+                else None,
                 actions=tuple(actions),
                 approvals=tuple(self._approval(a, actions) for a in approval_rows),
                 reconciliations=tuple(
@@ -367,6 +424,12 @@ class SQLAgentStore:
             del data["state"]["model_permits"]
         if data["state"]["provider_key"] is None:
             del data["state"]["provider_key"]
+        if data["state"]["observed_usage"] is None:
+            del data["state"]["observed_usage"]
+        # Do not charge historical rows for a default-only JSON schema field.
+        for attempt in data["state"].get("model_attempts", []):
+            if attempt["usage"]["mapping"] is None:
+                del attempt["usage"]["mapping"]
         checked_json(data, MAX_SESSION_BYTES)
         if not reserve or state.snapshot.status.is_terminal:
             return
@@ -660,6 +723,11 @@ class SQLAgentStore:
             raise StateConflict("initial messages must be context messages")
         data = initial_snapshot.model_dump(mode="json")
         with self._owned_transaction(task) as (db, run, step):
+            if run.usage_governance is None:
+                run.usage_governance = UsageGovernanceBinding(
+                    deployment_policy=self.observed_usage_policy,
+                    usage_mappings=self.usage_mappings.definitions,
+                ).model_dump(mode="json")
             row = self._session(db, step)
             created = row is None
             if row is None:
@@ -685,6 +753,7 @@ class SQLAgentStore:
                 )
             elif row.initial_snapshot != data:
                 raise StateConflict("step already has a different agent initialization")
+            self._usage_policy(db, row, check_deployment=True)
             result = self._read(db, row, reserve_capacity=created)
             if result.messages[: len(messages)] != tuple(messages):
                 raise StateConflict("initial messages differ from stored history")
@@ -734,6 +803,7 @@ class SQLAgentStore:
                     "invalid model admission reservation or provider binding"
                 )
             row.provider_key = self.admission_policy.provider_key
+            self._check_observed_usage(db, row, state)
             grant = self.admission.acquire(
                 db, self.admission_policy, task, state, candidate
             )
@@ -794,6 +864,11 @@ class SQLAgentStore:
             old.advance(candidate)
         except (ValueError, InvalidStateTransitionError):
             raise StateConflict("invalid agent revision or state transition") from None
+        if (
+            old.status == AgentStatus.READY_MODEL
+            and candidate.status == AgentStatus.MODEL_INFLIGHT
+        ):
+            self._check_observed_usage(db, row, old_state)
         now = self.store._now(db)
         supplied = set(transition.authorizations)
         required = set()
@@ -1040,7 +1115,20 @@ class SQLAgentStore:
             if attempt is None:
                 raise StateConflict("model attempt reservation is missing")
             raw = checked_json(outcome.usage, MAX_USAGE_BYTES)
-            usage = outcome.normalized_usage or normalize_usage(raw)
+            try:
+                usage = self.usage_mappings.normalize(raw, outcome.normalized_usage)
+            except ValueError:
+                raise AgentDataError("provider usage mapping is invalid") from None
+            step = db.get(StepRow, row.step_row_id)
+            binding = UsageGovernanceBinding.model_validate(
+                db.get(RunRow, step.run_id).usage_governance or {}
+            )
+            if (
+                usage.mapping is not None
+                and binding.usage_mappings is not None
+                and usage.mapping not in binding.usage_mappings
+            ):
+                raise AgentDataError("provider usage mapping differs from Run binding")
             checked_json(usage.model_dump(mode="json"), MAX_USAGE_BYTES)
             if raw is None and usage.source != "unavailable":
                 raise AgentDataError("normalized usage requires raw measurements")
@@ -1159,6 +1247,12 @@ class SQLAgentStore:
                     )
             result = self._apply(db, run, step, row, transition, task=task)
             if mode == "complete":
+                if result.observed_usage is not None:
+                    output = {
+                        **(output if isinstance(output, dict) else {"value": output}),
+                        "observed_usage": result.observed_usage.model_dump(mode="json"),
+                    }
+                    encoded = json_bytes(output)
                 spec = next(
                     s
                     for s in WorkflowSpec.model_validate(run.spec).steps

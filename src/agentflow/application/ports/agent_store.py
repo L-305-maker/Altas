@@ -12,8 +12,9 @@ from pydantic import BaseModel, ConfigDict, Field, JsonValue, model_validator
 from agentflow.application.ports.model_usage import (
     ModelUsage,
     ModelUsageSummary,
-    TokenUsageTotal,
+    summarize_usage,
 )
+from agentflow.application.ports.observed_usage import ObservedUsageReport
 from agentflow.application.ports.provider_admission import (
     ModelPermit,
     ProviderBackpressure,
@@ -46,6 +47,14 @@ class AgentDataError(ValueError):
 
 class AgentStoreUnavailable(Exception):
     """数据库操作失败，提交结果可能未知；恢复租约后重读，不能直接派发。"""
+
+
+class ObservedUsageBlocked(Exception):
+    """The owned current revision cannot reserve another measured attempt."""
+
+    def __init__(self, report: ObservedUsageReport):
+        self.report = report
+        super().__init__(report.error_code)
 
 
 class AgentMessage(BaseModel):
@@ -158,32 +167,10 @@ class AgentSession(BaseModel):
     model_attempts: tuple[ModelAttemptRecord, ...] = ()
     provider_key: ProviderKey | None = None
     model_permits: tuple[ModelPermit, ...] = ()
+    observed_usage: ObservedUsageReport | None = None
 
     def usage_summary(self) -> ModelUsageSummary:
-        totals = {}
-        for field in ("input_tokens", "output_tokens", "total_tokens"):
-            values = [
-                value
-                for attempt in self.model_attempts
-                if (value := getattr(attempt.usage, field)) is not None
-            ]
-            totals[field] = TokenUsageTotal(
-                value=sum(values) if values else None,
-                reported_attempts=len(values),
-                unreported_attempts=len(self.model_attempts) - len(values),
-            )
-        return ModelUsageSummary(
-            attempts=len(self.model_attempts),
-            inflight_attempts=sum(a.outcome == "inflight" for a in self.model_attempts),
-            unknown_outcomes=sum(a.outcome == "unknown" for a in self.model_attempts),
-            legacy_unmeasured_attempts=sum(
-                a.accounting == "LEGACY_UNMEASURED" for a in self.model_attempts
-            ),
-            unavailable_usage_attempts=sum(
-                a.usage.source == "unavailable" for a in self.model_attempts
-            ),
-            **totals,
-        )
+        return summarize_usage(self.model_attempts)
 
 
 class AgentStore(Protocol):

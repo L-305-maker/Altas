@@ -45,6 +45,7 @@ class RunRow(Base):
     inputs: Mapped[dict[str, Any]] = mapped_column(JSON)
     submission_key: Mapped[str | None] = mapped_column(String(128), unique=True)
     created_at: Mapped[float] = mapped_column(Float)
+    usage_governance: Mapped[dict[str, Any] | None] = mapped_column(JSON)
 
 
 class StepRow(Base):

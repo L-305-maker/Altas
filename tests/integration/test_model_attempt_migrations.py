@@ -54,6 +54,9 @@ def test_attempt_upgrade_backfills_unmeasured_and_preserves_all_old_facts(
                                     t.name == "agent_sessions"
                                     and c.name == "provider_key"
                                 )
+                                and not (
+                                    t.name == "runs" and c.name == "usage_governance"
+                                )
                             ]
                         )
                     ).mappings()

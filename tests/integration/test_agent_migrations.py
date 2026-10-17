@@ -70,7 +70,10 @@ def test_agent_migration_roundtrip_preserves_existing_workflows(
         command.downgrade(config, "0001")
         assert "agent_sessions" not in inspect(store.engine).get_table_names()
         with store.transaction() as db:
-            assert db.get(RunRow, run_id).inputs == {"value": 42}
+            # Inspect only columns present in 0001; current ORM has newer fields.
+            assert db.scalar(select(RunRow.inputs).where(RunRow.id == run_id)) == {
+                "value": 42
+            }
             assert db.get(StepRow, step_id).token == task.token
         command.upgrade(config, "head")
         assert store.complete(task, {"preserved": True})

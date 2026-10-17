@@ -19,6 +19,7 @@ from agentflow.domain.agent.run import AgentSnapshot
 from agentflow.infrastructure.persistence.models import AgentSessionRow
 from agentflow.infrastructure.persistence.agent_store import SQLAgentStore
 from agentflow.application.ports.provider_admission import ProviderAdmissionPolicy
+from agentflow.application.ports.observed_usage import ObservedUsagePolicy
 from agentflow.interfaces.api.app import create_app as core_app
 from sqlalchemy import select
 from applications.living_guideline.bootstrap import build_handlers, create_app
@@ -43,7 +44,7 @@ try:
     # Exercise installed core modules and the existing authenticated metrics endpoint.
     observed = Settings(provider="mock", telemetry=True, api_token=SecretStr("wheel-smoke-test-token"), provider_admission=ProviderAdmissionPolicy(
         provider_key="wheel-fixture", max_concurrent_requests=1, max_requests_per_window=2, window_seconds=60, policy_version="1",
-    ))
+    ), observed_usage=ObservedUsagePolicy(max_observed_total_tokens=100, missing_usage_policy="continue_with_warning", policy_version="1"))
     with TestClient(core_app(observed, store)) as client:
         run_id = store.submit(store.register(WorkflowSpec(name="installed-durable", steps=(
             StepSpec(id="agent", handler="agent", artifact=True, parameters={"prompt":"wheel goal", "agent":{"mode":"durable_v1"}}),
@@ -60,6 +61,7 @@ try:
         assert summary.total_tokens.value is None
         with SQLAgentStore(store)._operator_transaction(snapshot.id) as (_, _, _, _, session):
             assert len(session.model_permits) == 1 and session.model_permits[0].status == "released"
+            assert session.observed_usage.partial and session.observed_usage.summary.total_tokens.value is None
         assert client.get("/metrics").status_code == 401
         response = client.get("/metrics", headers={"Authorization":"Bearer wheel-smoke-test-token"})
         assert response.status_code == 200

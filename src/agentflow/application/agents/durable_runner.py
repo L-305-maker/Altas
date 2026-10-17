@@ -25,6 +25,7 @@ from agentflow.application.ports.agent_store import (
     AgentStore,
     AgentTransition,
     ModelCallResult,
+    ObservedUsageBlocked,
     StateConflict,
 )
 from agentflow.application.ports.handler_result import CommittedAgentResult
@@ -36,6 +37,8 @@ from agentflow.application.ports.model_provider import (
     ModelResponse,
     ModelRetryableError,
 )
+from agentflow.application.ports.model_usage import UsageMappingRegistry
+from agentflow.application.ports.observed_usage import ObservedUsagePolicy
 from agentflow.application.ports.provider_admission import (
     MAX_COOLDOWN_SECONDS,
     ProviderAdmissionStore,
@@ -79,6 +82,7 @@ class DurableAgentConfig(BaseModel):
     max_tool_calls: Counter = 32
     # 本版只强制调用次数预算；资源计价需要独立策略，拒绝伪装成已强制执行。
     max_resource_units: Literal[0] = 0
+    observed_usage: ObservedUsagePolicy | None = None
     max_context_bytes: int = Field(default=1_000_000, ge=1, strict=True)
     retry_base_seconds: float = Field(
         default=1, gt=0, le=3600, allow_inf_nan=False, strict=True
@@ -146,10 +150,12 @@ class DurableAgentRunner:
         *,
         context: AgentContextBuilder | None = None,
         admission: ProviderAdmissionStore | None = None,
+        usage_mappings: UsageMappingRegistry | None = None,
     ):
         self.store, self.provider, self.tools = store, provider, tools
         self.context = context or AgentContextBuilder()
         self.admission = admission
+        self.usage_mappings = usage_mappings or UsageMappingRegistry()
 
     async def run(
         self, task: Task, prompt: str, *, allowed: set[str]
@@ -290,6 +296,10 @@ class DurableAgentRunner:
                 if admitted.status != "reserved" or admitted.permit is None:
                     raise StateConflict("invalid model admission result")
                 permit = admitted.permit
+        except ObservedUsageBlocked as error:
+            return state, await self._fail(
+                task, state, error.report.error_code, exhausted=True
+            )
         except AgentDataError:
             return state, await self._fail(task, state, "AgentStorageLimit")
         await asyncio.to_thread(self.store.load, task)
@@ -302,7 +312,16 @@ class DurableAgentRunner:
             received = await self.provider.respond(context, schemas)
             if not isinstance(received, ModelResponse):
                 raise ModelProtocolError()
-            response = ModelResponse.model_validate(received.model_dump(mode="json"))
+            validated = ModelResponse.model_validate(received.model_dump(mode="json"))
+            usage = self.usage_mappings.normalize(
+                validated.usage, validated.normalized_usage
+            )
+            response = ModelResponse.model_validate(
+                {
+                    **validated.model_dump(mode="json"),
+                    "normalized_usage": usage.model_dump(mode="json"),
+                }
+            )
             finite_json(response.model_dump(mode="json"))
         except ModelRetryableError as error:
             backpressure = (
@@ -348,6 +367,7 @@ class DurableAgentRunner:
             ModelConfigurationError,
             ValidationError,
             AgentDataError,
+            ValueError,
         ) as error:
             return state, await self._fail(
                 task,

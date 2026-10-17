@@ -13,6 +13,7 @@ from rc_support import TemporaryPostgres, migrate, run
 from rc_workload import Workload
 from sqlalchemy import select, text
 
+from agentflow.application.ports.observed_usage import ObservedUsagePolicy
 from agentflow.application.ports.provider_admission import ProviderAdmissionPolicy
 from agentflow.infrastructure.persistence.models import Base
 from agentflow.infrastructure.persistence.store import json_bytes
@@ -42,8 +43,16 @@ def drill(cluster):
         permit_ttl_seconds=10,
         policy_version="1",
     )
+    usage_policy = ObservedUsagePolicy(
+        max_observed_total_tokens=10_000,
+        missing_usage_policy="continue_with_warning",
+        policy_version="1",
+    )
     source = Workload(
-        source_url, cluster.root / "source-records", admission_policy=admission
+        source_url,
+        cluster.root / "source-records",
+        admission_policy=admission,
+        observed_usage_policy=usage_policy,
     )
     target = None
     try:
@@ -99,7 +108,7 @@ def drill(cluster):
         assert held.status == "unknown" and held.released_at is None
         assert checkpoints[admission_delayed].agent.snapshot.budget.model_attempts == 0
         with source.store.engine.connect() as db:
-            assert db.scalar(text("SELECT version_num FROM alembic_version")) == "0005"
+            assert db.scalar(text("SELECT version_num FROM alembic_version")) == "0006"
         for artifact in facts["artifacts"]:
             assert (
                 artifact["digest"]
@@ -140,14 +149,17 @@ def drill(cluster):
             timeout=60,
         )
         target = Workload(
-            target_url, cluster.root / "restored-records", admission_policy=admission
+            target_url,
+            cluster.root / "restored-records",
+            admission_policy=admission,
+            observed_usage_policy=usage_policy,
         )
         target.runs = list(source.runs)
         target.scenarios = dict(source.scenarios)
         assert inventory(target.store) == facts, "RestoreFactMismatch"
         migrate(target_url)
         with target.store.engine.connect() as db:
-            assert db.scalar(text("SELECT version_num FROM alembic_version")) == "0005"
+            assert db.scalar(text("SELECT version_num FROM alembic_version")) == "0006"
         assert not audit(target.store.engine)["severe"]
         for r, checkpoint in checkpoints.items():
             assert target.state(r) == checkpoint
@@ -194,13 +206,14 @@ def drill(cluster):
         target.check()
         return {
             "status": "PASS",
-            "alembic": "0005",
+            "alembic": "0006",
             "tables_compared": len(facts),
             "source": before,
             "restored_runs": len(target.runs),
             "newly_approved_dispatches": 1,
             "replayed_tool_dispatches": 0,
             "admission_restored": True,
+            "observed_usage_restored": True,
             "backup": "logical pg_dump/pg_restore; not HA/PITR",
         }
     finally:

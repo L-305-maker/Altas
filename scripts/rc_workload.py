@@ -29,6 +29,7 @@ from agentflow.application.ports.model_provider import (
     ModelResponse,
     ModelRetryableError,
 )
+from agentflow.application.ports.observed_usage import ObservedUsagePolicy
 from agentflow.application.ports.provider_admission import ProviderAdmissionPolicy
 from agentflow.application.tools.runtime import Tool, ToolRuntime
 from agentflow.domain.agent.review import ApprovalDecision, ReconciliationDecision
@@ -83,8 +84,19 @@ async def serve(url, root, seconds):
     policy = (
         ProviderAdmissionPolicy.model_validate_json(configured) if configured else None
     )
+    configured_usage = os.environ.get("AGENTFLOW_RC_OBSERVED_USAGE_POLICY")
+    usage_policy = (
+        ObservedUsagePolicy.model_validate_json(configured_usage)
+        if configured_usage
+        else None
+    )
     store = Store(url)  # Independent engine/pool in every OS process.
-    agents, handlers = SQLAgentStore(store, admission_policy=policy), HandlerRegistry()
+    agents, handlers = (
+        SQLAgentStore(
+            store, admission_policy=policy, observed_usage_policy=usage_policy
+        ),
+        HandlerRegistry(),
+    )
 
     async def plain(task):
         record(root, "plain", run=task.run_id, step=task.step_id)
@@ -182,12 +194,17 @@ async def serve(url, root, seconds):
 
 
 class Workload:
-    def __init__(self, url, root, *, admission_policy=None):
+    def __init__(self, url, root, *, admission_policy=None, observed_usage_policy=None):
         self.url, self.root = url, Path(root)
         self.root.mkdir(mode=0o700, exist_ok=True)
         self.store = Store(url)
         self.admission_policy = admission_policy
-        self.agents = SQLAgentStore(self.store, admission_policy=admission_policy)
+        self.observed_usage_policy = observed_usage_policy
+        self.agents = SQLAgentStore(
+            self.store,
+            admission_policy=admission_policy,
+            observed_usage_policy=observed_usage_policy,
+        )
         # Reuse the release invariant checker without a second implementation.
         sys.path.insert(0, str(ROOT / "tests"))
         from runtime_assertions import RuntimeInvariants
@@ -255,6 +272,11 @@ class Workload:
                     AGENTFLOW_RC_ADMISSION_POLICY=(
                         self.admission_policy.model_dump_json()
                         if self.admission_policy
+                        else ""
+                    ),
+                    AGENTFLOW_RC_OBSERVED_USAGE_POLICY=(
+                        self.observed_usage_policy.model_dump_json()
+                        if self.observed_usage_policy
                         else ""
                     ),
                 ),

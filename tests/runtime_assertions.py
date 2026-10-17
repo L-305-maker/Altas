@@ -54,6 +54,15 @@ class RuntimeInvariants:
                 if row is None:
                     continue
                 state = SQLAgentStore(store)._read(db, row)
+                if state.observed_usage is not None:
+                    assert state.observed_usage.summary.attempts == len(
+                        state.model_attempts
+                    )
+                    if state.snapshot.status == "exhausted" and step.error in {
+                        "AgentObservedUsageLimit",
+                        "AgentUsageUnavailable",
+                    }:
+                        assert state.observed_usage.blocked
                 artifacts = tuple(
                     a.content
                     for a in db.scalars(
@@ -148,6 +157,12 @@ class RuntimeInvariants:
                 key = (run_id, step.key)
                 old = self.previous.get(key)
                 if old:
+                    if old.agent.observed_usage is not None:
+                        assert state.observed_usage is not None
+                        assert (
+                            state.observed_usage.policy
+                            == old.agent.observed_usage.policy
+                        )
                     prior = old.agent.snapshot
                     assert snapshot.revision >= prior.revision
                     if snapshot.revision == prior.revision or prior.status.is_terminal:

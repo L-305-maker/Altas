@@ -426,3 +426,16 @@ Tool UNKNOWN 与模型请求 UNKNOWN 是不同事实，前者的模型许可已�
 0001–0004。已有库应停 Writer、备份并执行 upgrade head；启用时所有相关 Worker 使用一致策略。
 准入配额、单 Agent 的硬调用预算、供应商用量账本及尚未实现的硬费用预算分别管理。
 详见 [Provider Admission 设计与限制](provider-admission.md)。
+
+## Observed Usage Governance v1
+
+可信 StepSpec 或部署 Settings 可显式启用 observed_usage 软阈值；Run 首次打开 Agent 时冻结部署策略
+和映射定义，恢复不隐式换配置。部署与 Workflow 同时设置时逐轴取更严格值。
+模型预约在 CAS / 租约事务中先检查持久账本的版本化报告与覆盖率，再申请 Provider Permit。
+达到阈值或 fail_closed 所需覆盖不足时，以安全错误码原子提交 Agent EXHAUSTED / Step failed，
+不增加尝试、模型轮次或 Permit。continue_with_warning 显示部分覆盖，不把未知视为零。
+
+检查只约束未来预约；合法已发响应即使使观察值超过阈值，也完整保存 usage、Action、成功结果及 Artifact。
+新映射保存来源、版本和字段规则；旧无版本数据不重写、不补造可信来源。
+0006 只新增 Run 配置 JSON 字段，不修改 0001–0005。尚未实现请求前资源上界或真实费用硬限制，
+max_resource_units 继续为 0。详见 [观察用量策略、映射与恢复契约](observed-usage-governance.md)。

@@ -34,7 +34,11 @@ def build_handlers(
     tools = tools or ToolRuntime()
     provider = build_provider(settings)
     agent_store = (
-        SQLAgentStore(store, admission_policy=settings.provider_admission)
+        SQLAgentStore(
+            store,
+            admission_policy=settings.provider_admission,
+            observed_usage_policy=settings.observed_usage,
+        )
         if store is not None
         else None
     )

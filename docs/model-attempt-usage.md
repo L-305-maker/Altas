@@ -35,7 +35,8 @@ Workflow 取消后旧 Worker 无法追加用量。查询汇总不改变任何持
 负数、浮点数、字符串、NaN 和 Infinity。`source` 只有 provider_reported / unavailable。
 `normalize_usage` 仅映射明确存在且合法的值；不相加补全 total，不从 total 推导缺失字段。
 DeepSeek 映射 prompt_tokens → input_tokens、completion_tokens → output_tokens，其他合法字段
-原样保留在 raw_usage；通用 Provider 可以提供自己的映射及规范化值。原 `complete()` 接口保持兼容。
+原样保留在 raw_usage；通用 Provider 通过可信注册的版本化映射提供规范值，并与 raw 重验一致性。
+新 usage JSON 保存映射来源、版本和规则；历史无版本数字不回填。原 `complete()` 接口保持兼容。
 适配器属于可信应用边界，Core 不独立验证供应商计量算法。
 
 无效的单个计数保留在有限 JSON 原始记录中，但其通用规范值为 None，其他有效字段仍可计量。
@@ -79,8 +80,9 @@ raw_usage 和规范化 usage 各限 16 KB，仍拒绝非有限 JSON；正常新�
 当前只实现 measured usage / soft governance，模型轮次、尝试数及工具次数仍是硬预算。
 Durable 配置继续要求 max_resource_units=0。usage 不转换成 resource_units 或货币；没有版本化价格、
 供应商账单核对或请求前资源上界预约。UNKNOWN 可能产生费用，未报告 usage 也可能产生费用。
-后续 Provider Admission Policy 和硬 Resource Budget 应独立设计、先验证请求前预约策略，
-确保供应商返回结果不会因事后超额而无法提交。这里不承诺真实费用 exactly-once。
+Provider Admission 已独立限制请求容量；[Observed Usage Governance](observed-usage-governance.md)
+可按已持久报告及覆盖率拒绝未来预约。硬 Resource Budget 仍需验证请求前上界预约策略，
+确保供应商结果不会因事后超额而无法提交。这里不承诺真实费用 exactly-once。
 
 ## 回归证据
 
@@ -93,7 +95,7 @@ Durable 配置继续要求 max_resource_units=0。usage 不转换成 resource_un
 - 现有 `test_runtime_commit_faults.py` 与子进程 `test_durable_runner_crash.py` 同时核查账本，
   覆盖预约前后退出、结果 COMMIT 回滚/确认丢失、延期退出和新 Worker 恢复。
 - `tests/runtime_assertions.py` 核查尝试总数与预算相等、历史确认记录不被覆盖，复用于审批、
-  对账、取消、多 Worker DAG 和 Soak；备份恢复逐表比对包含账本的全部 13 张表。
+  对账、取消、多 Worker DAG 和 Soak；备份恢复逐表比对包含账本的全部业务表。
 
 旧 AgentStore 回归曾允许将租约恢复后的 UNKNOWN 手动改写为 FAILED 后重试，本次按任务约束收紧：
 该路径现在拒绝写入并测试 fail-closed 终止，保留同一 UNKNOWN 尝试和已消耗预算。普通确认失败的

@@ -24,6 +24,9 @@ def core_facts(store):
                                 table.name == "agent_sessions"
                                 and c.name == "provider_key"
                             )
+                            and not (
+                                table.name == "runs" and c.name == "usage_governance"
+                            )
                         ]
                     ).order_by(*table.primary_key.columns)
                 ).mappings()
