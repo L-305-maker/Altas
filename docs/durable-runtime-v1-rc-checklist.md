@@ -117,3 +117,41 @@ MockProvider/MockTransport 不是供应商实测。完整故障窗口复用 [v1 
 
 Prometheus 与数据库不是逐事件相等的双账本。审计仅查询当前持久事实，不重建全部历史、不修改业务数据。
 有限 seed/时长无法穷举所有交错；真实跨主机、生产负载及真实 Provider 证据应附在部署验收记录。
+
+## Context Projection v1 验收（2026-10-18）
+
+基线 main 为 15d75c2f6dee1c92e784278f30b1b31ac557efa4，其 GitHub CI 已核实成功。
+本次只新增确定性投影及逐尝试 Manifest，不修改 Action/Agent Domain、Scheduler、审批或对账规则。
+详细配置、算法与迁移契约见 [Context Projection](context-projection.md)。
+
+| 检查 | 状态 | 本轮实际证据 |
+| --- | --- | --- |
+| 完整 pytest | PASS | 742 passed、294 skipped，114.75 秒；1 项已有 TestClient 弃用警告 |
+| Ruff check / format --check | PASS | src tests scripts migrations evals；141 files already formatted |
+| 新旧消息视图 | PASS | 合成 3 轮、每轮 2 个 Action，含 Schema：1766 → 686 UTF-8 字节，保留 1 轮、省略 2 轮 |
+| 真实 Worker 与历史不变 | PASS | full 在 1500 字节限额停止；recent_complete_rounds 完成，原消息、结果、Action 与 Artifact 断言不变 |
+| 重试 / UNKNOWN / COMMIT 确认丢失 | PASS | 同逻辑调用复用 Manifest；Schema 漂移、旧无 Manifest 重试保守停止；UNKNOWN 不重发 |
+| 准入 / 观察用量 / 取消容量 | PASS | 投影不绕过 Permit 与软阈值；Manifest 计入会话限额，近容量取消仍可保存 UNKNOWN |
+| SQLite 与 Alembic | PASS | 0007 升级、回退到 0006、再升级、check；原数据不变，旧 Manifest 为 None |
+| 真实 PostgreSQL 完整发布门禁 | PASS | verify_postgres.py --bin D:/PSQL/bin --release-gates：566 passed、零跳过，230.29 秒；含独立事务 CAS、真实旧 token、取消、审批、对账及迁移 |
+| 三独立 Worker Soak | PASS | 30 秒目标，实际 34.22 秒，seed=7，23 Run、13 Action、41 领取；单机隔离临时 PG |
+| 真实 pg_dump / pg_restore | PASS | 0007、15 表、10 Run 全量事实一致（含 Manifest）；已完成工具重派 0，明确新批准派发 1 |
+| 构建 / 仓库外 Wheel 安装 | PASS | sdist + wheel；投影配置、Durable Step、许可、用量、认证指标及参考应用 |
+| 架构 / 离线评估 | PASS | 架构边界 3 passed；参考应用 offline 3/3 |
+| 本地 Docker Sandbox / Compose | NOT VERIFIED | daemon pipe 不可用；Sandbox 2 skipped；最终 main CI 结果在交付记录中单列 |
+| 付费 Provider / 跨主机网络分区 | NOT VERIFIED | 真实模型请求 0；无跨主机测试环境，不用 Mock 或单机 Soak 替代 |
+| 生产环境部署放行 | NOT VERIFIED | 仍需目标环境连接/超时/租约、工具版本、外部副作用与人工运维验收 |
+
+294 skipped 不计通过，主要是独立 PostgreSQL、Docker 和显式付费门控；PG 由专用临时实例补充。
+投影专用 PG 用例进入原 verify_postgres.py 门禁，未新增或关闭 CI Job。
+
+专项曾出现 564 passed / 1 failed：原三 Worker 测试把并发下合法的空 tick 当作失败。
+Store.claim 使用 SKIP LOCKED，资格扫描与实际 Step 加锁之间也可丢失本次领取机会，正常 Worker 循环会继续轮询。
+只将测试改为原 15 秒总超时内轮询，并额外断言三个不同 Run 恰好各被领取一次；仍要求 1 个 Permit/Attempt、
+2 个持久延期。新增真实 PG 行锁空领取回归，与三 Worker 用例连续五轮均通过（共 10 次检查）。
+不改 Scheduler、CAS、租约或准入额度，不跳过失败用例。
+
+发布注意：旧 0006 的失败逻辑调用没有 Manifest，恢复重试会以 AgentContextProjectionChanged 终止，不能补造身份。
+升级前应识别这些等待重试会话并制定运维处置；正常 upgrade/备份保留已有 Manifest，downgrade 0006 会移除它。
+投影可能丢失早期语义，默认 full；字节上限不是供应商精确 Token 或费用上限；完整历史仍受 8 MB 存储额度约束。
+代码验证通过不代表真实 Provider、跨主机、生产部署或外部副作用 exactly-once 已获证明。

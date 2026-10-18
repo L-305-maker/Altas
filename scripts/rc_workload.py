@@ -228,6 +228,9 @@ class Workload:
                         retry_delay=0,
                         parameters={
                             "agent": {
+                                "context_projection": {
+                                    "mode": "recent_complete_rounds"
+                                },
                                 "retry_base_seconds": retry_seconds,
                                 "retry_max_seconds": retry_seconds,
                                 **(

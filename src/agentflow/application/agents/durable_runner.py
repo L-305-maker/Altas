@@ -5,6 +5,7 @@ import hashlib
 import json
 import math
 from collections.abc import Awaitable
+from copy import deepcopy
 from typing import Literal, Self
 from uuid import uuid4
 
@@ -13,10 +14,10 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_valida
 
 from agentflow.application.agents.context import (
     AgentContextBuilder,
-    context_bytes,
     mapped_calls,
     parse_tool_arguments,
 )
+from agentflow.application.agents.projection import project_context
 from agentflow.application.ports.agent_store import (
     ActionArguments,
     ActionObservation,
@@ -27,6 +28,11 @@ from agentflow.application.ports.agent_store import (
     ModelCallResult,
     ObservedUsageBlocked,
     StateConflict,
+)
+from agentflow.application.ports.context_projection import (
+    ContextProjectionError,
+    ContextProjectionPolicy,
+    ContextProjectionReservation,
 )
 from agentflow.application.ports.handler_result import CommittedAgentResult
 from agentflow.application.ports.model_provider import (
@@ -84,6 +90,9 @@ class DurableAgentConfig(BaseModel):
     max_resource_units: Literal[0] = 0
     observed_usage: ObservedUsagePolicy | None = None
     max_context_bytes: int = Field(default=1_000_000, ge=1, strict=True)
+    context_projection: ContextProjectionPolicy = Field(
+        default_factory=ContextProjectionPolicy
+    )
     retry_base_seconds: float = Field(
         default=1, gt=0, le=3600, allow_inf_nan=False, strict=True
     )
@@ -263,13 +272,25 @@ class DurableAgentRunner:
         retry = bool(state.model_calls and state.model_calls[-1].status == "failed")
         context = self.context.build(state)
         try:
-            schemas = self.tools.schemas(allowed)
+            # Bind the exact request view; deployment hot reload must not mutate
+            # schemas while the reservation is being committed in another thread.
+            schemas = deepcopy(self.tools.schemas(allowed))
         except ToolDeniedError:
             return state, await self._fail(task, state, "ToolConfigurationError")
-        if context_bytes(context, schemas) > config.max_context_bytes:
-            return state, await self._fail(
-                task, state, "AgentContextLimit", exhausted=True
+        try:
+            projected = project_context(
+                context, schemas, config.context_projection, config.max_context_bytes
             )
+            if retry and (
+                not state.model_attempts
+                or state.model_attempts[-1].context_projection != projected.manifest
+            ):
+                raise ContextProjectionError("AgentContextProjectionChanged")
+        except ContextProjectionError as error:
+            return state, await self._fail(
+                task, state, error.code, exhausted=error.code == "AgentContextLimit"
+            )
+        context = projected.messages
         budget = old.budget.consume(model_rounds=int(not retry), model_attempts=1)
         reservation = AgentTransition(
             snapshot=successor(
@@ -278,7 +299,10 @@ class DurableAgentRunner:
                 actions=(),
                 model_call_id=old.model_call_id if retry else uuid4().hex,
                 budget=budget,
-            )
+            ),
+            context_projection=ContextProjectionReservation(
+                manifest=projected.manifest, tools=tuple(schemas)
+            ),
         )
         permit = None
         try:
@@ -300,6 +324,8 @@ class DurableAgentRunner:
             return state, await self._fail(
                 task, state, error.report.error_code, exhausted=True
             )
+        except ContextProjectionError as error:
+            return state, await self._fail(task, state, error.code)
         except AgentDataError:
             return state, await self._fail(task, state, "AgentStorageLimit")
         await asyncio.to_thread(self.store.load, task)

@@ -9,6 +9,10 @@ from typing import Annotated, Literal, Protocol, Self
 
 from pydantic import BaseModel, ConfigDict, Field, JsonValue, model_validator
 
+from agentflow.application.ports.context_projection import (
+    ContextProjectionManifest,
+    ContextProjectionReservation,
+)
 from agentflow.application.ports.model_usage import (
     ModelUsage,
     ModelUsageSummary,
@@ -89,6 +93,7 @@ class ModelAttemptRecord(BaseModel):
     usage: ModelUsage = Field(default_factory=ModelUsage)
     created_at: float | None = Field(default=None, ge=0, allow_inf_nan=False)
     confirmed_at: float | None = Field(default=None, ge=0, allow_inf_nan=False)
+    context_projection: ContextProjectionManifest | None = None
 
     @model_validator(mode="after")
     def consistent_measurements(self) -> Self:
@@ -154,6 +159,7 @@ class AgentTransition(BaseModel):
     observations: tuple[ActionObservation, ...] = ()
     error_code: ErrorCode | None = None
     authorizations: tuple[Identifier, ...] = ()
+    context_projection: ContextProjectionReservation | None = None
 
 
 class AgentSession(BaseModel):

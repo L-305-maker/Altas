@@ -166,12 +166,19 @@ async def test_three_independent_worker_engines_share_one_slot(
         Store(store.engine.url.render_as_string(hide_password=False)) for _ in range(3)
     ]
     ticks = []
+    claimed = []
+
+    async def execute_one(engine):
+        executor = worker(engine, provider, policy(), tasks=claimed)
+        # SKIP LOCKED and an eligibility race can legally yield an empty tick.
+        # Keep the same overall timeout and require all three persisted outcomes.
+        while not await executor.tick():
+            await asyncio.sleep(0)
+        return True
+
     try:
         async with asyncio.timeout(15):
-            ticks = [
-                asyncio.create_task(worker(s, provider, policy()).tick())
-                for s in engines
-            ]
+            ticks = [asyncio.create_task(execute_one(s)) for s in engines]
             await entered.wait()
             pending = set(ticks)
             for _ in range(2):
@@ -182,6 +189,8 @@ async def test_three_independent_worker_engines_share_one_slot(
                 if len(pending) == 1:
                     break
             assert len(pending) == 1 and provider.calls == 1
+            assert {task.run_id for task in claimed} == set(runs)
+            assert len(claimed) == 3
             checkpoints = [runtime_invariants(store, r)["work"] for r in runs]
             assert (
                 sum(c.step["error"] == "ProviderAdmissionDeferred" for c in checkpoints)

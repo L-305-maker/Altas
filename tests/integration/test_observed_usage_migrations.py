@@ -23,6 +23,10 @@ def facts(store):
                             if not (
                                 table.name == "runs" and c.name == "usage_governance"
                             )
+                            and not (
+                                table.name == "agent_model_attempts"
+                                and c.name == "context_projection"
+                            )
                         ]
                     ).order_by(*table.primary_key.columns)
                 ).mappings()

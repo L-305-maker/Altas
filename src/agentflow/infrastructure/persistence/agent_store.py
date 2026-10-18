@@ -10,6 +10,8 @@ from pydantic import JsonValue, ValidationError
 from sqlalchemy import select, update
 from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 
+from agentflow.application.agents.context import AgentContextBuilder, UnresolvedActions
+from agentflow.application.agents.projection import project_context
 from agentflow.application.ports.agent_store import (
     ActionObservation,
     AgentDataError,
@@ -24,6 +26,11 @@ from agentflow.application.ports.agent_store import (
     ObservedUsageBlocked,
     StateConflict,
     StoredAction,
+)
+from agentflow.application.ports.context_projection import (
+    ContextProjectionError,
+    ContextProjectionManifest,
+    ContextProjectionPolicy,
 )
 from agentflow.application.ports.model_usage import (
     MAX_USAGE_BYTES,
@@ -251,6 +258,11 @@ class SQLAgentStore:
                     ),
                     created_at=a.created_at,
                     confirmed_at=a.confirmed_at,
+                    context_projection=ContextProjectionManifest.model_validate(
+                        checked_json(a.context_projection, 4096)
+                    )
+                    if a.context_projection is not None
+                    else None,
                 )
                 for a in db.scalars(
                     select(AgentModelAttemptRow)
@@ -430,6 +442,8 @@ class SQLAgentStore:
         for attempt in data["state"].get("model_attempts", []):
             if attempt["usage"]["mapping"] is None:
                 del attempt["usage"]["mapping"]
+            if attempt["context_projection"] is None:
+                del attempt["context_projection"]
         checked_json(data, MAX_SESSION_BYTES)
         if not reserve or state.snapshot.status.is_terminal:
             return
@@ -563,6 +577,11 @@ class SQLAgentStore:
                 )
             ):
                 raise StateConflict("attempt ledger differs from logical model call")
+            if any(
+                a.context_projection != attempts[0].context_projection
+                for a in attempts[1:]
+            ):
+                raise StateConflict("logical model retry context changed")
         if calls and calls[-1].model_call_id != snapshot.model_call_id:
             raise StateConflict("snapshot does not reference the latest model call")
         if (
@@ -802,6 +821,7 @@ class SQLAgentStore:
                 raise StateConflict(
                     "invalid model admission reservation or provider binding"
                 )
+            self._validate_projection(run, step, state, transition)
             row.provider_key = self.admission_policy.provider_key
             self._check_observed_usage(db, row, state)
             grant = self.admission.acquire(
@@ -849,12 +869,53 @@ class SQLAgentStore:
                 db, task, self._read(db, row), permit, self.admission_policy
             )
 
+    def _validate_projection(self, run, step, state, transition):
+        request = transition.context_projection
+        starts = (
+            state.snapshot.status == AgentStatus.READY_MODEL
+            and transition.snapshot.status == AgentStatus.MODEL_INFLIGHT
+        )
+        if not starts:
+            if request is not None:
+                raise StateConflict(
+                    "context manifest belongs to model reservation only"
+                )
+            return
+        spec = next(
+            s for s in WorkflowSpec.model_validate(run.spec).steps if s.id == step.key
+        )
+        config = spec.parameters.get("agent", {})
+        retry = bool(state.model_calls and state.model_calls[-1].status == "failed")
+        previous = state.model_attempts[-1].context_projection if retry else None
+        # Preserve older direct Store clients. Explicit projection configuration
+        # and calls already bound to a manifest must never bypass this check.
+        if request is None:
+            if "context_projection" in config or previous is not None:
+                raise ContextProjectionError()
+            return
+        try:
+            full = AgentContextBuilder().build(state)
+            expected = project_context(
+                full,
+                list(request.tools),
+                ContextProjectionPolicy.model_validate(
+                    config.get("context_projection", {})
+                ),
+                config.get("max_context_bytes", 1_000_000),
+            ).manifest
+        except (ValidationError, UnresolvedActions):
+            raise ContextProjectionError() from None
+        if expected != request.manifest or (retry and expected != previous):
+            raise ContextProjectionError("AgentContextProjectionChanged")
+
     def _apply(
         self, db, run, step, row, transition, *, operator=False, task=None, grant=None
     ):
         try:
+            data = transition.model_dump(mode="json")
+            projection = data.pop("context_projection")
             transition = AgentTransition.model_validate(
-                checked_json(transition.model_dump(mode="json"))
+                {**checked_json(data), "context_projection": projection}
             )
         except ValidationError:
             raise AgentDataError("invalid agent transition data") from None
@@ -864,6 +925,7 @@ class SQLAgentStore:
             old.advance(candidate)
         except (ValueError, InvalidStateTransitionError):
             raise StateConflict("invalid agent revision or state transition") from None
+        self._validate_projection(run, step, old_state, transition)
         if (
             old.status == AgentStatus.READY_MODEL
             and candidate.status == AgentStatus.MODEL_INFLIGHT
@@ -1088,6 +1150,11 @@ class SQLAgentStore:
                     accounting="recorded",
                     usage=ModelUsage().model_dump(mode="json"),
                     created_at=now,
+                    context_projection=transition.context_projection.manifest.model_dump(
+                        mode="json"
+                    )
+                    if transition.context_projection is not None
+                    else None,
                 )
             )
             if grant is not None:

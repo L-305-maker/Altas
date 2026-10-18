@@ -47,7 +47,7 @@ try:
     ), observed_usage=ObservedUsagePolicy(max_observed_total_tokens=100, missing_usage_policy="continue_with_warning", policy_version="1"))
     with TestClient(core_app(observed, store)) as client:
         run_id = store.submit(store.register(WorkflowSpec(name="installed-durable", steps=(
-            StepSpec(id="agent", handler="agent", artifact=True, parameters={"prompt":"wheel goal", "agent":{"mode":"durable_v1"}}),
+            StepSpec(id="agent", handler="agent", artifact=True, parameters={"prompt":"wheel goal", "agent":{"mode":"durable_v1", "context_projection":{"mode":"recent_complete_rounds"}}}),
         ))), {})
         worker = Worker(store, core_handlers(observed, store=store), observe=store.observe_execution)
         assert asyncio.run(worker.tick())
@@ -62,6 +62,7 @@ try:
         with SQLAgentStore(store)._operator_transaction(snapshot.id) as (_, _, _, _, session):
             assert len(session.model_permits) == 1 and session.model_permits[0].status == "released"
             assert session.observed_usage.partial and session.observed_usage.summary.total_tokens.value is None
+            assert session.model_attempts[0].context_projection.selection_policy == "recent_complete_rounds"
         assert client.get("/metrics").status_code == 401
         response = client.get("/metrics", headers={"Authorization":"Bearer wheel-smoke-test-token"})
         assert response.status_code == 200

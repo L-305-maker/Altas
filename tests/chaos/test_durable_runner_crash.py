@@ -161,6 +161,7 @@ def test_real_process_crash_and_new_worker(
             assert checkpoint.agent.model_attempts == ()
         else:
             assert len(checkpoint.agent.model_attempts) == 1
+            assert checkpoint.agent.model_attempts[0].context_projection is not None
             assert checkpoint.agent.model_attempts[0].outcome == (
                 "inflight"
                 if stage == "model_reservation"

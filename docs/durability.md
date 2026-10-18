@@ -439,3 +439,15 @@ Tool UNKNOWN 与模型请求 UNKNOWN 是不同事实，前者的模型许可已�
 新映射保存来源、版本和字段规则；旧无版本数据不重写、不补造可信来源。
 0006 只新增 Run 配置 JSON 字段，不修改 0001–0005。尚未实现请求前资源上界或真实费用硬限制，
 max_resource_units 继续为 0。详见 [观察用量策略、映射与恢复契约](observed-usage-governance.md)。
+
+## Durable Context Projection v1
+
+默认 full 保留完整回放和既有 max_context_bytes。可信持久 StepSpec 可显式选择 recent_complete_rounds：
+先由 ContextBuilder 验证全部历史，再只省略最旧完整轮次，保留 system/user 和连续完整工具批次后缀。
+UNKNOWN、未完成 Action 或历史映射错误不能被省略绕过。最后仍按消息与 Schema 的精确 UTF-8 大小检查。
+
+0007 为 ModelAttempt 添加可空 Manifest，与预约/CAS/fencing/许可原子提交；旧尝试保持 None。
+Store 在申请 Permit 前重算投影，重试必须复现同一 Manifest，否则安全终止。完整持久历史和人工审计不变，
+Manifest 计入会话容量并保留原有清理空间；取消、UNKNOWN 与五秒清理规则不变。
+投影不绕过调用预算、观察用量策略或 Provider 准入，不是 Memory、Summary 或精确 Token/费用限制。
+详见 [算法、身份、迁移与语义风险](context-projection.md)。
