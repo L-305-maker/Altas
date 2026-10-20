@@ -63,6 +63,8 @@ try:
             assert len(session.model_permits) == 1 and session.model_permits[0].status == "released"
             assert session.observed_usage.partial and session.observed_usage.summary.total_tokens.value is None
             assert session.model_attempts[0].context_projection.selection_policy == "recent_complete_rounds"
+            contract = session.model_attempts[0].request_contract
+            assert contract.model == "mock-v1" and contract.max_output_tokens == 4096
         assert client.get("/metrics").status_code == 401
         response = client.get("/metrics", headers={"Authorization":"Bearer wheel-smoke-test-token"})
         assert response.status_code == 200

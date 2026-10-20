@@ -405,7 +405,11 @@ async def test_legacy_failed_attempt_without_manifest_cannot_silently_retry(
     budget = saved(store, run)[1].snapshot["budget"]
     # Emulate a real 0006 reservation: its context identity was never persisted.
     with store.transaction() as db:
-        db.execute(update(AgentModelAttemptRow).values(context_projection=None))
+        db.execute(
+            update(AgentModelAttemptRow).values(
+                context_projection=None, request_contract=None
+            )
+        )
     due(store, run)
     assert await worker(store, provider).tick()
     after = runtime_invariants(store, run)["work"]

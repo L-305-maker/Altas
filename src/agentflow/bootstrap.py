@@ -23,7 +23,13 @@ def build_provider(settings: Settings):
             if settings.deepseek_api_key
             else ""
         )
-        provider = DeepSeekProvider(key, settings.model, settings.model_base_url)
+        provider = DeepSeekProvider(
+            key,
+            settings.model,
+            settings.model_base_url,
+            provider_key=settings.model_provider_key or "deepseek",
+            request_options=settings.model_request,
+        )
     return provider
 
 
@@ -80,7 +86,11 @@ def build_handlers(
                 raise ValueError("durable mode requires the worker Store")
             return await DurableAgentRunner(
                 agent_store,
-                provider or MockProvider(),
+                provider
+                or MockProvider(
+                    provider_key=settings.model_provider_key or "mock",
+                    request_options=settings.model_request,
+                ),
                 tools,
                 admission=agent_store if settings.provider_admission else None,
             ).run(task, prompt, allowed=set(allowed))

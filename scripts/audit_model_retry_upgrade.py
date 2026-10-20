@@ -1,0 +1,209 @@
+"""Bounded SELECT-only upgrade check for 0006/0007/0008. No identities or content.
+
+Exit 2: operator review required; exit 1: audit unavailable, never a healthy result.
+Read AGENTFLOW_DATABASE_URL from a protected environment, preferably SELECT-only.
+"""
+
+import argparse
+import json
+import os
+import time
+from collections import Counter
+
+from sqlalchemy import MetaData, Table, and_, create_engine, literal, select, text
+from sqlalchemy.exc import SQLAlchemyError
+
+from agentflow.application.ports.context_projection import ContextProjectionManifest
+from agentflow.application.ports.model_request import (
+    ModelRequestContract,
+    ModelRequestError,
+)
+from agentflow.domain.agent.run import AgentSnapshot
+
+
+def audit(engine, *, limit=1000, offset=0, timeout_seconds=30):
+    if (
+        type(limit) is not int
+        or not 1 <= limit <= 10000
+        or type(offset) is not int
+        or not 0 <= offset <= 1_000_000
+        or not 1 <= timeout_seconds <= 120
+    ):
+        raise ValueError("invalid audit bounds")
+    counts, findings = Counter(), Counter()
+    deadline = time.monotonic() + timeout_seconds
+    with engine.connect() as db:
+        try:
+            if engine.dialect.name == "postgresql":
+                db.execute(
+                    text("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY")
+                )
+                db.execute(text("SET LOCAL statement_timeout = '5s'"))
+                db.execute(text("SET LOCAL lock_timeout = '2s'"))
+            elif engine.dialect.name == "sqlite":
+                db.execute(text("PRAGMA query_only=ON"))
+                db.execute(text("BEGIN"))
+            else:
+                raise ValueError("unsupported audit database")
+            metadata = MetaData()
+            sessions, steps, runs, calls, attempts = (
+                Table(name, metadata, autoload_with=db)
+                for name in (
+                    "agent_sessions",
+                    "steps",
+                    "runs",
+                    "agent_model_calls",
+                    "agent_model_attempts",
+                )
+            )
+            projection = attempts.c.get("context_projection", literal(None))
+            contract = attempts.c.get("request_contract", literal(None))
+            latest = (
+                select(calls.c.id)
+                .where(calls.c.session_id == sessions.c.id)
+                .order_by(calls.c.round_index.desc())
+                .limit(1)
+                .correlate(sessions)
+                .scalar_subquery()
+            )
+            rows = db.execute(
+                select(
+                    sessions.c.snapshot,
+                    steps.c.status.label("step_status"),
+                    runs.c.status.label("run_status"),
+                    calls.c.status.label("call_status"),
+                    projection.label("projection"),
+                    contract.label("contract"),
+                )
+                .select_from(
+                    sessions.join(steps, sessions.c.step_row_id == steps.c.id)
+                    .join(runs, steps.c.run_id == runs.c.id)
+                    .outerjoin(calls, calls.c.id == latest)
+                    .outerjoin(
+                        attempts,
+                        and_(
+                            attempts.c.session_id == sessions.c.id,
+                            attempts.c.model_call_id == calls.c.model_call_id,
+                            attempts.c.attempt_index == calls.c.attempts,
+                        ),
+                    )
+                )
+                .order_by(sessions.c.id)
+                .offset(offset)
+                .limit(limit + 1)
+            ).mappings()
+            truncated = False
+            for index, row in enumerate(rows):
+                if time.monotonic() >= deadline:
+                    raise TimeoutError("ModelRetryUpgradeAuditDeadline")
+                if index == limit:
+                    truncated = True
+                    break
+                counts["scanned_sessions"] += 1
+                try:
+                    status = AgentSnapshot.model_validate(row["snapshot"]).status
+                except ValueError:
+                    findings["ModelRetryUpgradeInvalidState"] += 1
+                    continue
+                active = row["run_status"] not in {"succeeded", "failed", "cancelled"}
+                inflight = active and status == "model_inflight"
+                pending = (
+                    active
+                    and status == "ready_model"
+                    and row["call_status"] == "failed"
+                    and row["step_status"] in {"ready", "running"}
+                )
+                counts["model_inflight"] += int(inflight)
+                counts["pending_retry_calls"] += int(pending)
+                if inflight:
+                    findings["ModelOutcomeUnknownOnRecovery"] += 1
+                if not pending:
+                    continue
+                missing_projection = row["projection"] is None
+                missing_request = row["contract"] is None
+                counts["missing_projection_manifests"] += int(missing_projection)
+                counts["missing_request_contracts"] += int(missing_request)
+                blocked = missing_projection or missing_request
+                if missing_projection:
+                    findings["AgentContextProjectionChanged"] += 1
+                if missing_request:
+                    findings["ModelRequestContractUnavailable"] += 1
+                if not blocked:
+                    try:
+                        manifest = ContextProjectionManifest.model_validate(
+                            row["projection"]
+                        )
+                        ModelRequestContract.model_validate(
+                            row["contract"]
+                        ).verify_projection(manifest)
+                    except (ValueError, ModelRequestError):
+                        findings["ModelRequestContractInvalid"] += 1
+                        blocked = True
+                counts["retry_recovery_blocked"] += int(blocked)
+            following = offset + counts["scanned_sessions"]
+            return {
+                "version": 1,
+                **{
+                    name: counts[name]
+                    for name in (
+                        "scanned_sessions",
+                        "pending_retry_calls",
+                        "missing_projection_manifests",
+                        "missing_request_contracts",
+                        "model_inflight",
+                        "retry_recovery_blocked",
+                    )
+                },
+                "scope": {
+                    "limit": limit,
+                    "offset": offset,
+                    "truncated": truncated,
+                    "next_offset": following
+                    if truncated and following <= 1_000_000
+                    else None,
+                },
+                "findings": [
+                    {"code": code, "count": count}
+                    for code, count in sorted(findings.items())
+                ],
+            }
+        finally:
+            db.rollback()
+            if engine.dialect.name == "sqlite":
+                db.execute(text("PRAGMA query_only=OFF"))
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--limit", type=int, default=1000)
+    parser.add_argument("--offset", type=int, default=0)
+    parser.add_argument("--timeout-seconds", type=int, default=30)
+    args = parser.parse_args()
+    engine = None
+    try:
+        url = os.environ["AGENTFLOW_DATABASE_URL"]
+        engine = create_engine(
+            url,
+            pool_pre_ping=True,
+            connect_args={"connect_timeout": 5}
+            if url.startswith("postgresql")
+            else {"timeout": 5},
+        )
+        report = audit(
+            engine,
+            limit=args.limit,
+            offset=args.offset,
+            timeout_seconds=args.timeout_seconds,
+        )
+        print(json.dumps(report, sort_keys=True, allow_nan=False))
+        return 2 if report["findings"] else 0
+    except (KeyError, ValueError, TimeoutError, SQLAlchemyError):
+        print(json.dumps({"error": "ModelRetryUpgradeAuditUnavailable"}))
+        return 1
+    finally:
+        if engine is not None:
+            engine.dispose()
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

@@ -17,6 +17,14 @@ from agentflow.application.ports.model_provider import (
     ModelResponse,
     ModelRetryableError,
 )
+from agentflow.application.ports.model_request import (
+    ModelRequestError,
+    ModelRequestOptions,
+    PreparedModelRequest,
+    ProviderCapabilities,
+    build_request,
+    request_digest,
+)
 from agentflow.application.ports.model_usage import DEEPSEEK_USAGE_MAPPING
 
 
@@ -28,6 +36,8 @@ class DeepSeekProvider:
         base_url: str = "https://api.deepseek.com",
         *,
         transport: httpx.AsyncBaseTransport | None = None,
+        provider_key="deepseek",
+        request_options: ModelRequestOptions | None = None,
     ):
         if not api_key or not model:
             raise ValueError("DeepSeek API key and model are required")
@@ -47,6 +57,63 @@ class DeepSeekProvider:
             base_url.rstrip("/"),
             transport,
         )
+        self.provider_key = provider_key
+        self.request_options = request_options or ModelRequestOptions()
+
+    def prepare_request(self, messages, tools, projection):
+        model, provider_key, base_url, options = (
+            self.model,
+            self.provider_key,
+            self.base_url,
+            self.request_options,
+        )
+        key, transport = self._key, self._transport
+        # Conservative adapter profiles, not claims about all vendor limits.
+        if model not in {
+            "deepseek-chat",
+            "deepseek-reasoner",
+            "deepseek-flash",
+            "deepseek-v4-pro",
+        }:
+            raise ModelRequestError("ModelCapabilityUnsupported")
+        parsed = urlparse(base_url)
+        if (
+            parsed.scheme != "https"
+            or not parsed.hostname
+            or parsed.username
+            or parsed.password
+            or parsed.query
+            or parsed.fragment
+        ):
+            raise ModelRequestError("ModelEndpointUnsupported")
+        capabilities = ProviderCapabilities(
+            provider_key=provider_key,
+            model=model,
+            capability_version="deepseek.adapter.1",
+            supports_tools=model != "deepseek-reasoner",
+            supports_json_output=model != "deepseek-reasoner",
+            supported_parameters=()
+            if model == "deepseek-reasoner"
+            else ("temperature", "top_p"),
+            max_output_tokens=4096,
+        )
+        endpoint = base_url.rstrip("/") + "/chat/completions"
+        request = build_request(
+            messages,
+            tools,
+            projection,
+            capabilities=capabilities,
+            options=options,
+            adapter_version="deepseek.chat.v1",
+            endpoint_fingerprint=request_digest(endpoint),
+        )
+        send, response = DeepSeekProvider._send, DeepSeekProvider._response
+
+        async def execute():
+            data = await send(request.payload(), endpoint, key, transport)
+            return response(data)
+
+        return PreparedModelRequest(request, execute)
 
     async def complete(
         self, messages: list[dict], tools: list[dict] | None = None
@@ -64,6 +131,10 @@ class DeepSeekProvider:
         self, messages: list[dict], tools: list[dict] | None = None
     ) -> ModelResponse:
         data = await self._request(messages, tools)
+        return self._response(data)
+
+    @staticmethod
+    def _response(data):
         try:
             choice = data["choices"][0]
             return ModelResponse(
@@ -78,22 +149,30 @@ class DeepSeekProvider:
             raise ModelProtocolError() from None
 
     async def _request(self, messages, tools):
+        if self.request_options.max_output_tokens > 4096:
+            raise ModelConfigurationError()
         payload = {
             "model": self.model,
             "messages": messages,
             "stream": False,
-            "max_tokens": 4096,
+            "max_tokens": self.request_options.max_output_tokens,
         }
         if tools:
             payload["tools"] = tools
+        return await self._send(
+            payload, f"{self.base_url}/chat/completions", self._key, self._transport
+        )
+
+    @staticmethod
+    async def _send(payload, endpoint, key, transport):
         try:
             async with httpx.AsyncClient(
-                timeout=45, transport=self._transport, follow_redirects=False
+                timeout=45, transport=transport, follow_redirects=False
             ) as client:
                 response = await client.post(
-                    f"{self.base_url}/chat/completions",
+                    endpoint,
                     json=payload,
-                    headers={"Authorization": f"Bearer {self._key}"},
+                    headers={"Authorization": f"Bearer {key}"},
                 )
                 if response.status_code == 429:
                     try:

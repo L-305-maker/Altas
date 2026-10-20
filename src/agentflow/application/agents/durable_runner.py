@@ -36,12 +36,17 @@ from agentflow.application.ports.context_projection import (
 )
 from agentflow.application.ports.handler_result import CommittedAgentResult
 from agentflow.application.ports.model_provider import (
-    DurableModelProvider,
     ModelConfigurationError,
     ModelProtocolError,
     ModelRateLimitedError,
     ModelResponse,
     ModelRetryableError,
+    RequestModelProvider,
+)
+from agentflow.application.ports.model_request import (
+    ModelRequestError,
+    PreparedModelRequest,
+    check_request_continuity,
 )
 from agentflow.application.ports.model_usage import UsageMappingRegistry
 from agentflow.application.ports.observed_usage import ObservedUsagePolicy
@@ -154,7 +159,7 @@ class DurableAgentRunner:
     def __init__(
         self,
         store: AgentStore,
-        provider: DurableModelProvider,
+        provider: RequestModelProvider,
         tools: ToolRuntime,
         *,
         context: AgentContextBuilder | None = None,
@@ -291,6 +296,21 @@ class DurableAgentRunner:
                 task, state, error.code, exhausted=error.code == "AgentContextLimit"
             )
         context = projected.messages
+        try:
+            prepare = getattr(self.provider, "prepare_request", None)
+            if not callable(prepare):
+                raise ModelRequestError("ModelRequestContractUnavailable")
+            prepared = prepare(context, schemas, projected.manifest)
+            if not isinstance(prepared, PreparedModelRequest):
+                raise ModelRequestError()
+            prepared.request.contract.verify_projection(projected.manifest)
+            check_request_continuity(
+                state.model_attempts, prepared.request.contract, retry=retry
+            )
+        except ModelRequestError as error:
+            return state, await self._fail(task, state, error.code)
+        except ValidationError:
+            return state, await self._fail(task, state, "ModelRequestContractInvalid")
         budget = old.budget.consume(model_rounds=int(not retry), model_attempts=1)
         reservation = AgentTransition(
             snapshot=successor(
@@ -303,6 +323,7 @@ class DurableAgentRunner:
             context_projection=ContextProjectionReservation(
                 manifest=projected.manifest, tools=tuple(schemas)
             ),
+            request_contract=prepared.request.contract,
         )
         permit = None
         try:
@@ -326,16 +347,23 @@ class DurableAgentRunner:
             )
         except ContextProjectionError as error:
             return state, await self._fail(task, state, error.code)
+        except ModelRequestError as error:
+            return state, await self._fail(task, state, error.code)
         except AgentDataError:
             return state, await self._fail(task, state, "AgentStorageLimit")
-        await asyncio.to_thread(self.store.load, task)
+        restored = await asyncio.to_thread(self.store.load, task)
+        if (
+            restored.snapshot != state.snapshot
+            or restored.model_attempts[-1].request_contract != prepared.request.contract
+        ):
+            raise StateConflict("model dispatch differs from the reserved request")
         if permit is not None:
             await asyncio.to_thread(
                 self.admission.validate_model_dispatch, task, permit
             )
         response = None
         try:
-            received = await self.provider.respond(context, schemas)
+            received = await prepared.execute()
             if not isinstance(received, ModelResponse):
                 raise ModelProtocolError()
             validated = ModelResponse.model_validate(received.model_dump(mode="json"))

@@ -122,20 +122,22 @@ def test_reservation_and_result_roll_back_atomically_and_duplicates_do_not_charg
 
 
 def test_retry_reservation_does_not_erase_prior_reported_usage(agents):
+    from test_durable_model_request import reservation_with_contract
+
     task, state = start(agents)
-    state = reserve(agents, task, state)
+    state = agents.commit_transition(task, reservation_with_contract(state))
     failed = agents.commit_transition(
         task,
         AgentTransition(
             snapshot=candidate(state.snapshot, status="ready_model"),
             model_result=ModelCallResult(
-                model_call_id="model-1",
+                model_call_id=state.snapshot.model_call_id,
                 status="failed",
                 usage={"input_tokens": 5, "total_tokens": 6},
             ),
         ),
     )
-    retried = reserve(agents, task, failed)
+    retried = agents.commit_transition(task, reservation_with_contract(failed))
     assert retried.model_calls[0].usage is None
     assert retried.model_attempts[0] == failed.model_attempts[0]
     assert retried.usage_summary().total_tokens.value == 6

@@ -21,7 +21,11 @@ def historical_facts(store):
                 dict(row)
                 for row in db.execute(
                     select(
-                        *[c for c in t.c if c.name != "context_projection"]
+                        *[
+                            c
+                            for c in t.c
+                            if c.name not in {"context_projection", "request_contract"}
+                        ]
                     ).order_by(*t.primary_key.columns)
                 ).mappings()
             ]
@@ -56,6 +60,7 @@ async def test_0007_upgrade_downgrade_preserves_old_data_without_inventing_manif
         agents = SQLAgentStore(store)
         with agents._operator_transaction(state.snapshot.id) as (_, _, _, _, restored):
             assert restored.model_attempts[0].context_projection is None
+            assert all(a.request_contract is None for a in restored.model_attempts)
             assert restored.model_dump(exclude={"model_attempts"}) == state.model_dump(
                 exclude={"model_attempts"}
             )

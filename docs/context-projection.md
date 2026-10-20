@@ -1,5 +1,8 @@
 # Durable Context Projection v1
 
+Projection Manifest 的身份现由 [ModelRequestContract](model-request-contract.md) 与 Provider/model/输出参数绑定。
+0008 在 Attempt 增加可空请求契约，保留本页的投影语义；旧失败调用的升级风险可通过只读核查脚本识别。
+
 完整持久历史仍是唯一恢复与审计事实。投影只决定一次 Provider 请求的消息视图，既不删除消息，也不修改
 Action、工具结果、审批、对账、预算、Usage Ledger 或 Artifact。默认 `full` 保持原有消息与字节限制。
 

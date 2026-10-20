@@ -25,7 +25,7 @@ def facts(store):
                             )
                             and not (
                                 table.name == "agent_model_attempts"
-                                and c.name == "context_projection"
+                                and c.name in {"context_projection", "request_contract"}
                             )
                         ]
                     ).order_by(*table.primary_key.columns)

@@ -155,3 +155,34 @@ Store.claim 使用 SKIP LOCKED，资格扫描与实际 Step 加锁之间也可�
 升级前应识别这些等待重试会话并制定运维处置；正常 upgrade/备份保留已有 Manifest，downgrade 0006 会移除它。
 投影可能丢失早期语义，默认 full；字节上限不是供应商精确 Token 或费用上限；完整历史仍受 8 MB 存储额度约束。
 代码验证通过不代表真实 Provider、跨主机、生产部署或外部副作用 exactly-once 已获证明。
+
+## Immutable Model Request 验收（2026-10-20）
+
+基线 main 为 347a5af158def299cb608d5bc18e8eba83467651，其 CI 已核实成功。
+契约、能力、Token 计数保证等级和升级处置见 [Model Request Contract](model-request-contract.md)。
+
+| 检查 | 状态 | 本轮实际证据 |
+| --- | --- | --- |
+| 完整 `uv run pytest -q` | PASS | 780 passed、320 skipped，125.39 秒；1 项已有 TestClient 弃用警告 |
+| Ruff check / format --check | PASS | src tests scripts migrations evals；148 files already formatted |
+| 请求身份与 HTTP 一致 | PASS | MockTransport 校验 model、max_tokens、endpoint 在预约后配置变更时仍使用冻结值；无付费请求 |
+| 重试与 Session 固定配置 | PASS | 同逻辑调用 Contract/Manifest 不变；模型、Provider、输出或能力漂移在新 Attempt/Permit 前拒绝；新轮次不能静默更换 Session 配置 |
+| 预检顺序与资源治理 | PASS | 字节、能力、可信计数窗口先于预算预约；配额/Observed Usage 仍生效；无可信计数的严格模式拒绝 |
+| SQLite / 0008 / 只读升级核查 | PASS | 0008 → 0007 → 0008 / Alembic check；Action、审批、对账、Artifact 及旧事实不变；旧 Contract 保留 None；审计覆盖 0006/0007/0008 |
+| PostgreSQL 完整发布专项 | PASS | `verify_postgres.py --bin D:/PSQL/bin --release-gates`：617 passed、零跳过，251.15 秒；含真实独立事务竞争及旧 token fencing |
+| 三独立 Worker Soak | PASS | 30 秒目标，实际 34.75 秒，seed=7；23 Run、13 Action 派发、41 次领取；单机临时 PostgreSQL |
+| 实际 pg_dump / pg_restore | PASS | 0008、15 表、10 Run 全量事实一致，含 Request Contract；已完成工具重派 0，明确新批准派发 1 |
+| 构建 / Wheel / 架构 / 离线评估 | PASS | `uv build`；仓库外 Wheel 安装与 Durable Step；架构 3 passed；参考应用离线 3/3 |
+| 本地 Docker / Compose | NOT VERIFIED | Docker daemon pipe 不可用；Sandbox 2 skipped，不计通过；推送后由本次 main CI 验证，实际链接见交付记录 |
+| 真实 Provider / 真实 Token Counter / 跨宿主 | NOT VERIFIED | 未启用付费选项；无已验证 DeepSeek tokenizer 或跨宿主环境；合成 Counter 和单机 Soak 不替代真实验收 |
+
+完整测试的 320 skipped 包括 317 项专用 PostgreSQL、2 项 Docker 和 1 项显式付费测试。
+PostgreSQL 由上述独立临时实例补齐；未跳过失败检查或修改历史迁移。
+新测试随原发布门禁运行，没有新增付费 CI 或第二套调度器。
+
+旧迁移测试中“无请求身份仍可重试”的假设已更新为拒绝：用量计数和历史事实保留，预算不重置，
+不能通过旧 Store 接口重新预约未知身份的失败调用。新夹具在合法完整工具映射上验证迁移，不放宽 ContextBuilder。
+部署前需只读核查、停止 Writer、备份并处理旧待重试调用；0008 回退会删除契约，重新升级不能恢复已删身份。
+
+Token 窗口保证仅限经过验证的 Counter / 上界；默认未知，不是费用硬上限。
+供应商模型别名、实际权重或账单不由 Contract 证明；真实 Provider、跨宿主、长时生产负载和部署放行仍需独立验收。

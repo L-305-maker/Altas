@@ -165,6 +165,7 @@ class AgentModelAttemptRow(Base):
     created_at: Mapped[float | None] = mapped_column(Float)
     confirmed_at: Mapped[float | None] = mapped_column(Float)
     context_projection: Mapped[dict[str, Any] | None] = mapped_column(JSON)
+    request_contract: Mapped[dict[str, Any] | None] = mapped_column(JSON)
 
 
 class ProviderAdmissionRow(Base):

@@ -451,3 +451,13 @@ Store 在申请 Permit 前重算投影，重试必须复现同一 Manifest，否
 Manifest 计入会话容量并保留原有清理空间；取消、UNKNOWN 与五秒清理规则不变。
 投影不绕过调用预算、观察用量策略或 Provider 准入，不是 Memory、Summary 或精确 Token/费用限制。
 详见 [算法、身份、迁移与语义风险](context-projection.md)。
+
+## Immutable Model Request Contract v1
+
+Durable 模式在完整历史/投影/字节检查之后、预算和 Permit 之前完成可信 Provider 能力与可用 Token 窗口预检。
+模型身份、版本、类型化参数、输出额度、能力和投影摘要构成冻结 Contract，与 ModelAttempt 在 0008 中原子保存。
+实际派发使用预约前的配置快照；同逻辑调用重试必须完全相同，Session 从第一条已记录身份开始固定模型配置。
+历史缺身份保持 None 并安全终止旧重试；不能通过猜测模型、重发 UNKNOWN 或重置预算绕过。
+max_context_bytes 继续是硬字节限制；没有真实 DeepSeek Token Counter，本版不宣称验证真实 Token 窗口或费用硬上限。
+新增只读 audit_model_retry_upgrade.py，可在 0006/0007/0008 上检查升级风险；详见
+[请求、能力、升级与兼容边界](model-request-contract.md)。

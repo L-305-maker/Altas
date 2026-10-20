@@ -1,8 +1,10 @@
 """模型协议返回完整 assistant 消息，保留多轮工具调用所需的 provider 字段。"""
 
+from __future__ import annotations
+
 import json
 import math
-from typing import Any, Literal, Protocol, Self
+from typing import TYPE_CHECKING, Any, Literal, Protocol, Self
 
 from pydantic import (
     BaseModel,
@@ -14,6 +16,10 @@ from pydantic import (
 )
 
 from agentflow.application.ports.model_usage import MAX_USAGE_BYTES, ModelUsage
+
+if TYPE_CHECKING:
+    from agentflow.application.ports.context_projection import ContextProjectionManifest
+    from agentflow.application.ports.model_request import PreparedModelRequest
 
 
 class ModelError(Exception):
@@ -112,6 +118,17 @@ class DurableModelProvider(Protocol):
     async def respond(
         self, messages: list[dict], tools: list[dict] | None = None
     ) -> ModelResponse: ...
+
+
+class RequestModelProvider(Protocol):
+    def prepare_request(
+        self,
+        messages: list[dict],
+        tools: list[dict],
+        projection: ContextProjectionManifest,
+    ) -> PreparedModelRequest:
+        """Freeze identity, validate capability/window, and snapshot dispatch inputs."""
+        ...
 
 
 class ModelProvider(Protocol):

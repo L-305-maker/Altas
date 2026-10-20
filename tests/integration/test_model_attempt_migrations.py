@@ -1,3 +1,4 @@
+import json
 import os
 
 import pytest
@@ -11,12 +12,13 @@ from test_agent_store import (
     expire,
     final_response,
     finish_action,
-    propose,
     reserve,
+    response,
     start,
 )
 
 from agentflow.application.ports.agent_store import AgentTransition, ModelCallResult
+from agentflow.application.ports.model_request import ModelRequestError
 from agentflow.infrastructure.persistence.agent_store import SQLAgentStore
 from agentflow.infrastructure.persistence.models import Base
 from agentflow.infrastructure.persistence.store import Store
@@ -26,6 +28,8 @@ from agentflow.infrastructure.persistence.store import Store
 def test_attempt_upgrade_backfills_unmeasured_and_preserves_all_old_facts(
     backend, tmp_path, monkeypatch
 ):
+    from test_durable_model_request import reservation_with_contract
+
     url = (
         os.environ.get("AGENTFLOW_TEST_POSTGRES_URL")
         if backend == "postgres"
@@ -74,23 +78,37 @@ def test_attempt_upgrade_backfills_unmeasured_and_preserves_all_old_facts(
         command.upgrade(config, "head")
         agents = SQLAgentStore(store)
         task, state = start(agents, artifact=True)
-        state = reserve(agents, task, state)
+        state = agents.commit_transition(task, reservation_with_contract(state))
         state = agents.commit_transition(
             task,
             AgentTransition(
                 snapshot=candidate(state.snapshot, status="ready_model"),
-                model_result=ModelCallResult(model_call_id="model-1", status="failed"),
+                model_result=ModelCallResult(
+                    model_call_id=state.snapshot.model_call_id, status="failed"
+                ),
             ),
         )
-        state = reserve(agents, task, state)
-        state = finish_action(
-            agents, task, dispatch(agents, task, propose(agents, task, state))
-        )
+        state = agents.commit_transition(task, reservation_with_contract(state))
+        proposal = response(state).model_dump()
+        proposal["messages"][0]["payload"]["message"] = {
+            "role": "assistant",
+            "tool_calls": [
+                {
+                    "id": "vendor-1",
+                    "function": {
+                        "name": "lookup",
+                        "arguments": json.dumps(proposal["arguments"][0]["arguments"]),
+                    },
+                }
+            ],
+        }
+        state = agents.commit_transition(task, AgentTransition.model_validate(proposal))
+        state = finish_action(agents, task, dispatch(agents, task, state))
         state = agents.commit_transition(
             task,
             AgentTransition(snapshot=candidate(state.snapshot, status="ready_model")),
         )
-        state = reserve(agents, task, state, "model-2")
+        state = agents.commit_transition(task, reservation_with_contract(state))
         state = agents.complete_agent_step(task, final_response(state), {"value": 42})
         original = facts()
         command.downgrade(config, "0003")
@@ -159,10 +177,13 @@ def test_legacy_pending_attempts_recover_without_reset_or_invented_usage(
         assert restored.snapshot == state.snapshot
         assert restored.model_attempts[0].accounting == "LEGACY_UNMEASURED"
         if confirmed_failure:
-            restored = reserve(agents, task, restored)
-            assert restored.snapshot.budget.model_attempts == 2
-            assert restored.model_attempts[-1].accounting == "recorded"
-            assert restored.model_attempts[-1].attempt_index == 2
+            with pytest.raises(
+                ModelRequestError, match="ModelRequestContractUnavailable"
+            ):
+                reserve(agents, task, restored)
+            assert agents.load(task) == restored
+            assert restored.snapshot.budget.model_attempts == 1
+            assert len(restored.model_attempts) == 1
         else:
             expire(agents, task)
             replacement = agents.store.claim(300)

@@ -20,7 +20,7 @@ Worker 及连接、停止临时实例并删除合成备份。Windows 关闭的�
 
 备份演练先停止 Writer，保留已完成结果、待审批与已消耗审批、已应用对账、未解决 UNKNOWN、未来重试、
 取消 Run。实际执行 custom-format `pg_dump`，向新库 `pg_restore --exit-on-error`，比对全部业务表
-以及 Alembic 0007。比对包括逐尝试 Context Projection Manifest、观察策略/映射的 Run 绑定、Provider 准入策略/许可/429 冷却/延期、
+以及 Alembic 0008。比对包括逐尝试 Request Contract、Context Projection Manifest、观察策略/映射的 Run 绑定、Provider 准入策略/许可/429 冷却/延期、
 逐次模型尝试/用量、消息、revision、
 预算、模型 ID、Action/幂等键/绑定、审批/审计、时间和
 Artifact 内容/digest；内容仅在进程内比较，不写报告。恢复 Worker 不重派已执行工具；待审批行动

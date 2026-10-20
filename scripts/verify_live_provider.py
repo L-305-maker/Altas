@@ -17,6 +17,7 @@ from sqlalchemy import select
 
 from agentflow.application.agents.durable_runner import DurableAgentRunner
 from agentflow.application.orchestration.worker import HandlerRegistry, Worker
+from agentflow.application.ports.model_request import PreparedModelRequest
 from agentflow.application.tools.runtime import ToolRuntime
 from agentflow.domain.workflow.spec import StepSpec, WorkflowSpec
 from agentflow.infrastructure.models.deepseek import DeepSeekProvider
@@ -35,24 +36,31 @@ async def verify(provider, url):
     metadata, calls = {}, 0
 
     class Once:
-        async def respond(self, messages, tools=None):
-            nonlocal calls
+        def prepare_request(self, messages, tools, projection):
             if calls or tools:
                 raise ValueError("LiveRequestLimit")
-            calls += 1
-            response = await provider.respond(messages, tools)
-            assert response.assistant_message.role == "assistant"
-            assert response.finish_reason == "stop"
-            assert (
-                response.assistant_message.content
-                and not response.assistant_message.tool_calls
-            )
-            metadata.update(
-                usage_present=response.usage is not None,
-                request_id_present=response.request_id is not None,
-                model_present=response.model is not None,
-            )
-            return response
+            prepared = provider.prepare_request(messages, tools, projection)
+
+            async def execute():
+                nonlocal calls
+                if calls:
+                    raise ValueError("LiveRequestLimit")
+                calls += 1
+                response = await prepared.execute()
+                assert response.assistant_message.role == "assistant"
+                assert response.finish_reason == "stop"
+                assert (
+                    response.assistant_message.content
+                    and not response.assistant_message.tool_calls
+                )
+                metadata.update(
+                    usage_present=response.usage is not None,
+                    request_id_present=response.request_id is not None,
+                    model_present=response.model is not None,
+                )
+                return response
+
+            return PreparedModelRequest(prepared.request, execute)
 
     store = Store(url)
     try:

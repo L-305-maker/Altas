@@ -105,13 +105,16 @@ def drill(cluster):
         assert all(
             a["context_projection"] is not None for a in facts["agent_model_attempts"]
         )
+        assert all(
+            a["request_contract"] is not None for a in facts["agent_model_attempts"]
+        )
         assert facts["provider_admissions"] and facts["provider_permits"]
         assert facts["provider_admissions"][0]["cooldown_until"] > 0
         held = checkpoints[unknown_model].agent.model_permits[0]
         assert held.status == "unknown" and held.released_at is None
         assert checkpoints[admission_delayed].agent.snapshot.budget.model_attempts == 0
         with source.store.engine.connect() as db:
-            assert db.scalar(text("SELECT version_num FROM alembic_version")) == "0007"
+            assert db.scalar(text("SELECT version_num FROM alembic_version")) == "0008"
         for artifact in facts["artifacts"]:
             assert (
                 artifact["digest"]
@@ -162,7 +165,7 @@ def drill(cluster):
         assert inventory(target.store) == facts, "RestoreFactMismatch"
         migrate(target_url)
         with target.store.engine.connect() as db:
-            assert db.scalar(text("SELECT version_num FROM alembic_version")) == "0007"
+            assert db.scalar(text("SELECT version_num FROM alembic_version")) == "0008"
         assert not audit(target.store.engine)["severe"]
         for r, checkpoint in checkpoints.items():
             assert target.state(r) == checkpoint
@@ -209,7 +212,7 @@ def drill(cluster):
         target.check()
         return {
             "status": "PASS",
-            "alembic": "0007",
+            "alembic": "0008",
             "tables_compared": len(facts),
             "source": before,
             "restored_runs": len(target.runs),

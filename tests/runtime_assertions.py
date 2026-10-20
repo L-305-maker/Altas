@@ -196,6 +196,7 @@ class RuntimeInvariants:
                         assert current.created_at == attempt.created_at
                         assert current.accounting == attempt.accounting
                         assert current.context_projection == attempt.context_projection
+                        assert current.request_contract == attempt.request_contract
                         if attempt.outcome != "inflight":
                             assert current == attempt
                     permits = {p.id: p for p in state.model_permits}

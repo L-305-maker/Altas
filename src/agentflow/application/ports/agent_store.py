@@ -13,6 +13,7 @@ from agentflow.application.ports.context_projection import (
     ContextProjectionManifest,
     ContextProjectionReservation,
 )
+from agentflow.application.ports.model_request import ModelRequestContract
 from agentflow.application.ports.model_usage import (
     ModelUsage,
     ModelUsageSummary,
@@ -94,6 +95,7 @@ class ModelAttemptRecord(BaseModel):
     created_at: float | None = Field(default=None, ge=0, allow_inf_nan=False)
     confirmed_at: float | None = Field(default=None, ge=0, allow_inf_nan=False)
     context_projection: ContextProjectionManifest | None = None
+    request_contract: ModelRequestContract | None = None
 
     @model_validator(mode="after")
     def consistent_measurements(self) -> Self:
@@ -160,6 +162,7 @@ class AgentTransition(BaseModel):
     error_code: ErrorCode | None = None
     authorizations: tuple[Identifier, ...] = ()
     context_projection: ContextProjectionReservation | None = None
+    request_contract: ModelRequestContract | None = None
 
 
 class AgentSession(BaseModel):

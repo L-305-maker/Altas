@@ -32,6 +32,11 @@ from agentflow.application.ports.context_projection import (
     ContextProjectionManifest,
     ContextProjectionPolicy,
 )
+from agentflow.application.ports.model_request import (
+    ModelRequestContract,
+    ModelRequestError,
+    check_request_continuity,
+)
 from agentflow.application.ports.model_usage import (
     MAX_USAGE_BYTES,
     ModelUsage,
@@ -263,6 +268,11 @@ class SQLAgentStore:
                     )
                     if a.context_projection is not None
                     else None,
+                    request_contract=ModelRequestContract.model_validate(
+                        checked_json(a.request_contract, 8000)
+                    )
+                    if a.request_contract is not None
+                    else None,
                 )
                 for a in db.scalars(
                     select(AgentModelAttemptRow)
@@ -444,6 +454,8 @@ class SQLAgentStore:
                 del attempt["usage"]["mapping"]
             if attempt["context_projection"] is None:
                 del attempt["context_projection"]
+            if attempt["request_contract"] is None:
+                del attempt["request_contract"]
         checked_json(data, MAX_SESSION_BYTES)
         if not reserve or state.snapshot.status.is_terminal:
             return
@@ -582,6 +594,29 @@ class SQLAgentStore:
                 for a in attempts[1:]
             ):
                 raise StateConflict("logical model retry context changed")
+            if any(
+                a.request_contract != attempts[0].request_contract for a in attempts[1:]
+            ):
+                raise StateConflict("logical model retry request changed")
+        profiles = {
+            a.request_contract.profile_digest()
+            for a in state.model_attempts
+            if a.request_contract is not None
+        }
+        if len(profiles) > 1:
+            raise StateConflict("agent session model profile changed")
+        for attempt in state.model_attempts:
+            if attempt.request_contract is not None:
+                if attempt.context_projection is None:
+                    raise StateConflict("model request lacks a projection identity")
+                try:
+                    attempt.request_contract.verify_projection(
+                        attempt.context_projection
+                    )
+                except ModelRequestError:
+                    raise StateConflict(
+                        "model request differs from projection"
+                    ) from None
         if calls and calls[-1].model_call_id != snapshot.model_call_id:
             raise StateConflict("snapshot does not reference the latest model call")
         if (
@@ -871,12 +906,13 @@ class SQLAgentStore:
 
     def _validate_projection(self, run, step, state, transition):
         request = transition.context_projection
+        contract = transition.request_contract
         starts = (
             state.snapshot.status == AgentStatus.READY_MODEL
             and transition.snapshot.status == AgentStatus.MODEL_INFLIGHT
         )
         if not starts:
-            if request is not None:
+            if request is not None or contract is not None:
                 raise StateConflict(
                     "context manifest belongs to model reservation only"
                 )
@@ -890,23 +926,42 @@ class SQLAgentStore:
         # Preserve older direct Store clients. Explicit projection configuration
         # and calls already bound to a manifest must never bypass this check.
         if request is None:
-            if "context_projection" in config or previous is not None:
+            if (
+                "context_projection" in config
+                or previous is not None
+                or contract is not None
+            ):
                 raise ContextProjectionError()
+            if retry or any(
+                a.request_contract is not None for a in state.model_attempts
+            ):
+                raise ModelRequestError("ModelRequestContractUnavailable")
             return
         try:
             full = AgentContextBuilder().build(state)
-            expected = project_context(
+            projected = project_context(
                 full,
                 list(request.tools),
                 ContextProjectionPolicy.model_validate(
                     config.get("context_projection", {})
                 ),
                 config.get("max_context_bytes", 1_000_000),
-            ).manifest
+            )
+            expected = projected.manifest
         except (ValidationError, UnresolvedActions):
             raise ContextProjectionError() from None
         if expected != request.manifest or (retry and expected != previous):
             raise ContextProjectionError("AgentContextProjectionChanged")
+        if retry and (
+            contract is None or state.model_attempts[-1].request_contract is None
+        ):
+            raise ModelRequestError("ModelRequestContractUnavailable")
+        if contract is not None:
+            contract.verify_projection(expected)
+            contract.verify_context(projected.messages, list(request.tools))
+            check_request_continuity(state.model_attempts, contract, retry=retry)
+        elif any(a.request_contract is not None for a in state.model_attempts):
+            raise ModelRequestError("ModelRequestContractUnavailable")
 
     def _apply(
         self, db, run, step, row, transition, *, operator=False, task=None, grant=None
@@ -1154,6 +1209,9 @@ class SQLAgentStore:
                         mode="json"
                     )
                     if transition.context_projection is not None
+                    else None,
+                    request_contract=transition.request_contract.model_dump(mode="json")
+                    if transition.request_contract is not None
                     else None,
                 )
             )
