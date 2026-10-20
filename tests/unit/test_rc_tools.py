@@ -56,6 +56,36 @@ async def test_live_harness_is_one_request_and_completes_real_durable_step(
     assert provider.calls == 1
 
 
+@pytest.mark.parametrize("model", ["deepseek-flash", "deepseek-v4-pro"])
+def test_live_cli_allowlists_current_model_with_mock_only(monkeypatch, capsys, model):
+    module = script(monkeypatch, "verify_live_provider")
+    from agentflow.infrastructure.models.mock import MockProvider
+
+    credential = "synthetic-credential-never-send"
+    providers = []
+
+    def offline(key, selected_model):
+        if key != credential or selected_model != model:
+            pytest.fail("LiveConfigMismatch", pytrace=False)
+        provider = MockProvider(model=selected_model)
+        providers.append(provider)
+        return provider
+
+    monkeypatch.setattr(module, "DeepSeekProvider", offline)
+    monkeypatch.setenv("AGENTFLOW_DEEPSEEK_API_KEY", credential)
+    monkeypatch.setenv("AGENTFLOW_LIVE_DEEPSEEK_AUTHORIZATION", "one-paid-request")
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["verify_live_provider.py", "--allow-paid-request", "--model", model],
+    )
+    assert module.main() == 0
+    output = capsys.readouterr()
+    if credential in output.out + output.err:
+        pytest.fail("LiveDiagnosticContainsCredential", pytrace=False)
+    assert json.loads(output.out)["requests"] == providers[0].calls == 1
+
+
 def test_live_failure_report_never_prints_credentials(monkeypatch, capsys):
     module = script(monkeypatch, "verify_live_provider")
     private = "private-test-key-do-not-print"

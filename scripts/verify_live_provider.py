@@ -20,7 +20,11 @@ from agentflow.application.orchestration.worker import HandlerRegistry, Worker
 from agentflow.application.ports.model_request import PreparedModelRequest
 from agentflow.application.tools.runtime import ToolRuntime
 from agentflow.domain.workflow.spec import StepSpec, WorkflowSpec
-from agentflow.infrastructure.models.deepseek import DeepSeekProvider
+from agentflow.infrastructure.models.deepseek import (
+    DEFAULT_MODEL,
+    SUPPORTED_MODELS,
+    DeepSeekProvider,
+)
 from agentflow.infrastructure.persistence.agent_store import SQLAgentStore
 from agentflow.infrastructure.persistence.models import AgentSessionRow
 from agentflow.infrastructure.persistence.store import Store
@@ -117,14 +121,15 @@ async def verify(provider, url):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--allow-paid-request", action="store_true")
+    parser.add_argument("--model", choices=SUPPORTED_MODELS, default=DEFAULT_MODEL)
     args = parser.parse_args()
     if not args.allow_paid_request or not authorized():
         print(json.dumps({"status": "LIVE PROVIDER NOT VERIFIED", "requests": 0}))
         return 1 if args.allow_paid_request else 0
     try:
-        # Fixed HTTPS endpoint/model: environment cannot redirect the credential.
+        # Fixed HTTPS endpoint and allowlisted model; no credential redirection.
         provider = DeepSeekProvider(
-            os.environ["AGENTFLOW_DEEPSEEK_API_KEY"], "deepseek-chat"
+            os.environ["AGENTFLOW_DEEPSEEK_API_KEY"], args.model
         )
         with tempfile.TemporaryDirectory(prefix="agentflow-live-") as directory:
             report = asyncio.run(

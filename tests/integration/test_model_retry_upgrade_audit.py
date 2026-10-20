@@ -45,6 +45,11 @@ async def test_read_only_audit_supports_old_schema_and_exposes_no_identity(
         assert report["pending_retry_calls"] == 1
         assert report["missing_projection_manifests"] == missing_projection
         assert report["missing_request_contracts"] == missing_request
+        assert report["unbound_request_sessions"] == missing_request
+        assert report["operator_review_sessions"] == int(
+            missing_projection or missing_request
+        )
+        assert report["legacy_model_sessions"] == 0
         assert report["model_inflight"] == 0
         assert report["retry_recovery_blocked"] == int(
             missing_projection or missing_request

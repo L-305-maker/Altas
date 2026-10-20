@@ -90,7 +90,7 @@ async def test_deepseek_metadata_and_no_hidden_retry():
         )
 
     provider = DeepSeekProvider(
-        "test-key", "model", transport=httpx.MockTransport(handle)
+        "test-key", "deepseek-flash", transport=httpx.MockTransport(handle)
     )
     result = await provider.respond([])
     assert result.usage["prompt_cache_hit_tokens"] == 2
@@ -123,7 +123,7 @@ async def test_deepseek_safe_error_classification(kind, error):
         return httpx.Response(200, json={"secret": "response"})
 
     provider = DeepSeekProvider(
-        "test-key", "model", transport=httpx.MockTransport(handle)
+        "test-key", "deepseek-flash", transport=httpx.MockTransport(handle)
     )
     with pytest.raises(error) as caught:
         await provider.respond([])

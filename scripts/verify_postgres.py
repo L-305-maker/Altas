@@ -91,6 +91,7 @@ def main():
                     "tests/integration/test_model_governance.py",
                     "tests/integration/test_durable_context_projection.py",
                     "tests/integration/test_durable_model_request.py",
+                    "tests/integration/test_provider_compatibility.py",
                     "tests/integration/test_model_request_migrations.py",
                     "tests/integration/test_model_retry_upgrade_audit.py",
                     "tests/integration/test_context_projection_migrations.py",

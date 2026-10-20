@@ -18,7 +18,7 @@ class Settings(BaseSettings):
     database_url: SecretStr = SecretStr("sqlite:///agentflow.db")
     api_token: SecretStr | None = None
     provider: Literal["mock", "deepseek"] = "mock"
-    model: str = "deepseek-chat"
+    model: str = "deepseek-flash"
     # 不读取 .env 文件以避免隐式加载；部署工具负责把环境变量传给进程。
     deepseek_api_key: SecretStr | None = None
     model_base_url: str = "https://api.deepseek.com"

@@ -115,7 +115,7 @@ async def test_deepseek_contract_without_network():
     def respond(request):
         payload = json.loads(request.content)
         assert payload["stream"] is False
-        assert payload["model"] == "test-model"
+        assert payload["model"] == "deepseek-flash"
         return httpx.Response(
             200,
             json={
@@ -132,7 +132,7 @@ async def test_deepseek_contract_without_network():
         )
 
     provider = DeepSeekProvider(
-        "test-only", "test-model", transport=httpx.MockTransport(respond)
+        "test-only", "deepseek-flash", transport=httpx.MockTransport(respond)
     )
     response = await provider.complete([{"role": "user", "content": "hello"}])
     assert response["reasoning_content"] == "opaque"
@@ -142,7 +142,7 @@ async def test_deepseek_contract_without_network():
 async def test_provider_errors_do_not_contain_response_body():
     provider = DeepSeekProvider(
         "test-only",
-        "test-model",
+        "deepseek-flash",
         transport=httpx.MockTransport(
             lambda request: httpx.Response(401, text="sensitive response")
         ),

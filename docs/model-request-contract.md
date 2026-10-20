@@ -1,4 +1,4 @@
-# Immutable Model Request Contract & Capability Preflight v1
+# Immutable Model Request Contract & Capability Preflight v1.1
 
 本功能固定一次模型尝试的应用请求身份，不证明供应商的模型权重、实际账单或网络副作用 exactly-once。
 完整历史、Context Projection、调用预算、Observed Usage、Provider Admission、CAS/fencing 和取消规则均保留。
@@ -48,15 +48,53 @@ ProviderCapabilities 绑定 Provider/model、capability_version、工具/流式/
 上下文和 Schema 摘要沿用 Projection Manifest，Store 会从锁定完整历史重新计算并核对两份身份及能力。
 只有指纹的 endpoint 也会影响请求身份；摘要不是加密或签名，不应把任何 Secret 填进身份标签或模型名。
 
-DeepSeek v1 保持默认 4096 输出上限，可显式降低；保守适配器上限仍为 4096，包括旧接口，不宣称这是供应商最大容量。
-Durable 静态识别 deepseek-chat、deepseek-reasoner 兼容名及 deepseek-flash、deepseek-v4-pro。
-reasoner 兼容配置保守禁用工具、JSON 和采样参数；未知模型拒绝，SSE 均不支持。
-当前公开请求规范参见 [DeepSeek Chat Completions](https://api-docs.deepseek.com/api/create-chat-completion/)。
-这些是版本化适配器配置，旧别名可用性、供应商别名映射及真实 API 行为本轮未付费实测；不会自动切换到另一个模型。
+DeepSeek 仍保持默认及适配器最大输出 4096，可显式降低，包括旧接口；这是应用侧保守限制，不是供应商最大容量。
+Settings、Compose 和 .env.example 的新部署模型默认改为 deepseek-flash；provider 仍默认离线 mock。
+已经显式设置 AGENTFLOW_MODEL 的部署不会被环境默认值覆盖。下列判断核实于 **2026-10-20**：
+
+| 名称 | 生命周期分类 | Core 策略 |
+| --- | --- | --- |
+| deepseek-flash | supported；官方当前规范名称 | 允许文本 Chat、JSON、函数工具；新部署默认 |
+| deepseek-v4-pro | supported；官方仍提供服务 | 同上；必须显式选择 |
+| deepseek-chat / deepseek-reasoner | legacy；官方公告于 2026-07-24 停用 | 新请求在预约及 HTTP 前拒绝；不自动改名 |
+| deepseek-v4-flash / deepseek-v4-flash-vision-exp | legacy；原模型退役，官方说明旧名称仍路由到新 Flash | Core 拒绝别名，避免把供应商重定向当作已固定的原模型 |
+| 其他名称 | unsupported / unknown | 拒绝，不根据字符串推测能力 |
+
+证据：[Chat Completions](https://api-docs.deepseek.com/api/create-chat-completion/)、
+[Models & Pricing](https://api-docs.deepseek.com/quick_start/pricing/)、[Change Log](https://api-docs.deepseek.com/updates/)。
+本次核查时，价格页将规范名称分别对应到 Flash-1017 和 Pro-0813；文档中的供应商版本不是 Core 固定权重的证明。
+公告停用和旧名称路由是文档事实，本轮没有发送付费请求来实测这些 endpoint 的可用性。
+
+Durable 旧别名使用 ModelDeprecated，未知名称使用 ModelCapabilityUnsupported；错误中不包含配置原文。
+旧 complete()/respond() 在同一能力检查失败时使用既有 ModelConfigurationError，保留 ModelError 异常类别兼容。
+历史 Contract 仍能验证、读取及备份，不调用生命周期白名单去改写档案。
+规范模型现有的请求序列化、deepseek.chat.v1 和 deepseek.adapter.1 标识不变；v1.1 是兼容修复版本，
+没有更改这些已持久字段的含义，因此原规范模型可在契约完全相同时继续确认失败重试。
 
 Contract provider_key 表示逻辑 Provider 身份；Admission policy.provider_key 是共享限流池标签，二者不要求同名。
 部署者必须让所有 Worker 使用一致的身份和合适的限流池。Key 轮换不改变 Contract；跨账户轮换须调整身份，
 Core 不通过读取 API Key 推断账户，也不把 Key 的摘要作为持久身份。
+
+## 两类 Provider 接口的请求语义
+
+prepare_request 与旧 complete()/respond() 共享纯 serialize_request，按同一可信配置发送 model、max_tokens、
+stream=false、response_format 以及显式配置的 temperature/top_p；messages、reasoning_content、工具 Schema 和调用 ID 原样传递。
+新旧路径均检查生命周期、能力和 endpoint；DeepSeek 没有可信计数器，开启 strict_token_window 时两类路径都拒绝。
+不添加任意参数字典、隐藏重试或由用户内容控制的选项。新的响应格式/采样配置现在也对旧接口生效，这是 v1.1 的行为修正。
+手工构造的 context_json 也只能包含 messages/tools；共享序列化拒绝其他顶层键，防止通过上下文字典夹带契约外选项。
+
+| 接口 | 请求构造 | 返回值与持久化边界 |
+| --- | --- | --- |
+| prepare_request | 预约前冻结上下文、参数、endpoint/凭据引用；执行时核对摘要 | ModelResponse；Durable 在 HTTP 前完成 Manifest/Contract/Permit/Attempt 原子预约及预算、CAS/fencing 检查 |
+| respond | 每次调用入口捕获当时可信配置，使用同一纯序列化函数 | ModelResponse；接口本身不持久化、不申请 Permit，也不承诺跨调用恢复 |
+| complete | 与 respond 共用请求路径，旧签名不变 | 原 assistant 字典；保留旧字段/角色校验语义，不把它描述为 Durable 协议 |
+
+共享序列化保证同样显式选项的请求字段一致，不保证供应商采用采样参数或两次响应相同。
+官方 [Thinking Mode](https://api-docs.deepseek.com/guides/thinking_mode/) 当前默认开启 thinking：temperature 会被忽略，
+Flash 的 top_p 只在 thinking 生效且低于 0.95 时会钳到 0.95；Pro 的 top_p 在 thinking 被忽略，非 thinking 才生效。
+本版不暴露 thinking/reasoning_effort 控制，遵循供应商默认；不能把 wire 中的参数误称为已生效的采样保证。
+工具模式需要回传所保留完整轮次的 reasoning_content；现有 ContextBuilder 与合规测试保留该字段，不将其提升为 system。
+thinking、模型别名/权重及服务端默认值可能变化，Contract 固定显式请求身份，不固定供应商实现。
 
 ## Session、重试及恢复
 
@@ -97,6 +135,16 @@ strict_token_window=true 但计数未知或窗口未知，分别以 ModelTokenCo
 测试用 exact/upper_bound Counter 是 Mock 的固定合成夹具，不是 DeepSeek 验收证据。
 预检计数不写进 ModelUsage，不代表已发生用量、费用上限或供应商账单。
 
+2026-10-20 调查结果：官方 [Token Usage](https://api-docs.deepseek.com/quick_start/token_usage/) 提供离线演示包；
+官方 [deepseek-recipe tokenizer 文档](https://github.com/deepseek-ai/deepseek-recipe/blob/main/docs/tokenizer.md)
+也提供 V4/V4.1 tokenizer 与完整对话模板编码说明。因此并非没有可用离线资源，但本项目未安装、绑定或验证这些资源。
+不能仅计数文本或照抄字符比例就声明完整请求 exact/upper_bound。
+
+未来启用真实 Counter 前，验收必须记录：模型/服务版本、模板和 tokenizer 修订及资产 digest；完整消息、工具 Schema、
+reasoning_content 与特殊 token 的帧规则；输入测量和输出保留量的区分；多字节/边界/多工具回归；与目标 API 的受控比对。
+若只能估算或不能证明与当前服务模板一致，返回 unknown；没有完整证明时不能通过仅填写 method 名称开启严格窗口。
+本轮只验证接口接受完整有效 payload、方法/保证等级匹配、未知不造零以及窗口边界，不交付真实 DeepSeek Token 计数保证。
+
 ## 0008 和升级前核查
 
 0008_model_request_contract（down_revision=0007）只增加 agent_model_attempts.request_contract 可空 JSON 列，
@@ -120,6 +168,14 @@ uv run python scripts/audit_model_retry_upgrade.py --limit 1000 --offset 0
 有 truncated/next_offset；各页独立快照，不声称更新中的多页是一次一致全库扫描。
 PostgreSQL 使用 REPEATABLE READ / READ ONLY、5 秒 statement_timeout、2 秒 lock_timeout；SQLite query_only。
 退出 0 表示此页未发现处置项，2 表示需要运维审核，1 表示核查未完成，不能当成健康报告。
+
+v1.1 的报告 version=2 保留原计数，并增加：legacy_model_sessions、unsupported_model_sessions、
+legacy_pending_retry_calls、unbound_request_sessions、terminal_historical_calls、operator_review_sessions。
+模型分类仅从最后一次持久尝试中验证通过的 deepseek.chat.* Contract 识别；不能从最新 Settings 或供应商响应猜测旧身份。
+unbound_request_sessions 统计此页有调用历史但末次 Contract 缺失的 Session，包含终态；其他缺失字段计数仍仅针对待重试。
+terminal_historical_calls 是此页终态 Session 内逻辑调用数，不是尝试数。operator_review_sessions 按 Session 去重，
+覆盖活跃旧/未知模型、执行中请求、无身份/无投影或契约损坏的待重试；已完成的旧模型档案合法，不因名称旧而要求重跑。
+所有计数限定于当前页；调用总数在 SQL 内聚合，不无界加载历史记录。审计不读取凭据、不清理 Permit，也不改写任何契约。
 
 验证覆盖：MockTransport 冻结网络请求、部署漂移、窗口边界、真正 Worker/Store、配额/软用量门控、旧 Schema 只读审计、
 迁移全量事实、独立 PostgreSQL CAS、崩溃、取消、三进程 Soak、备份恢复及 Wheel。实际结果见 RC 验收记录。

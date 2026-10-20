@@ -22,10 +22,62 @@ from agentflow.application.ports.model_request import (
     ModelRequestOptions,
     PreparedModelRequest,
     ProviderCapabilities,
+    TokenCount,
     build_request,
+    check_capabilities,
+    check_token_window,
     request_digest,
+    serialize_request,
 )
 from agentflow.application.ports.model_usage import DEEPSEEK_USAGE_MAPPING
+
+DEFAULT_MODEL = "deepseek-flash"
+SUPPORTED_MODELS = (DEFAULT_MODEL, "deepseek-v4-pro")
+LEGACY_MODELS = (
+    "deepseek-chat",
+    "deepseek-reasoner",
+    "deepseek-v4-flash",
+    "deepseek-v4-flash-vision-exp",
+)
+
+
+def model_lifecycle(model):
+    """Explicit allowlist checked against official docs on 2026-10-20."""
+    if model in SUPPORTED_MODELS:
+        return "supported"
+    return "legacy" if model in LEGACY_MODELS else "unsupported"
+
+
+def capabilities_for(model, provider_key):
+    lifecycle = model_lifecycle(model)
+    if lifecycle != "supported":
+        raise ModelRequestError(
+            "ModelDeprecated" if lifecycle == "legacy" else "ModelCapabilityUnsupported"
+        )
+    # Preserve v1 wire identity for canonical names; no historical rewrite.
+    return ProviderCapabilities(
+        provider_key=provider_key,
+        model=model,
+        capability_version="deepseek.adapter.1",
+        supports_tools=True,
+        supports_json_output=True,
+        supported_parameters=("temperature", "top_p"),
+        max_output_tokens=4096,
+    )
+
+
+def chat_endpoint(base_url):
+    parsed = urlparse(base_url)
+    if (
+        parsed.scheme != "https"
+        or not parsed.hostname
+        or parsed.username
+        or parsed.password
+        or parsed.query
+        or parsed.fragment
+    ):
+        raise ModelRequestError("ModelEndpointUnsupported")
+    return base_url.rstrip("/") + "/chat/completions"
 
 
 class DeepSeekProvider:
@@ -68,36 +120,8 @@ class DeepSeekProvider:
             self.request_options,
         )
         key, transport = self._key, self._transport
-        # Conservative adapter profiles, not claims about all vendor limits.
-        if model not in {
-            "deepseek-chat",
-            "deepseek-reasoner",
-            "deepseek-flash",
-            "deepseek-v4-pro",
-        }:
-            raise ModelRequestError("ModelCapabilityUnsupported")
-        parsed = urlparse(base_url)
-        if (
-            parsed.scheme != "https"
-            or not parsed.hostname
-            or parsed.username
-            or parsed.password
-            or parsed.query
-            or parsed.fragment
-        ):
-            raise ModelRequestError("ModelEndpointUnsupported")
-        capabilities = ProviderCapabilities(
-            provider_key=provider_key,
-            model=model,
-            capability_version="deepseek.adapter.1",
-            supports_tools=model != "deepseek-reasoner",
-            supports_json_output=model != "deepseek-reasoner",
-            supported_parameters=()
-            if model == "deepseek-reasoner"
-            else ("temperature", "top_p"),
-            max_output_tokens=4096,
-        )
-        endpoint = base_url.rstrip("/") + "/chat/completions"
+        capabilities = capabilities_for(model, provider_key)
+        endpoint = chat_endpoint(base_url)
         request = build_request(
             messages,
             tools,
@@ -149,19 +173,18 @@ class DeepSeekProvider:
             raise ModelProtocolError() from None
 
     async def _request(self, messages, tools):
-        if self.request_options.max_output_tokens > 4096:
-            raise ModelConfigurationError()
-        payload = {
-            "model": self.model,
-            "messages": messages,
-            "stream": False,
-            "max_tokens": self.request_options.max_output_tokens,
-        }
-        if tools:
-            payload["tools"] = tools
-        return await self._send(
-            payload, f"{self.base_url}/chat/completions", self._key, self._transport
-        )
+        model, options = self.model, self.request_options
+        key, transport = self._key, self._transport
+        try:
+            capabilities = capabilities_for(model, self.provider_key)
+            endpoint = chat_endpoint(self.base_url)
+            check_capabilities(capabilities, options, tools, messages)
+            check_token_window(capabilities, options, TokenCount())
+            context = {"messages": messages, **({"tools": tools} if tools else {})}
+            payload = serialize_request(context, model, options)
+        except ModelRequestError:
+            raise ModelConfigurationError() from None
+        return await self._send(payload, endpoint, key, transport)
 
     @staticmethod
     async def _send(payload, endpoint, key, transport):

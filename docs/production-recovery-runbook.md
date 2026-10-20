@@ -150,7 +150,8 @@ uv run python scripts/verify_live_provider.py --allow-paid-request
 uv run pytest -q tests/live/test_deepseek_live.py --run-live-provider
 ```
 
-固定 `https://api.deepseek.com`、deepseek-chat、公开无敏感 Prompt，无工具，单次输出最多 4096 token，
+固定 `https://api.deepseek.com`，默认 deepseek-flash，仅允许通过 `--model deepseek-v4-pro` 受控切换。
+使用公开无敏感 Prompt，无工具，单次输出最多 4096 token，
 输入小于 1KB，网络 45 秒、步骤 60 秒、总协程 65 秒；无隐藏重试，max_model_attempts=1。
 它验证真实 ModelResponse/assistant/stop/可选 metadata 和 Durable Step/Artifact；不依赖自然语言逐字一致。
 只报告 metadata 是否存在，不输出正文、usage 值、请求 ID、异常消息或凭据。
@@ -161,3 +162,28 @@ MockTransport，不能安全诱发的故障不向真实 API 注入。
 `live-provider-acceptance` Environment 配置 required reviewers、可信分支限制和专用 Secret，确认平台
 支持保护；YAML 的 environment 名称本身不会建立审批策略。不要在不可信分支运行带凭据工作流。
 缺少授权/Key 时输出 NOT VERIFIED，显式付费入口返回非零；禁止把此状态记录为实测成功。
+
+## 模型生命周期升级预检（v1.1，2026-10-20）
+
+官方规范名称是 deepseek-flash 和 deepseek-v4-pro。旧 chat/reasoner 已公告于 2026-07-24 停用；
+v4-flash 和 v4-flash-vision-exp 的旧模型退役、名称仍由供应商重路由。Core 拒绝全部旧别名，不把重路由当作身份兼容。
+来源、接口和 Token 边界见 [请求契约文档](model-request-contract.md)，本轮真实 API 状态为 LIVE PROVIDER NOT VERIFIED。
+
+1. 停止新任务领取及 Writer，盘点所有 Worker/版本。用 SELECT-only 账户从受保护环境提供连接，运行
+   `uv run python scripts/audit_model_retry_upgrade.py --limit 1000 --offset 0`，按 next_offset 完成有界核查。
+   分页为独立快照，更新中的多页不等于一个全库快照；不要公开原始数据库或私有诊断记录。
+2. 记录 legacy_model_sessions、legacy_pending_retry_calls、MODEL_INFLIGHT、unbound_request_sessions、
+   terminal_historical_calls、operator_review_sessions。已完成的旧模型档案合法；退出 0 仅说明此页没有处置项，
+   2 需要人工审核，1 表示未完成。缺身份不能依据当前模型设置或响应 metadata 回填。
+3. 等待可确认的在途请求提交；失联请求按原租约/UNKNOWN 恢复规则处理。停止 Worker 不证明外部请求未发生。
+   工具 UNKNOWN 仍需人工对账，模型 UNKNOWN 不重发；不改 FAILED/UNKNOWN、fencing token、Contract 或 Permit。
+4. 停止 Writer 后完成加密、受限权限的数据库备份并核对恢复方案。v1.1 不新增 schema，保持现有 0008；
+   从较老版本升级仍使用正常迁移，不编辑 0001–0008。逻辑备份演练不证明零数据丢失或 HA。
+5. 部署一致的模型配置。新默认只适用于新身份；已绑定 Session/失败调用不换模型。继续配置旧别名会在请求前
+   ModelDeprecated；改成新模型重试旧调用会 ModelRequestContractChanged。规范模型原 v1 请求不变时可合法重试。
+   Session 后续轮次仍受 profile 约束，不会因新默认重新绑定。不要反复调度这些拒绝来消耗普通 Step 重试。
+6. 必须重做旧任务时，由操作者先评估已完成工具、副作用、审批和 UNKNOWN，再创建明确的新执行；不自动复制或重放。
+   取消过的 Workflow 保持取消。重新运行只读审计，按原最小权限、审批绑定、租约和数据库时钟条件恢复 Worker。
+
+strict_token_window 默认关闭；没有经验证的完整请求 Counter 时开启会安全拒绝，而不是按字节估算放行。
+本轮只有 Mock/MockTransport 的接口合规证据；真实 Provider、跨宿主和目标生产部署仍须单独授权验收。

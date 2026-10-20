@@ -10,7 +10,7 @@ import os
 import time
 from collections import Counter
 
-from sqlalchemy import MetaData, Table, and_, create_engine, literal, select, text
+from sqlalchemy import MetaData, Table, and_, create_engine, func, literal, select, text
 from sqlalchemy.exc import SQLAlchemyError
 
 from agentflow.application.ports.context_projection import ContextProjectionManifest
@@ -19,6 +19,7 @@ from agentflow.application.ports.model_request import (
     ModelRequestError,
 )
 from agentflow.domain.agent.run import AgentSnapshot
+from agentflow.infrastructure.models.deepseek import model_lifecycle
 
 
 def audit(engine, *, limit=1000, offset=0, timeout_seconds=30):
@@ -66,12 +67,19 @@ def audit(engine, *, limit=1000, offset=0, timeout_seconds=30):
                 .correlate(sessions)
                 .scalar_subquery()
             )
+            call_count = (
+                select(func.count())
+                .where(calls.c.session_id == sessions.c.id)
+                .correlate(sessions)
+                .scalar_subquery()
+            )
             rows = db.execute(
                 select(
                     sessions.c.snapshot,
                     steps.c.status.label("step_status"),
                     runs.c.status.label("run_status"),
                     calls.c.status.label("call_status"),
+                    call_count.label("call_count"),
                     projection.label("projection"),
                     contract.label("contract"),
                 )
@@ -104,8 +112,43 @@ def audit(engine, *, limit=1000, offset=0, timeout_seconds=30):
                     status = AgentSnapshot.model_validate(row["snapshot"]).status
                 except ValueError:
                     findings["ModelRetryUpgradeInvalidState"] += 1
+                    counts["operator_review_sessions"] += 1
                     continue
                 active = row["run_status"] not in {"succeeded", "failed", "cancelled"}
+                invalid_contract = False
+                saved_contract = None
+                if row["contract"] is not None:
+                    try:
+                        saved_contract = ModelRequestContract.model_validate(
+                            row["contract"]
+                        )
+                    except ValueError:
+                        findings["ModelRequestContractInvalid"] += 1
+                        invalid_contract = True
+                lifecycle = (
+                    model_lifecycle(saved_contract.model)
+                    if saved_contract is not None
+                    and saved_contract.adapter_version.startswith("deepseek.chat.")
+                    else None
+                )
+                unusable = lifecycle in {"legacy", "unsupported"}
+                counts["legacy_model_sessions"] += int(lifecycle == "legacy")
+                counts["unsupported_model_sessions"] += int(lifecycle == "unsupported")
+                counts["unbound_request_sessions"] += int(
+                    row["call_count"] > 0 and row["contract"] is None
+                )
+                counts["terminal_historical_calls"] += (
+                    row["call_count"] if status.is_terminal else 0
+                )
+                review = (
+                    active and not status.is_terminal and (unusable or invalid_contract)
+                )
+                if active and not status.is_terminal and unusable:
+                    findings[
+                        "ModelDeprecated"
+                        if lifecycle == "legacy"
+                        else "ModelCapabilityUnsupported"
+                    ] += 1
                 inflight = active and status == "model_inflight"
                 pending = (
                     active
@@ -117,32 +160,39 @@ def audit(engine, *, limit=1000, offset=0, timeout_seconds=30):
                 counts["pending_retry_calls"] += int(pending)
                 if inflight:
                     findings["ModelOutcomeUnknownOnRecovery"] += 1
+                    review = True
                 if not pending:
+                    counts["operator_review_sessions"] += int(review)
                     continue
+                counts["legacy_pending_retry_calls"] += int(lifecycle == "legacy")
                 missing_projection = row["projection"] is None
                 missing_request = row["contract"] is None
                 counts["missing_projection_manifests"] += int(missing_projection)
                 counts["missing_request_contracts"] += int(missing_request)
-                blocked = missing_projection or missing_request
+                blocked = (
+                    missing_projection
+                    or missing_request
+                    or unusable
+                    or invalid_contract
+                )
                 if missing_projection:
                     findings["AgentContextProjectionChanged"] += 1
                 if missing_request:
                     findings["ModelRequestContractUnavailable"] += 1
-                if not blocked:
+                if not (missing_projection or missing_request or invalid_contract):
                     try:
                         manifest = ContextProjectionManifest.model_validate(
                             row["projection"]
                         )
-                        ModelRequestContract.model_validate(
-                            row["contract"]
-                        ).verify_projection(manifest)
+                        saved_contract.verify_projection(manifest)
                     except (ValueError, ModelRequestError):
                         findings["ModelRequestContractInvalid"] += 1
                         blocked = True
                 counts["retry_recovery_blocked"] += int(blocked)
+                counts["operator_review_sessions"] += int(review or blocked)
             following = offset + counts["scanned_sessions"]
             return {
-                "version": 1,
+                "version": 2,
                 **{
                     name: counts[name]
                     for name in (
@@ -152,6 +202,12 @@ def audit(engine, *, limit=1000, offset=0, timeout_seconds=30):
                         "missing_request_contracts",
                         "model_inflight",
                         "retry_recovery_blocked",
+                        "legacy_model_sessions",
+                        "unsupported_model_sessions",
+                        "legacy_pending_retry_calls",
+                        "unbound_request_sessions",
+                        "terminal_historical_calls",
+                        "operator_review_sessions",
                     )
                 },
                 "scope": {

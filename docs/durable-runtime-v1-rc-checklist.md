@@ -186,3 +186,32 @@ PostgreSQL 由上述独立临时实例补齐；未跳过失败检查或修改历
 
 Token 窗口保证仅限经过验证的 Counter / 上界；默认未知，不是费用硬上限。
 供应商模型别名、实际权重或账单不由 Contract 证明；真实 Provider、跨宿主、长时生产负载和部署放行仍需独立验收。
+
+## Provider Compatibility / Request Conformance v1.1（2026-10-20）
+
+基线 main 为 0680fdc7358394dce4e1f0f21277400239387fa9。本轮不新增迁移，保留 0008 及全部历史请求字段。
+官方 Chat、Models & Pricing、Change Log 和 Tokenizer 资料已在 [契约文档](model-request-contract.md) 记录查询日期、
+支持名单、采样限制和保证边界；[恢复手册](production-recovery-runbook.md) 说明受控部署顺序。
+
+| 检查 | 状态 | 实际证据 |
+| --- | --- | --- |
+| 新部署与生命周期 | PASS | Settings、Compose、示例环境均默认 deepseek-flash；mock 默认不变；两个规范名称允许，旧别名和未知名称在请求前拒绝 |
+| 新旧接口 wire 合规 | PASS | 两个模型 × prepare/respond/complete；MockTransport 验证 HTTPS、认证 header、模型、输出、流式关闭、JSON 格式、采样、Schema 和工具 ID；不是付费 API 联调 |
+| 冻结与错误分类 | PASS | 配置/上下文/Schema 热更新不改变已准备 payload；429、4xx、5xx、连接/读取超时、坏 JSON/响应单次请求并脱敏 |
+| 已复现的请求选项缺口 | PASS | 先复现 context_json 夹带 temperature/thinking 与空 tools 的不同 wire，再拒绝契约外顶层键并规范空 Schema；合法 v1 摘要保持不变 |
+| 旧 Session 与部署切换 | PASS | 真正 Worker/Store、历史 v1 夹具；更换新默认不改写或重试旧别名调用；当前规范模型仍以同一契约/Manifest/逻辑 ID 重试；保留非空 Usage、Permit、Action 和 Artifact |
+| 只读生命周期核查 | PASS | version=2 有界聚合；旧/未知模型、旧待重试、执行中、缺身份、终态逻辑调用、去重处置数；0006/0007/0008 不写入、不输出持久身份 |
+| 完整 pytest | PASS | `uv run pytest -q`：831 passed、324 skipped，129.28 秒；1 项已有 TestClient 弃用警告 |
+| 真实 PostgreSQL / 历史迁移 | PASS | `verify_postgres.py --bin D:/PSQL/bin --release-gates`：625 passed、零跳过；含独立事务、CAS、fencing、取消、审批/对账及既有 Alembic 回归 |
+| 静态 / 架构 / 构建 | PASS | Ruff check、format --check（150 文件）、架构 3 passed、uv build、隔离 Wheel 安装、参考应用离线 3/3 |
+| 三 Worker Soak | PASS | 30 秒目标、实际 36.33 秒；seed=7、17 Run、10 Action 派发、32 次领取；单机临时 PostgreSQL |
+| 逻辑备份恢复 | PASS | 0008、15 表、10 Run 全事实一致，保留 Contract/Manifest/旧审计；已完成工具重派 0，新批准派发 1 |
+| 本地 Docker / Compose | NOT VERIFIED | daemon pipe 不可用；普通 pytest 的 2 项 Sandbox 跳过不计通过；本次 main CI 的实际结果由交付链接单列 |
+| 真实 Provider / Token Window / 跨宿主 / 生产放行 | NOT VERIFIED | LIVE PROVIDER NOT VERIFIED；没有付费授权或目标部署演练，本轮没有真实模型请求或已验证的 DeepSeek Counter |
+
+324 skipped 包含 321 项专用 PostgreSQL、2 项 Docker 和 1 项显式付费测试；PG 另由上述临时实例补齐。
+不把跳过计为通过。旧分类测试的虚构模型名改为规范模型后仍检查相同错误，不绕过白名单或关闭检查。
+本轮只对文档开展网络核实；真实 Smoke 保留显式付费选项、环境授权、专用 Key、一次请求与原超时。
+
+严格 Token 窗口仍会在无可信计数器时拒绝；官方存在离线资源不代表已验证本项目完整请求模板。
+请求契约不证明供应商权重、默认 thinking 行为、采样实际生效、真实费用上限或 exactly-once 账单。

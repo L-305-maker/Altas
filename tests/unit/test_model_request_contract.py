@@ -58,6 +58,27 @@ def test_forged_request_identity_cannot_dispatch(field):
         replace(request, context_json=context).payload()
 
 
+@pytest.mark.parametrize(
+    "field,value", [("temperature", 2), ("thinking", {"type": "disabled"})]
+)
+def test_context_cannot_inject_uncontracted_top_level_options(field, value):
+    request = MockProvider().prepare_request(*view()).request
+    context = json.loads(request.context_json)
+    context[field] = value
+    with pytest.raises(ModelRequestError):
+        replace(request, context_json=json.dumps(context)).payload()
+
+
+def test_empty_schema_has_one_canonical_wire_representation():
+    request = MockProvider().prepare_request(*view()).request
+    context = json.loads(request.context_json)
+    context["tools"] = []
+    assert (
+        replace(request, context_json=json.dumps(context)).payload()
+        == request.payload()
+    )
+
+
 @pytest.mark.asyncio
 async def test_deepseek_sends_reserved_model_output_and_endpoint_after_mutation():
     sent = []
@@ -79,7 +100,7 @@ async def test_deepseek_sends_reserved_model_output_and_endpoint_after_mutation(
     credential = "test-only-credential"
     provider = DeepSeekProvider(
         credential,
-        "deepseek-chat",
+        "deepseek-flash",
         request_options=ModelRequestOptions(max_output_tokens=128),
         transport=httpx.MockTransport(handle),
     )
@@ -88,12 +109,12 @@ async def test_deepseek_sends_reserved_model_output_and_endpoint_after_mutation(
         prepared
     ):
         pytest.fail("request identity exposed credentials")
-    provider.model = "deepseek-flash"
+    provider.model = "deepseek-v4-pro"
     provider.base_url = "https://changed.example"
     provider.request_options = ModelRequestOptions(max_output_tokens=32)
     assert (await prepared.execute()).assistant_message.content == "ok"
     assert sent[0][0] == "https://api.deepseek.com/chat/completions"
-    assert sent[0][1]["model"] == prepared.request.contract.model == "deepseek-chat"
+    assert sent[0][1]["model"] == prepared.request.contract.model == "deepseek-flash"
     assert (
         sent[0][1]["max_tokens"] == prepared.request.contract.max_output_tokens == 128
     )
@@ -179,6 +200,44 @@ def test_only_typed_bounded_parameters_are_accepted(parameters):
         ModelRequestOptions(parameters=parameters)
 
 
+@pytest.mark.parametrize(
+    "case,code",
+    [
+        ("declared_only", "ModelTokenCountUnavailable"),
+        ("unknown", "ModelTokenCountUnavailable"),
+        ("wrong_method", "ModelTokenCounterInvalid"),
+        ("no_window", "ModelTokenWindowUnavailable"),
+    ],
+)
+def test_counter_claims_cannot_substitute_for_trusted_measurement(case, code):
+    class Counter:
+        def count(self, payload):
+            if case == "unknown":
+                return TokenCount()
+            return TokenCount(
+                input_tokens=1,
+                assurance="exact",
+                method="wrong" if case == "wrong_method" else "fixture-v1",
+            )
+
+    capabilities = ProviderCapabilities(
+        provider_key="mock",
+        model="mock-v1",
+        capability_version="1",
+        supports_tools=True,
+        max_output_tokens=4096,
+        context_window_tokens=None if case == "no_window" else 8192,
+        token_counting_method="fixture-v1",
+        token_counting_assurance="exact",
+    )
+    with pytest.raises(ModelRequestError, match=code):
+        MockProvider(
+            capabilities=capabilities,
+            token_counter=None if case == "declared_only" else Counter(),
+            request_options=ModelRequestOptions(strict_token_window=True),
+        ).prepare_request(*view())
+
+
 @pytest.mark.asyncio
 async def test_legacy_output_configuration_cannot_exceed_adapter_limit():
     def forbidden(_):
@@ -188,7 +247,7 @@ async def test_legacy_output_configuration_cannot_exceed_adapter_limit():
 
     provider = DeepSeekProvider(
         "test-only",
-        "deepseek-chat",
+        "deepseek-flash",
         request_options=ModelRequestOptions(max_output_tokens=4097),
         transport=httpx.MockTransport(forbidden),
     )

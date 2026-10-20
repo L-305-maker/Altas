@@ -70,7 +70,7 @@ Compose 先等待数据库就绪，再运行 Alembic，成功后启动 API、wor
 
 - 默认 `AGENTFLOW_PROVIDER=mock`，不会访问模型 API。
 - 后续配置 `AGENTFLOW_PROVIDER=deepseek`、`AGENTFLOW_DEEPSEEK_API_KEY` 和
-  `AGENTFLOW_MODEL` 后即可使用真实 provider。模型名称应以你账户可用型号为准。
+  `AGENTFLOW_MODEL` 后即可使用真实 provider。当前默认 deepseek-flash，也支持显式选择 deepseek-v4-pro；旧别名拒绝。
 - DeepSeek 适配已通过 HTTP MockTransport 契约测试；真实 API 质量、配额和延迟
   需要提供环境配置后另行验证。
 - `AGENTFLOW_TOOL_ROOT` 可开启受限目录的只读文本工具。

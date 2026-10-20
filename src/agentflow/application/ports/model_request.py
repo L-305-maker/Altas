@@ -119,7 +119,7 @@ class TokenCounter(Protocol):
         ...
 
 
-def _check_capabilities(capabilities, options, tools, messages):
+def check_capabilities(capabilities, options, tools, messages):
     if tools and not options.tools_enabled:
         raise ModelRequestError("ModelCapabilityUnsupported")
     if (
@@ -141,7 +141,7 @@ def _check_capabilities(capabilities, options, tools, messages):
         raise ModelRequestError("ModelCapabilityUnsupported")
 
 
-def _check_tokens(capabilities, options, count):
+def check_token_window(capabilities, options, count):
     if count.assurance != "unknown" and (
         count.method != capabilities.token_counting_method
         or count.assurance != capabilities.token_counting_assurance
@@ -183,8 +183,8 @@ class ModelRequestContract(ModelRequestOptions):
         ):
             raise ValueError("request capability identity differs")
         try:
-            _check_capabilities(self.capabilities, self, [], [])
-            _check_tokens(self.capabilities, self, self.token_count)
+            check_capabilities(self.capabilities, self, [], [])
+            check_token_window(self.capabilities, self, self.token_count)
         except ModelRequestError:
             raise ValueError("request exceeds declared capabilities") from None
         if (
@@ -224,7 +224,7 @@ class ModelRequestContract(ModelRequestOptions):
             or request_digest(tools) != self.tool_schema_digest
         ):
             raise ModelRequestError()
-        _check_capabilities(self.capabilities, self, tools, messages)
+        check_capabilities(self.capabilities, self, tools, messages)
 
 
 def check_request_continuity(attempts, contract, *, retry):
@@ -249,12 +249,16 @@ class ModelRequest:
     def payload(self) -> dict:
         context = json.loads(self.context_json)
         self.contract.verify_context(context["messages"], context.get("tools", []))
-        return _payload(context, self.contract.model, self.contract)
+        return serialize_request(context, self.contract.model, self.contract)
 
 
-def _payload(context, model, options):
+def serialize_request(context, model, options):
+    """Pure shared wire options; callers validate trusted capabilities first."""
+    if set(context) - {"messages", "tools"}:
+        raise ModelRequestError()
     payload = {
-        **context,
+        "messages": context["messages"],
+        **({"tools": context["tools"]} if context.get("tools") else {}),
         "model": model,
         "max_tokens": options.max_output_tokens,
         "stream": options.stream,
@@ -286,21 +290,21 @@ def build_request(
     token_counter=None,
 ):
     """Pure preflight; the counter is a trusted dependency, never model output."""
-    _check_capabilities(capabilities, options, tools, messages)
+    check_capabilities(capabilities, options, tools, messages)
     context = {"messages": messages, **({"tools": tools} if tools else {})}
     try:
         context_json = canonical_json(context)
         count = TokenCount()
         if token_counter is not None:
             count = token_counter.count(
-                canonical_json(_payload(context, capabilities.model, options))
+                canonical_json(serialize_request(context, capabilities.model, options))
             )
             if not isinstance(count, TokenCount):
                 raise ValueError
             count = TokenCount.model_validate(count.model_dump())
     except Exception:
         raise ModelRequestError("ModelTokenCounterInvalid") from None
-    _check_tokens(capabilities, options, count)
+    check_token_window(capabilities, options, count)
     values = {
         **options.model_dump(mode="json"),
         "provider_key": capabilities.provider_key,

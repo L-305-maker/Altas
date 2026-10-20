@@ -461,3 +461,12 @@ Durable 模式在完整历史/投影/字节检查之后、预算和 Permit 之�
 max_context_bytes 继续是硬字节限制；没有真实 DeepSeek Token Counter，本版不宣称验证真实 Token 窗口或费用硬上限。
 新增只读 audit_model_retry_upgrade.py，可在 0006/0007/0008 上检查升级风险；详见
 [请求、能力、升级与兼容边界](model-request-contract.md)。
+
+## Provider 兼容性与生命周期 v1.1
+
+2026-10-20 按官方 Chat、Pricing 和 Change Log 核实后，新部署（Settings/Compose/示例配置）默认模型改为
+deepseek-flash，provider 仍为 mock。DeepSeek 仅派发 deepseek-flash / deepseek-v4-pro；已停用或退役别名
+在预约前以安全错误拒绝，不升级已有逻辑 ModelCall。已有 Contract/Manifest、用量、Permit 和历史工具事实不重写。
+旧 complete()/respond() 与严格请求共用纯参数序列化，但只有 Durable 提供跨恢复的事务、预算、CAS 和 fencing。
+官方默认 thinking 的采样限制与 Tokenizer 调查见请求契约文档；接受/发送参数不等于供应商实际采用它。
+本轮无新迁移，不改状态机、审批、UNKNOWN 或五秒取消清理。只读升级审计新增生命周期和终态历史聚合，不自动处置。

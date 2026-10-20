@@ -60,7 +60,7 @@ async def test_retry_after_is_safe_hint_without_hidden_requests(header, expected
         )
 
     provider = DeepSeekProvider(
-        "test-only-key", "model", transport=httpx.MockTransport(handle)
+        "test-only-key", "deepseek-flash", transport=httpx.MockTransport(handle)
     )
     with pytest.raises(ModelRetryableError) as caught:
         await provider.respond([{"role": "user", "content": "private prompt"}])
