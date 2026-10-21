@@ -480,3 +480,13 @@ deepseek-flash，provider 仍为 mock。DeepSeek 仅派发 deepseek-flash / deep
 旧 complete()/respond() 与严格请求共用纯参数序列化，但只有 Durable 提供跨恢复的事务、预算、CAS 和 fencing。
 官方默认 thinking 的采样限制与 Tokenizer 调查见请求契约文档；接受/发送参数不等于供应商实际采用它。
 本轮无新迁移，不改状态机、审批、UNKNOWN 或五秒取消清理。只读升级审计新增生命周期和终态历史聚合，不自动处置。
+
+## Evidence Checkpoint v2 信任边界
+
+显式 v2 在完整 Session 校验后，先按持久 StepSpec 的披露规则过滤工具视图，再按可信 pins/最近顺序选择证据。
+unknown/sensitive 默认只提供摘要、状态与定位；public+approved_excerpt 才能传指定工具/字段的有界原文。
+工具派生内容保留 tool 角色，附在真实配对观察内；无合法承载安全失败，不伪造 Action/用户意图或审批。
+最近轮次也执行披露，原始审计、绑定、Usage、审批、UNKNOWN 和 Artifact 不受修改。
+来源真实性不认证现实事实，结构性边界也不保证模型不受注入。旧 v1 只读保持摘要，新预约明确阻断，
+不可把旧重试自动升级。新 Manifest/Contract 原子提交及原 CAS/fencing/取消/容量预留仍有效。
+无新迁移；混合 v1/v2 备份恢复与处置说明见 [Evidence Checkpoint](evidence-checkpoint.md)。

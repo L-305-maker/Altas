@@ -77,6 +77,7 @@ async def launch(
     step_timeout=60,
     outer_timeout=None,
     lease_seconds=300,
+    agent_config=None,
 ):
     h = SimpleNamespace(started=asyncio.Event(), calls=[], task=None)
     h.run_id = store.submit(
@@ -90,7 +91,9 @@ async def launch(
                         artifact=True,
                         retry_delay=0,
                         timeout=step_timeout,
-                        parameters={"agent": {"mode": "durable_v1"}},
+                        parameters={
+                            "agent": {"mode": "durable_v1", **(agent_config or {})}
+                        },
                     ),
                 ),
             )

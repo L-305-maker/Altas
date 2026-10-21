@@ -186,3 +186,14 @@ terminal_historical_calls 是此页终态 Session 内逻辑调用数，不是尝
 验证覆盖：MockTransport 冻结网络请求、部署漂移、窗口边界、真正 Worker/Store、配额/软用量门控、旧 Schema 只读审计、
 迁移全量事实、独立 PostgreSQL CAS、崩溃、取消、三进程 Soak、备份恢复及 Wheel。实际结果见 RC 验收记录。
 仍需目标环境 Provider、跨宿主及运维演练；本轮不发送任何真实付费请求。
+
+## Evidence v2 请求身份与旧 v1 阻断
+
+v2 的完整 Manifest 绑定披露 policy_digest、disclosure_policy_digest、选择顺序、来源和承载后的实际消息。
+RequestContract 不变，继续绑定该 Manifest 与 messages/tools 摘要；重试更换披露、pin、版本或 Schema 均拒绝。
+Store 从锁定 Run 的真实 StepSpec 重建，不能通过替换 Task.spec 取得更高披露权限。
+旧 v1 Contract 和 Manifest 原样读取，不回填权限，不更改摘要；新的 v1 预约明确拒绝。
+只读升级审计增加 v1_checkpoint_sessions，针对 READY_MODEL/failed 待重试项报告 AgentEvidenceV1ReadOnly；
+历史终态仍合法，不因发现旧 v1 就重新执行。报告无正文、token、供应商 request_id 或持久身份。
+原始 audit 结果不因 Provider 视图过滤而删除。源 role、披露规则和运维处置详见
+[Evidence Checkpoint](evidence-checkpoint.md)。

@@ -1,6 +1,44 @@
 # Durable Runtime v1：Release Candidate 验收
 
-## Evidence-Anchored Context Checkpoint v1（2026-10-21）
+## Evidence Checkpoint v2 信任边界修复（2026-10-21）
+
+审核基线 `8219b9364ca2453dc27c733462d76e2e9c11012b`，仅 main，未新增迁移或修改 0001–0008。
+信任角色矩阵、显式披露配置、固定来源和有限窗口算法见 [Evidence Checkpoint](evidence-checkpoint.md)。
+默认 disabled 不变；旧配置仍解释为 v1，历史只读，新预约以 AgentEvidenceV1ReadOnly 阻断。
+工具派生内容仅在真实 tool 配对内传输；unknown/sensitive 只有元数据，最近观察也执行同一披露规则。
+
+| 检查 | 状态 | 实际证据 |
+| --- | --- | --- |
+| P1 失败复现与结构修复 | PASS | 基线测试实际出现 Provider.calls=1；修复后 v1 无预约/Permit/HTTP。v2 默认不派发模拟私密工具正文，原 system/user 内容不改写，没有假 Action/授权 |
+| 披露与选择 | PASS | 精确 public 工具/字段白名单、失败/拒绝状态、中文/emoji/转义、UTF-8 边界；pins 成员优先但不重排同批 Action；缺 mandatory/摘要变化/字节不足安全失败 |
+| 不变量与历史身份 | PASS | 基线真实 Runner/Store 合成夹具的三种会话、四个 Attempt 原 Manifest/Contract 可重建；v1 待重试只读阻断；v2 重试策略/Schema 漂移、CAS、旧 token、确认丢失、取消、审批/对账与容量预留回归 |
+| 完整回归 | PASS | `uv run pytest -q`：901 passed、360 skipped，190.22 秒；1 项已有 TestClient 弃用警告，跳过不计通过 |
+| PostgreSQL 发布专项 | PASS | `verify_postgres.py --bin D:/PSQL/bin --release-gates`：694 passed、零跳过，444.88 秒；CAS/fencing、迁移升降级、取消、审批/对账、真实进程崩溃、用量/准入/重试兼容；后补备份屏障独立事务用例见下一行 |
+| Ruff | PASS | 完整 check 与 format --check，157 files already formatted |
+| 备份边界独立事务回归 | PASS | 隔离真实 PostgreSQL 中，延期在停止 Writer 期间到期，Run 锁仍拒绝另一 Store.claim；解锁后可领取。信任边界/RC/单元组合 51 passed，零跳过 |
+| 三独立 Worker Soak | PASS | `--seconds 30 --workload 6 --seed 7`：38.53 秒、17 Run、10 派发、32 领取；未重派 UNKNOWN/完成行动，未放宽锁和审批 |
+| 混合 v1/v2 备份恢复 | PASS | pg_dump/pg_restore，0008、15 表、12 Run（含两个旧 v1 终态）；全部源/恢复事实比较，旧身份和终态保持，新批准派发 1，已完成工具重派 0 |
+| 构建、仓库外安装、架构、参考应用 | PASS | uv build；verify_wheel.py 仓库外安装/核心/参考应用；架构 3 passed；离线评估 3/3 |
+| 本地 Docker / Compose | NOT VERIFIED | DockerDesktopLinuxEngine pipe 不存在；不将本地跳过算通过。推送后实际 GitHub CI 链接/结果在交付报告中列出 |
+| 真实 Provider / 跨主机 / 生产长时负载 | NOT VERIFIED | 真实付费请求 0；Mock 不证明真实模型抵御注入，单机三进程不证明跨主机分区行为 |
+
+默认回归的 360 skipped = 357 项专用 PostgreSQL + 2 项本地 Docker + 1 项付费测试。
+数据库覆盖另由隔离 PostgreSQL 发布专项和后补独立事务回归完成；本地 Docker 不可用，
+实际 Docker/Compose 与 Python 3.12/3.13 GitHub CI 以最终交付链接所指提交为准。
+
+复验曾发现两个演练夹具问题并修正：JSON 导入保留了显式事件 ID，却未推进 PostgreSQL 序列，
+后续 claim 产生主键冲突；现在仅在测试加载器同步序列。备份脚本观察到短时准入延期后逐一关闭 Worker，
+到期时另一个 Worker 仍可能合法领取；现在在持有 Run→Step 锁时停止所有 Writer，再捕获备份事实。
+没有更改运行时租约、延长期限、降低断言或跳过失败测试。
+
+代码可审核与生产环境放行分开判断。结构和披露规则不认证事实、不保证模型不误读数据；
+公开字段授权者必须审查其完整内容。下一阶段生成式摘要需单独授权、来源/不确定性、派生版本、
+账本、非特权承载和注入评估，不得改写旧请求身份或代替人工对账。本轮没有实施生成式摘要。
+
+## 历史 Evidence-Anchored Context Checkpoint v1（2026-10-21）
+
+以下为原验收记录；当时未覆盖工具摘录的 user 角色提升，不构成新的安全保证。
+v1 当前仅允许只读验证，新执行按上节明确阻断。
 
 审核基线 `6ee1c4b3bc4a8c5b077e31fdb00db4a63ab6ee8d`；仅 main 开发。
 契约、算法、来源定位和权限边界见 [Evidence Checkpoint](evidence-checkpoint.md)。

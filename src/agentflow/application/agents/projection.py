@@ -7,6 +7,12 @@ from typing import TYPE_CHECKING
 
 from pydantic import ValidationError
 
+from agentflow.application.agents.checkpoint_v2 import (
+    EvidenceCandidates,
+    carry_checkpoint,
+    disclose_context,
+    select_checkpoint,
+)
 from agentflow.application.agents.context import context_bytes
 from agentflow.application.ports.context_projection import (
     ContextProjectionError,
@@ -74,7 +80,7 @@ def project_context(
     policy: ContextProjectionPolicy,
     max_context_bytes: int,
     *,
-    checkpoint: "EvidenceCheckpoint | None" = None,
+    checkpoint: "EvidenceCheckpoint | EvidenceCandidates | None" = None,
 ) -> ProjectedContext:
     """Drop the fewest oldest complete rounds that make the request fit.
 
@@ -87,6 +93,14 @@ def project_context(
         ):
             raise ValueError
         rounds = _rounds(full)
+        v2 = isinstance(checkpoint, EvidenceCandidates)
+        if (
+            checkpoint is not None
+            and not v2
+            and checkpoint.manifest.checkpoint_version != 1
+        ):
+            raise ValueError
+        view = disclose_context(full, checkpoint) if v2 else full
         payload = {"messages": full, **({"tools": tools} if tools else {})}
         full_digest, schema_digest = digest_context(payload), digest_context(tools)
         removable = (
@@ -101,10 +115,24 @@ def project_context(
             if policy.mode != "full"
             else 0
         )
+        last_failure = "AgentContextLimit"
         for omitted in range(removable + 1):
             removed = {i for start, end in rounds[:omitted] for i in range(start, end)}
-            selected = [message for i, message in enumerate(full) if i not in removed]
-            if checkpoint is not None:
+            selected = [message for i, message in enumerate(view) if i not in removed]
+            rendered = checkpoint
+            if v2:
+                retained = {
+                    call["id"]
+                    for message in selected
+                    for call in message.get("tool_calls", [])
+                }
+                try:
+                    rendered = select_checkpoint(checkpoint, retained)
+                    selected = carry_checkpoint(selected, rendered)
+                except ContextProjectionError as error:
+                    last_failure = error.code
+                    continue
+            elif checkpoint is not None:
                 # User-role data before the first retained assistant/tool span.
                 insertion = next(
                     (i for i, m in enumerate(selected) if m["role"] == "assistant"),
@@ -113,6 +141,7 @@ def project_context(
                 selected.insert(insertion, checkpoint.message)
             size = context_bytes(selected, tools)
             if size > max_context_bytes:
+                last_failure = "AgentContextLimit"
                 continue
             _rounds(selected)
             return ProjectedContext(
@@ -133,7 +162,7 @@ def project_context(
                     included_round_count=len(rounds) - omitted,
                     omitted_round_count=omitted,
                     tool_schema_digest=schema_digest,
-                    checkpoint=checkpoint.manifest if checkpoint else None,
+                    checkpoint=rendered.manifest if rendered else None,
                 ),
             )
     except (
@@ -145,4 +174,4 @@ def project_context(
         RecursionError,
     ):
         raise ContextProjectionError() from None
-    raise ContextProjectionError("AgentContextLimit")
+    raise ContextProjectionError(last_failure)

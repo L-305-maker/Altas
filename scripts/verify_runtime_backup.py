@@ -9,13 +9,13 @@ import hashlib
 import json
 
 from audit_durable_runtime import audit
-from rc_support import TemporaryPostgres, migrate, run
+from rc_support import ROOT, TemporaryPostgres, migrate, run
 from rc_workload import Workload
 from sqlalchemy import select, text
 
 from agentflow.application.ports.observed_usage import ObservedUsagePolicy
 from agentflow.application.ports.provider_admission import ProviderAdmissionPolicy
-from agentflow.infrastructure.persistence.models import Base
+from agentflow.infrastructure.persistence.models import Base, StepRow
 from agentflow.infrastructure.persistence.store import json_bytes
 
 
@@ -29,6 +29,63 @@ def inventory(store):
             )
             for table in Base.metadata.sorted_tables
         }
+
+
+def restore_historical_checkpoints(store):
+    """Reviewed synthetic v1 terminal facts, not reinterpreted as v2 fixtures."""
+    facts = json.loads(
+        (ROOT / "tests/fixtures/checkpoint_v1_8219b93.json").read_text(encoding="utf-8")
+    )["tables"]
+    runs = {r["id"] for r in facts["runs"] if r["status"] in {"succeeded", "failed"}}
+    workflows = {r["workflow_id"] for r in facts["runs"] if r["id"] in runs}
+    steps = {s["id"] for s in facts["steps"] if s["run_id"] in runs}
+    sessions = {s["id"] for s in facts["agent_sessions"] if s["step_row_id"] in steps}
+    with store.engine.begin() as db:
+        for table in Base.metadata.sorted_tables:
+            records = []
+            for row in facts[table.name]:
+                include = (
+                    row["session_id"] in sessions
+                    if "session_id" in row
+                    else row["step_row_id"] in steps
+                    if "step_row_id" in row
+                    else row["run_id"] in runs
+                    if "run_id" in row
+                    else row["id"] in runs
+                    if table.name == "runs"
+                    else row["id"] in workflows
+                    if table.name == "workflows"
+                    else False
+                )
+                if include:
+                    # Event primary keys are local sequence identities. Preserve
+                    # the audit facts without colliding with the new RC workload.
+                    records.append(
+                        {
+                            k: v
+                            for k, v in row.items()
+                            if table.name != "events" or k != "id"
+                        }
+                    )
+            if records:
+                db.execute(table.insert(), records)
+    return runs
+
+
+def stop_at_admission_deferral(source, run):
+    # Keep the observed boundary stable while killing owned workers. A deadline
+    # may expire during shutdown, but claim() cannot take this locked Run.
+    with source.store.transaction() as db:
+        source.store._locked_run(db, run)
+        step = db.scalar(
+            select(StepRow)
+            .where(StepRow.run_id == run, StepRow.key == "agent")
+            .with_for_update()
+        )
+        if step.status != "ready" or step.error != "ProviderAdmissionDeferred":
+            return False
+        source.stop()
+        return True
 
 
 def drill(cluster):
@@ -87,16 +144,9 @@ def drill(cluster):
         limited_model = source.submit("model_rate_limited")
         source.wait(lambda: source.status(limited_model, "exhausted"))
         admission_delayed = source.submit("final")
-        source.wait(
-            lambda: (
-                s
-                if (s := source.state(admission_delayed))
-                and s.step["error"] == "ProviderAdmissionDeferred"
-                else None
-            )
-        )
-        source.stop()  # Stop writers before taking the logical backup.
+        source.wait(lambda: stop_at_admission_deferral(source, admission_delayed))
         source.reconcile(resolved)
+        legacy_runs = restore_historical_checkpoints(source.store)
         before = source.check()
         facts = inventory(source.store)
         checkpoints = {r: source.state(r) for r in source.runs}
@@ -112,6 +162,11 @@ def drill(cluster):
         assert all(
             a["request_contract"] is not None for a in facts["agent_model_attempts"]
         )
+        assert {
+            a["context_projection"]["checkpoint"]["checkpoint_version"]
+            for a in facts["agent_model_attempts"]
+        } == {1, 2}
+        legacy = {r: source.invariants(source.store, r) for r in legacy_runs}
         assert facts["provider_admissions"] and facts["provider_permits"]
         assert facts["provider_admissions"][0]["cooldown_until"] > 0
         held = checkpoints[unknown_model].agent.model_permits[0]
@@ -167,6 +222,7 @@ def drill(cluster):
         target.runs = list(source.runs)
         target.scenarios = dict(source.scenarios)
         assert inventory(target.store) == facts, "RestoreFactMismatch"
+        assert {r: target.invariants(target.store, r) for r in legacy_runs} == legacy
         migrate(target_url)
         with target.store.engine.connect() as db:
             assert db.scalar(text("SELECT version_num FROM alembic_version")) == "0008"
@@ -214,16 +270,19 @@ def drill(cluster):
         assert target.state(delayed).step["attempts"] == 1
         target.fenced_claims()
         target.check()
+        assert {r: target.invariants(target.store, r) for r in legacy_runs} == legacy
         return {
             "status": "PASS",
             "alembic": "0008",
             "tables_compared": len(facts),
             "source": before,
-            "restored_runs": len(target.runs),
+            "restored_runs": len(target.runs) + len(legacy_runs),
+            "legacy_checkpoint_runs": len(legacy_runs),
             "newly_approved_dispatches": 1,
             "replayed_tool_dispatches": 0,
             "admission_restored": True,
             "observed_usage_restored": True,
+            "checkpoint_versions_restored": [1, 2],
             "backup": "logical pg_dump/pg_restore; not HA/PITR",
         }
     finally:

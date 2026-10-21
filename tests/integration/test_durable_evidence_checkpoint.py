@@ -42,7 +42,22 @@ from agentflow.infrastructure.persistence.store import Store
 
 CONFIG = {
     "context_projection": {"mode": "evidence_anchored_recent_rounds"},
-    "evidence_checkpoint": {"mode": "anchored_extracts"},
+    "evidence_checkpoint": {
+        "mode": "anchored_extracts",
+        "checkpoint_version": 2,
+        "selection_policy": "pinned_then_recent",
+        "disclosure": {
+            "max_disclosure_bytes": 4096,
+            "rules": [
+                {
+                    "tool_name": "echo",
+                    "result_path": ["value"],
+                    "mode": "approved_excerpt",
+                    "classification": "public",
+                }
+            ],
+        },
+    },
 }
 
 
@@ -90,7 +105,7 @@ async def test_workflow_identifiers_use_real_persisted_spec_without_parameter_co
     config = {
         **CONFIG,
         "evidence_checkpoint": {
-            "mode": "anchored_extracts",
+            **CONFIG["evidence_checkpoint"],
             "workflow_identifiers": ["id", "handler"],
         },
     }
@@ -99,8 +114,9 @@ async def test_workflow_identifiers_use_real_persisted_spec_without_parameter_co
     assert await worker(store, provider).tick()
     state = runtime_invariants(store, run)["work"].agent
     manifest = state.model_attempts[0].context_projection.checkpoint
-    assert [r.source_key for r in manifest.references[:2]] == ["work", "work"]
-    assert [r.extraction_path for r in manifest.references[:2]] == [
+    sources = [r for r in manifest.references if r.source_type == "workflow_step"]
+    assert [r.source_key for r in sources] == ["work", "work"]
+    assert [r.extraction_path for r in sources] == [
         ("id",),
         ("handler",),
     ]
@@ -113,7 +129,7 @@ def test_store_rejects_forged_workflow_source_before_permit(store, monkeypatch):
     config = {
         **CONFIG,
         "evidence_checkpoint": {
-            "mode": "anchored_extracts",
+            **CONFIG["evidence_checkpoint"],
             "workflow_identifiers": ["id"],
         },
     }
@@ -163,7 +179,7 @@ async def test_worker_checkpoint_projection_preserves_full_audit_and_request(
     )
     assert last.context_projection.projected_context_bytes <= 8500
     assert last.context_projection.omitted_round_count == 1
-    assert last.context_projection.checkpoint.included_evidence_count == 3
+    assert last.context_projection.checkpoint.included_evidence_count == 2
     last.request_contract.verify_context(
         provider.contexts[-1], tools(invoke).schemas({"echo"})
     )
@@ -235,7 +251,7 @@ async def test_checkpoint_cannot_bypass_preflight_gates(
     options = dict(CONFIG)
     if blocked == "checkpoint":
         options["evidence_checkpoint"] = {
-            "mode": "anchored_extracts",
+            **CONFIG["evidence_checkpoint"],
             "max_checkpoint_bytes": 1,
         }
     if blocked == "bytes":
@@ -326,11 +342,19 @@ async def test_reconciliation_checkpoint_uses_final_action_and_keeps_unknown_aud
     assert (
         built.items[-1].status == "succeeded" and built.items[-1].excerpt == "confirmed"
     )
-    assert (
-        state.model_attempts[-1]
-        .context_projection.checkpoint.references[-1]
-        .source_digest
-        == built.items[-1].reference.source_digest
+    # Retained tool observations carry the effective result once; v2 does not
+    # duplicate their raw excerpt in the historical evidence selection.
+    import json
+
+    observations = [m for m in provider.contexts[-1] if m["role"] == "tool"]
+    assert len(observations) == 1
+    content = json.loads(observations[0]["content"])
+    assert content["status"] == "succeeded"
+    assert content["result"]["items"][0]["excerpt"] == "confirmed"
+    assert content["source_digest"] == built.items[-1].reference.source_digest
+    assert not any(
+        r.action_id
+        for r in state.model_attempts[-1].context_projection.checkpoint.references
     )
 
 

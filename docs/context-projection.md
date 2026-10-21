@@ -49,8 +49,11 @@ full/recent_complete_rounds 不插入摘要或省略标记。投影不是 LLM Su
 模型可能因为缺少早期上下文而改变决策，因此 recent_complete_rounds 必须显式选择，默认仍为 full。
 
 可选 `evidence_anchored_recent_rounds` 与 `evidence_checkpoint.mode=anchored_extracts` 配合，
-在 user 角色保留有来源的确定性摘录，再选择完整最近后缀。详见 [Evidence Checkpoint](evidence-checkpoint.md)。
-完整历史仍先验证；checkpoint 超限不临时删减选定证据。Manifest 的可选 checkpoint 在旧模式序列化时省略，
+v2 将经可信披露策略处理的证据放入真实保留 tool observation，再选择完整最近后缀。
+工具来源不提升为 user/system；无真实配对承载时 fail-closed。详见 [Evidence Checkpoint](evidence-checkpoint.md)。
+完整历史仍先验证；v2 也披露过滤最近的工具观察，pins 优先再选最近被省略的来源，checkpoint 超限不临时删减选定证据。
+v1 只读重建保持旧字节，启用 v1 的新预约以 AgentEvidenceV1ReadOnly 阻断，不自动转换旧重试。
+Manifest 的可选 checkpoint 在旧模式序列化时省略，
 不改变历史 JSON 或请求身份；不新增迁移。它只能保留有限原文，不能恢复被省略历史的全部语义。
 
 ## 身份与可重现性

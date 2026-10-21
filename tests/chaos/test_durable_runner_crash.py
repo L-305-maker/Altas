@@ -124,7 +124,12 @@ def test_real_process_crash_and_new_worker(
         config.update(
             {
                 "context_projection": {"mode": "evidence_anchored_recent_rounds"},
-                "evidence_checkpoint": {"mode": "anchored_extracts"},
+                "evidence_checkpoint": {
+                    "mode": "anchored_extracts",
+                    "checkpoint_version": 2,
+                    "selection_policy": "pinned_then_recent",
+                    "disclosure": {},
+                },
             }
         )
     store = Store(database)

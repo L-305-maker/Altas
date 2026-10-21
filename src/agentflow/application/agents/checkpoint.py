@@ -2,8 +2,9 @@
 
 import json
 from dataclasses import dataclass
+from typing import TYPE_CHECKING
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, model_serializer
 
 from agentflow.application.agents.context import AgentContextBuilder
 from agentflow.application.ports.agent_store import AgentSession, StateConflict
@@ -11,10 +12,14 @@ from agentflow.application.ports.context_projection import ContextProjectionErro
 from agentflow.application.ports.evidence_checkpoint import (
     EvidenceCheckpointManifest,
     EvidenceCheckpointPolicy,
+    EvidenceDisclosureDecision,
     EvidenceReference,
 )
 from agentflow.domain.agent.action import digest_arguments
 from agentflow.domain.workflow.spec import StepSpec
+
+if TYPE_CHECKING:
+    from agentflow.application.agents.checkpoint_v2 import EvidenceCandidates
 
 
 def _json(value):
@@ -35,6 +40,14 @@ class EvidenceItem(BaseModel):
     format: str
     excerpt: str
     truncated: bool
+    disclosure: EvidenceDisclosureDecision | None = None
+
+    @model_serializer(mode="wrap")
+    def legacy_fragment(self, handler):
+        data = handler(self)
+        if self.disclosure is None:
+            data.pop("disclosure", None)
+        return data
 
 
 @dataclass(frozen=True)
@@ -50,9 +63,18 @@ def build_checkpoint(
     policy: EvidenceCheckpointPolicy,
     *,
     step_spec: StepSpec | None = None,
-) -> EvidenceCheckpoint | None:
+) -> "EvidenceCheckpoint | EvidenceCandidates | None":
     if policy.mode == "disabled":
         return None
+    if policy.checkpoint_version == 2:
+        from agentflow.application.agents.checkpoint_v2 import collect_evidence
+
+        return collect_evidence(state, policy, step_spec=step_spec)
+    return _build_legacy_checkpoint(state, policy, step_spec=step_spec)
+
+
+def _build_legacy_checkpoint(state, policy, *, step_spec=None):
+    """Frozen v1 reconstruction for read-only historical verification."""
     # Public entry point cannot make invalid/UNKNOWN history disappear.
     AgentContextBuilder().build(state)
     if any(m.sequence != i for i, m in enumerate(state.messages)):

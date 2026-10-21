@@ -71,3 +71,57 @@ def test_minimal_soak_records_preserve_old_token_fencing(store, tmp_path, monkey
             pytest.fail("SoakDiagnosticContainsPrivateTaskData", pytrace=False)
     finally:
         workload.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("store", ["postgres"], indirect=True)
+async def test_backup_stops_writers_under_run_lock_even_when_deferral_becomes_due(
+    store, monkeypatch, advance_database_clock
+):
+    from concurrent.futures import ThreadPoolExecutor
+    from types import SimpleNamespace
+
+    from test_provider_admission import opened, policy, reservation
+
+    from agentflow.application.agents.durable_runner import DurableAgentRunner
+    from agentflow.application.tools.runtime import ToolRuntime
+    from agentflow.infrastructure.models.mock import MockProvider
+    from agentflow.infrastructure.persistence.agent_store import SQLAgentStore
+    from agentflow.infrastructure.persistence.store import Store
+
+    monkeypatch.syspath_prepend(str(Path(__file__).resolve().parents[2] / "scripts"))
+    from verify_runtime_backup import stop_at_admission_deferral
+
+    agents = SQLAgentStore(store, admission_policy=policy())
+    task, state = opened(agents)
+    agents.reserve_model_attempt(task, reservation(state))
+    run = store.submit(
+        store.register(
+            WorkflowSpec(
+                name="backup-barrier", steps=(StepSpec(id="agent", handler="agent"),)
+            )
+        ),
+        {},
+    )
+    task = store.claim(300)
+    assert task.run_id == run
+    result = await DurableAgentRunner(
+        agents, MockProvider(), ToolRuntime(), admission=agents
+    ).run(task, "fixed goal", allowed=set())
+    assert result.status == "admission_deferred"
+    stopped = []
+
+    def stop():
+        advance_database_clock(10)
+        other = Store(store.engine.url.render_as_string(hide_password=False))
+        try:
+            with ThreadPoolExecutor(max_workers=1) as pool:
+                assert pool.submit(other.claim, 300).result(timeout=5) is None
+            stopped.append(True)
+        finally:
+            other.close()
+
+    assert stop_at_admission_deferral(SimpleNamespace(store=store, stop=stop), run)
+    assert stopped == [True]
+    # Eligibility really advanced: after the guard unlocks, this Step can claim.
+    assert store.claim(300).run_id == run

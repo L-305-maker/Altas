@@ -115,6 +115,19 @@ def audit(engine, *, limit=1000, offset=0, timeout_seconds=30):
                     counts["operator_review_sessions"] += 1
                     continue
                 active = row["run_status"] not in {"succeeded", "failed", "cancelled"}
+                v1_checkpoint = False
+                if row["projection"] is not None:
+                    try:
+                        checkpoint = ContextProjectionManifest.model_validate(
+                            row["projection"]
+                        ).checkpoint
+                        v1_checkpoint = (
+                            checkpoint is not None
+                            and checkpoint.checkpoint_version == 1
+                        )
+                    except ValueError:
+                        pass  # The existing pending-retry checks report invalid identity.
+                counts["v1_checkpoint_sessions"] += int(v1_checkpoint)
                 invalid_contract = False
                 saved_contract = None
                 if row["contract"] is not None:
@@ -174,7 +187,10 @@ def audit(engine, *, limit=1000, offset=0, timeout_seconds=30):
                     or missing_request
                     or unusable
                     or invalid_contract
+                    or v1_checkpoint
                 )
+                if v1_checkpoint:
+                    findings["AgentEvidenceV1ReadOnly"] += 1
                 if missing_projection:
                     findings["AgentContextProjectionChanged"] += 1
                 if missing_request:
@@ -208,6 +224,7 @@ def audit(engine, *, limit=1000, offset=0, timeout_seconds=30):
                         "unbound_request_sessions",
                         "terminal_historical_calls",
                         "operator_review_sessions",
+                        "v1_checkpoint_sessions",
                     )
                 },
                 "scope": {
