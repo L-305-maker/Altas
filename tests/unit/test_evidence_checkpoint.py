@@ -30,6 +30,12 @@ def test_disabled_preserves_legacy_manifest_json():
     assert "checkpoint" not in projected.manifest.model_dump(mode="json")
     with pytest.raises(ValidationError):
         EvidenceCheckpointPolicy().mode = "anchored_extracts"
+    from agentflow.application.agents.projection import digest_context
+
+    assert (
+        digest_context(checkpoint(state).manifest.model_dump(mode="json"))
+        == "f95ed6516757d3d29f80fb1057509964754d49da0f9970458ece47ce3e4c9541"
+    )
 
 
 def test_deterministic_references_resolve_to_authoritative_actions():
@@ -212,3 +218,29 @@ def test_nested_json_extracts_system_anchors_and_minimum_recent_rounds():
     )
     with pytest.raises(ContextProjectionError):
         project_context(full, [], policy, size - 1, checkpoint=built)
+
+
+def test_explicit_workflow_identifiers_are_anchored_to_persisted_step_spec():
+    from agentflow.application.ports.agent_store import StateConflict
+    from agentflow.domain.agent.action import digest_arguments
+    from agentflow.domain.workflow.spec import StepSpec
+
+    spec = StepSpec(id="work", handler="agent", parameters={"PRIVATE": "never extract"})
+    policy = EvidenceCheckpointPolicy(
+        mode="anchored_extracts", workflow_identifiers=("id", "handler")
+    )
+    state = session()
+    with pytest.raises(StateConflict):
+        build_checkpoint(state, policy)
+    built = build_checkpoint(state, policy, step_spec=spec)
+    assert [item.excerpt for item in built.items[:2]] == ["work", "agent"]
+    for item in built.items[:2]:
+        assert item.reference.source_type == "workflow_step"
+        assert item.reference.source_key == spec.id
+        assert item.reference.source_sequence == 0
+        assert item.reference.source_digest == digest_arguments(
+            spec.model_dump(mode="json")
+        )
+    assert "PRIVATE" not in built.message["content"]
+    assert "never extract" not in built.manifest.model_dump_json()
+    assert "workflow_identifiers" not in EvidenceCheckpointPolicy().model_dump()

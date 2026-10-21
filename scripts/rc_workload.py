@@ -231,7 +231,10 @@ class Workload:
                                 "context_projection": {
                                     "mode": "evidence_anchored_recent_rounds"
                                 },
-                                "evidence_checkpoint": {"mode": "anchored_extracts"},
+                                "evidence_checkpoint": {
+                                    "mode": "anchored_extracts",
+                                    "workflow_identifiers": ["id", "handler"],
+                                },
                                 "retry_base_seconds": retry_seconds,
                                 "retry_max_seconds": retry_seconds,
                                 **(

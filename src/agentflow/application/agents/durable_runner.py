@@ -297,7 +297,9 @@ class DurableAgentRunner:
                 schemas,
                 config.context_projection,
                 config.max_context_bytes,
-                checkpoint=build_checkpoint(state, config.evidence_checkpoint),
+                checkpoint=build_checkpoint(
+                    state, config.evidence_checkpoint, step_spec=task.spec
+                ),
             )
             if retry and (
                 not state.model_attempts

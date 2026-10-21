@@ -25,7 +25,8 @@ Prompt、Task.inputs、dependencies、工具内容及模型输出都不能改变
     "max_checkpoint_bytes": 16000,
     "max_excerpt_bytes": 256,
     "min_recent_rounds": 1,
-    "result_paths": [["value"]]
+    "result_paths": [["value"]],
+    "workflow_identifiers": ["id", "handler"]
   }
 }
 ```
@@ -36,8 +37,9 @@ EvidenceCheckpointPolicy frozen、拒绝未知字段。启用摘录必须同时�
 
 1. 完整 ContextBuilder 先检查所有 Action 与 assistant 的有序映射、参数及 Core ID。
    任意旧轮次的 UNKNOWN、PROPOSED 或 INFLIGHT 都阻止模型请求，不能先省略再验证。
-2. 按原消息 sequence 遍历：user 的结构化 JSON content 中仅摘录原 `goal`；assistant 的
-   action_ids 按原批次顺序引用实际 StoredAction。v1 不摘录任意依赖、Workflow 标识或自定义指令字段。
+2. 可选 workflow_identifiers 仅允许持久 StepSpec 的 id、handler，按配置顺序摘录，默认空。
+   随后按原消息 sequence 遍历：首次 user 的结构化 JSON content 中仅摘录原 `goal`；assistant 的
+   action_ids 按原批次顺序引用实际 StoredAction。不摘录任意依赖、parameters 或自定义指令字段。
 3. 对终态 StoredAction.result 按配置路径顺序取值。路径为最多七层的精确 JSON 对象键，
    不执行表达式、数组索引或通配符。空路径 `[]` 显式选择根结果。
    不存在的路径不产生否定证据；若该 Action 没有任何匹配，保留其原 status 字段。
@@ -66,6 +68,9 @@ source_digest、extraction_path、excerpt_digest、evidence_version。
 Action 来源定位实际 StoredAction，source_sequence 指包含它的 assistant 原消息，
 extraction_path 为 `result/...` 或 `action/status`。source_digest 对整个来源 DTO 计算，
 包含参数摘要、工具绑定及最终结果，但 Manifest 不复制其正文。
+workflow_step 来源绑定当前 Session 所属真实 StepSpec，source_key 为 StepSpec.id；
+此来源是单一记录，source_sequence 固定 0，path 为 id 或 handler。
+SQLAgentStore 使用锁定 Run 内的定义重算，不能接受调用方伪造 StepSpec；摘要覆盖完整定义，摘录只输出选定标识。
 excerpt_digest 对 `{format, excerpt, truncated}` 计算；status/error_code 还受来源和内容摘要保护。
 
 EvidenceCheckpointManifest 包含版本、policy_digest、source_history_digest、evidence_reference_digest、
@@ -73,6 +78,7 @@ checkpoint_content_digest、checkpoint_bytes、included/omitted_evidence_count�
 摘要统一使用紧凑、排序键、ensure_ascii=False、allow_nan=False 的 JSON UTF-8 SHA-256；
 数组顺序不变，不进行 Unicode 归一化。source_history_digest 覆盖完整原始 messages 和最终 actions，
 与 ProjectionManifest 的规范回放 full_context_digest 区分。
+选择 Workflow 标识时 source_history_digest 还包含实际 StepSpec；未选择时不加入。
 引用列表摘要的对象是 `{"references": [...]}`；其数量和摘要由类型验证。
 
 Runner 先生成完整历史、摘录和投影，再进行协议/精确字节校验与 Provider 能力/Token 预检，
@@ -93,6 +99,7 @@ checkpoint 不替代原历史，后续新消息也不会覆盖旧 Manifest。
 复用 0007/0008 的 agent_model_attempts.context_projection JSON，增加可选 checkpoint。
 不新增迁移，不改 0001–0008。没有 checkpoint 时序列化完全省略该键，旧 JSON 和请求摘要不变；
 旧数据不回填，默认恢复为 None。旧二进制不能读取新 mode/字段，因此启用新模式前应升级全部 Worker；
+可选 workflow_identifiers 为空、source_key 为 None 时省略其键，已有 v1 checkpoint 摘要也保持不变。
 回滚二进制前需停止 Writer 并处置这些会话，不能假定旧 reader 支持新 JSON 模式。
 不改变数据库事务、Action Approval 或调度规则。
 

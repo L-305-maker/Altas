@@ -9,20 +9,25 @@
 | 检查 | 状态 | 实际证据 |
 | --- | --- | --- |
 | 默认兼容及类型契约 | PASS | disabled 时无新 JSON 键；Policy/Reference/Manifest frozen；旧请求摘要与预算保持 |
-| 来源与不可信数据 | PASS | 完整历史先验证；伪造来源/序号/摘录摘要即便重算引用摘要仍拒绝；仅首次 user goal；多工具、终态及对账结果准确配对 |
+| 来源与不可信数据 | PASS | 完整历史先验证；伪造来源/序号/摘录摘要即便重算引用摘要仍拒绝；仅首次 user goal；固定 StepSpec id/handler 来源受锁定定义核对；多工具、终态及对账结果准确配对 |
 | 窗口与治理 | PASS | UTF-8/JSON 转义及 Schema 精确计量；完整回放超过 8500 字节时摘录+完整最近后缀仍可执行；证据或总量超限无 Attempt/Permit；Token/Usage/Admission 门控保留 |
 | 请求及恢复身份 | PASS | 同逻辑失败重试 Manifest/Contract 不变；Schema 热更新拒绝；确认丢失不发 HTTP；真实子进程在预约、结果及延期重试边界退出后恢复 |
-| 完整本地回归 | PASS | `uv run pytest -q`：863 passed、344 skipped，140.00 秒；1 项已有 TestClient 弃用警告 |
+| 完整本地回归 | PASS | `uv run pytest -q`：866 passed、346 skipped，193.13 秒；1 项已有 TestClient 弃用警告 |
 | Ruff | PASS | `uv run ruff check src tests scripts migrations evals`；`uv run ruff format --check src tests scripts migrations evals`，154 files already formatted |
-| PostgreSQL 最终发布专项 | PASS | `verify_postgres.py --bin D:/PSQL/bin --release-gates`：664 passed、零跳过，295.60 秒；独立事务/CAS/旧 token、真实进程崩溃、取消/审批/对账及既有迁移回归 |
-| 三独立 Worker Soak | PASS | `verify_durable_soak.py --bin D:/PSQL/bin --seconds 30 --workload 6 --seed 7`；实际 36.94 秒、23 Run、13 派发、41 领取；共享断言逐条核对 checkpoint 来源 |
+| PostgreSQL 最终发布专项 | PASS | `verify_postgres.py --bin D:/PSQL/bin --release-gates`：668 passed、零跳过，328.00 秒；独立事务/CAS/旧 token、真实进程崩溃、取消/审批/对账及既有迁移回归 |
+| 三独立 Worker Soak | PASS | `verify_durable_soak.py --bin D:/PSQL/bin --seconds 30 --workload 6 --seed 7`；最终复验 37.72 秒、23 Run、13 派发、41 领取；共享断言逐条核对 checkpoint 来源 |
 | 真实逻辑备份恢复 | PASS | `verify_runtime_backup.py --bin D:/PSQL/bin`；0008、15 表、10 Run 全量事实保留（含 checkpoint/审批/对账/Usage/Permit/Artifact）；已完成工具重派 0，新批准派发 1 |
 | 打包、架构与参考应用 | PASS | `uv build`；`verify_wheel.py dist/agentflow-1.0.0-py3-none-any.whl` 仓库外安装；架构 3 passed；`evals/run.py` 离线 3/3 |
 | 本地 Docker / Compose | NOT VERIFIED | Docker Desktop daemon pipe 不可用；2 项 Sandbox 跳过不计通过；本次提交的 GitHub CI 实际结果单列于交付记录 |
 | 真实 Provider / 精确 Token / 跨宿主 / 长时生产负载 | NOT VERIFIED | 无付费调用，无新模型效果/事实准确性承诺；本轮单机短时多进程不替代跨宿主或长期生产验收 |
 
-344 skipped 包括 341 项专用 PostgreSQL、2 项 Docker、1 项显式付费测试；不把跳过算作通过。
+346 skipped 包括 343 项专用 PostgreSQL、2 项 Docker、1 项显式付费测试；不把跳过算作通过。
 PG 由独立临时实例补齐，普通 CI 没有启用真实付费 Provider。
+
+补充固定 StepSpec 来源时，一次并行 Soak 在停机前后整个 Checkpoint 比较失败。
+该边界允许独立 peer 尚未完成并合法改变 Run 状态；现在先等待其持久成功再捕获停机快照，
+仍严格比较全部字段，失败仅输出变化字段名。复验通过，没有放宽 CAS、租约、审批或超时。
+新增可选来源不选择时的序列化和既有 v1 Manifest 摘要也由固定回归保护。
 
 Manifest 只证明数据一致性，不认证现实事实；非特权摘录仍可能误导模型且丢失语义。
 checkpoint 字节预算和 max_context_bytes 都不是精确 Token/费用上限，不提供外部 exactly-once 保证。

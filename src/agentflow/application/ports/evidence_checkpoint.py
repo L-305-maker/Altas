@@ -2,7 +2,7 @@
 
 from typing import Annotated, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, model_serializer, model_validator
 
 from agentflow.domain.agent.action import Identifier, digest_arguments
 
@@ -25,11 +25,21 @@ class EvidenceCheckpointPolicy(BaseModel):
         tuple[Annotated[tuple[PathPart, ...], Field(max_length=7)], ...],
         Field(max_length=8),
     ] = (("value",),)
+    workflow_identifiers: Annotated[
+        tuple[Literal["id", "handler"], ...], Field(max_length=2)
+    ] = ()
+
+    @model_serializer(mode="wrap")
+    def legacy_policy(self, handler):
+        data = handler(self)
+        if not self.workflow_identifiers:
+            data.pop("workflow_identifiers", None)
+        return data
 
 
 class EvidenceReference(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
-    source_type: Literal["message", "action"]
+    source_type: Literal["message", "action", "workflow_step"]
     source_sequence: Annotated[int, Field(ge=0, strict=True)]
     action_id: Identifier | None = None
     model_call_id: Identifier | None = None
@@ -37,15 +47,28 @@ class EvidenceReference(BaseModel):
     extraction_path: Path
     excerpt_digest: Digest
     evidence_version: Version = 1
+    source_key: Identifier | None = None
+
+    @model_serializer(mode="wrap")
+    def legacy_reference(self, handler):
+        data = handler(self)
+        if self.source_key is None:
+            data.pop("source_key", None)
+        return data
 
     @model_validator(mode="after")
     def source_identity(self):
         if (
-            self.source_type == "action"
-            and (self.action_id is None or self.model_call_id is None)
-        ) or (
-            self.source_type == "message"
-            and (self.action_id is not None or self.model_call_id is not None)
+            (
+                self.source_type == "action"
+                and (self.action_id is None or self.model_call_id is None)
+            )
+            or (
+                self.source_type != "action"
+                and (self.action_id is not None or self.model_call_id is not None)
+            )
+            or ((self.source_type == "workflow_step") != (self.source_key is not None))
+            or (self.source_type == "workflow_step" and self.source_sequence != 0)
         ):
             raise ValueError("evidence source identity differs")
         return self

@@ -58,14 +58,16 @@ def opened_checkpoint(agents):
     )
 
 
-def evidence_reservation(state):
+def evidence_reservation(state, *, step_spec=None, config=CONFIG):
     projected = project_context(
         AgentContextBuilder().build(state),
         [],
-        ContextProjectionPolicy(**CONFIG["context_projection"]),
+        ContextProjectionPolicy(**config["context_projection"]),
         1_000_000,
         checkpoint=build_checkpoint(
-            state, EvidenceCheckpointPolicy(**CONFIG["evidence_checkpoint"])
+            state,
+            EvidenceCheckpointPolicy(**config["evidence_checkpoint"]),
+            step_spec=step_spec,
         ),
     )
     return AgentTransition.model_validate(
@@ -79,6 +81,62 @@ def evidence_reservation(state):
             .request.contract,
         }
     )
+
+
+@pytest.mark.asyncio
+async def test_workflow_identifiers_use_real_persisted_spec_without_parameter_content(
+    store, runtime_invariants
+):
+    config = {
+        **CONFIG,
+        "evidence_checkpoint": {
+            "mode": "anchored_extracts",
+            "workflow_identifiers": ["id", "handler"],
+        },
+    }
+    run = submit(store, **config)
+    provider = MockProvider([final()])
+    assert await worker(store, provider).tick()
+    state = runtime_invariants(store, run)["work"].agent
+    manifest = state.model_attempts[0].context_projection.checkpoint
+    assert [r.source_key for r in manifest.references[:2]] == ["work", "work"]
+    assert [r.extraction_path for r in manifest.references[:2]] == [
+        ("id",),
+        ("handler",),
+    ]
+    assert state.snapshot.status == "succeeded"
+
+
+def test_store_rejects_forged_workflow_source_before_permit(store, monkeypatch):
+    from agentflow.domain.workflow.spec import StepSpec
+
+    config = {
+        **CONFIG,
+        "evidence_checkpoint": {
+            "mode": "anchored_extracts",
+            "workflow_identifiers": ["id"],
+        },
+    }
+    run = submit(store, **config)
+    task = store.claim(300)
+    assert task.run_id == run
+    agents = SQLAgentStore(store, admission_policy=policy())
+    state = agents.open(
+        task,
+        AgentSnapshot(
+            id=task.idempotency_key, budget=DurableAgentConfig().initial_budget()
+        ),
+    )
+    forged = StepSpec.model_validate({**task.spec.model_dump(), "id": "forged"})
+    transition = evidence_reservation(state, step_spec=forged, config=config)
+
+    def forbidden(*args):
+        pytest.fail("forged workflow evidence cannot acquire a permit")
+
+    monkeypatch.setattr(agents.admission, "acquire", forbidden)
+    with pytest.raises(ContextProjectionError):
+        agents.reserve_model_attempt(task, transition)
+    assert agents.load(task) == state
 
 
 @pytest.mark.asyncio

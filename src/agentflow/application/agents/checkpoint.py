@@ -14,6 +14,7 @@ from agentflow.application.ports.evidence_checkpoint import (
     EvidenceReference,
 )
 from agentflow.domain.agent.action import digest_arguments
+from agentflow.domain.workflow.spec import StepSpec
 
 
 def _json(value):
@@ -45,7 +46,10 @@ class EvidenceCheckpoint:
 
 
 def build_checkpoint(
-    state: AgentSession, policy: EvidenceCheckpointPolicy
+    state: AgentSession,
+    policy: EvidenceCheckpointPolicy,
+    *,
+    step_spec: StepSpec | None = None,
 ) -> EvidenceCheckpoint | None:
     if policy.mode == "disabled":
         return None
@@ -55,7 +59,7 @@ def build_checkpoint(
         raise StateConflict("evidence source sequence is inconsistent")
     candidates = []
 
-    def extract(source, sequence, path, value, stored=None):
+    def extract(source, sequence, path, value, stored=None, source_key=None):
         text = value if isinstance(value, str) else _json(value)
         encoded = text.encode("utf-8")
         excerpt = encoded[: policy.max_excerpt_bytes].decode("utf-8", errors="ignore")
@@ -67,7 +71,12 @@ def build_checkpoint(
         candidates.append(
             EvidenceItem(
                 reference=EvidenceReference(
-                    source_type="action" if stored else "message",
+                    source_type="action"
+                    if stored
+                    else "workflow_step"
+                    if source_key
+                    else "message",
+                    source_key=source_key,
                     source_sequence=sequence,
                     action_id=stored.action.id if stored else None,
                     model_call_id=stored.action.model_call_id if stored else None,
@@ -81,6 +90,19 @@ def build_checkpoint(
             )
         )
 
+    workflow_source = None
+    if policy.workflow_identifiers:
+        if step_spec is None:
+            raise StateConflict("evidence workflow source is unavailable")
+        workflow_source = step_spec.model_dump(mode="json")
+        for field in policy.workflow_identifiers:
+            extract(
+                workflow_source,
+                0,
+                (field,),
+                workflow_source[field],
+                source_key=step_spec.id,
+            )
     actions = {a.action.id: a for a in state.actions}
     goal_seen = False
     for message in state.messages:
@@ -145,6 +167,11 @@ def build_checkpoint(
             {
                 "messages": [m.model_dump(mode="json") for m in state.messages],
                 "actions": [a.model_dump(mode="json") for a in state.actions],
+                **(
+                    {"workflow_step": workflow_source}
+                    if workflow_source is not None
+                    else {}
+                ),
             }
         ),
         evidence_reference_digest=digest_arguments(

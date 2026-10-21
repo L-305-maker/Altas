@@ -61,8 +61,12 @@ class RuntimeInvariants:
                     if projection is None or projection.checkpoint is None:
                         continue
                     for reference in projection.checkpoint.references:
-                        message = state.messages[reference.source_sequence]
-                        if reference.source_type == "action":
+                        if reference.source_type == "workflow_step":
+                            source = specs[step.key]
+                            assert reference.source_key == step.key
+                            assert reference.source_sequence == 0
+                        elif reference.source_type == "action":
+                            message = state.messages[reference.source_sequence]
                             source = actions[reference.action_id]
                             assert source.action.status.is_terminal
                             assert (
@@ -72,6 +76,7 @@ class RuntimeInvariants:
                             )
                             assert reference.action_id in message.payload["action_ids"]
                         else:
+                            message = state.messages[reference.source_sequence]
                             source = message
                             assert message.role == "user"
                         assert (

@@ -113,6 +113,14 @@ def exercise(cluster, workload, *, seconds, count, seed):
     # retain safe persisted state; restart always uses a fresh engine/pool.
     outage = workload.submit("unknown")
     workload.approve(outage)
+    # Waiting Agent does not imply a quiescent DAG: the independent peer can
+    # still complete and legitimately change Run.status before server shutdown.
+    workload.wait(
+        lambda: any(
+            step["id"] == "peer" and step["status"] == "succeeded"
+            for step in workload.store.get_run(outage)["steps"]
+        )
+    )
     before = workload.wait(lambda: workload.status(outage, "waiting_reconciliation"))
     cluster.stop()
     for child in workload.children:
@@ -127,7 +135,14 @@ def exercise(cluster, workload, *, seconds, count, seed):
         "OutageNotObserved"
     )
     workload.store.engine.dispose()
-    assert workload.state(outage) == before
+    after = workload.state(outage)
+    assert after == before, {
+        "changed_fields": [
+            field
+            for field in ("agent", "step", "run_status", "continuation", "artifacts")
+            if after is None or getattr(after, field) != getattr(before, field)
+        ]
+    }
     workload.start(seconds=seconds + 120)
     workload.reconcile(outage)
     workload.wait(lambda: workload.status(outage, "succeeded"))

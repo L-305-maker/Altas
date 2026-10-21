@@ -952,7 +952,7 @@ class SQLAgentStore:
                     config.get("context_projection", {})
                 ),
                 config.get("max_context_bytes", 1_000_000),
-                checkpoint=build_checkpoint(state, evidence_policy),
+                checkpoint=build_checkpoint(state, evidence_policy, step_spec=spec),
             )
             expected = projected.manifest
         except (ValidationError, UnresolvedActions):
