@@ -150,6 +150,8 @@ async def test_worker_heartbeats_during_execution(store, monkeypatch):
     heartbeat = store.heartbeat
 
     def observe_renewal(task, lease_seconds):
+        if len(leases) >= 3:
+            return heartbeat(task, lease_seconds)
         clock[0] += lease_seconds * 2 / 3
         result = heartbeat(task, lease_seconds)
         if result:
