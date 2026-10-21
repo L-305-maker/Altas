@@ -1,5 +1,9 @@
 # Evidence Checkpoint v3：ToolBinding 披露授权、信任边界与历史兼容
 
+显式 [Provider Context Egress](provider-context-egress.md) 现在也支持 full/recent 工具结果过滤。
+未配置时本页旧 v3 字节不变；同时配置仅接受完全相同的 v3 disclosure（含规则顺序/限额），否则预约前
+AgentContextEgressPolicyConflict。metadata_only 不与公开 v3 规则取并集；不改写已有 checkpoint Manifest。
+
 完整 AgentMessage、Action、Observation、审批、对账和 Usage Ledger 不变；只改变 Provider 视图。
 默认 disabled，原 full / recent_complete_rounds 行为不变。v1 保留只读重建，禁止新预约；
 v2 的公开摘录也只读，metadata_only 可继续。新的公开授权使用显式 v3。

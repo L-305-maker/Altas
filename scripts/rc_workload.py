@@ -238,6 +238,9 @@ class Workload:
                                     "disclosure": {"policy_version": 2},
                                     "workflow_identifiers": ["id", "handler"],
                                 },
+                                "provider_context_egress": {
+                                    "disclosure_mode": "metadata_only"
+                                },
                                 "retry_base_seconds": retry_seconds,
                                 "retry_max_seconds": retry_seconds,
                                 **(

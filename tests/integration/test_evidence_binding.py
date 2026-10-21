@@ -15,7 +15,7 @@ from agentflow.application.tools.runtime import Tool, ToolRuntime
 from agentflow.domain.agent.status import ToolSideEffect
 from agentflow.infrastructure.models.mock import MockProvider
 from agentflow.infrastructure.persistence.agent_store import SQLAgentStore
-from agentflow.infrastructure.persistence.models import Base, RunRow
+from agentflow.infrastructure.persistence.models import Base, RunRow, StepRow
 
 LEGACY_V2 = Path(__file__).resolve().parents[1] / "fixtures/checkpoint_v2_918ae92.json"
 
@@ -33,6 +33,13 @@ def restore_v2(store):
                     "SELECT setval(pg_get_serial_sequence('events', 'id'), (SELECT max(id) FROM events))"
                 )
             )
+        # Fixed fixture deadlines eventually pass. Tests explicitly make their
+        # selected run due; keep unrelated captured retries out of claim().
+        db.execute(
+            StepRow.__table__.update()
+            .where(StepRow.status == "ready")
+            .values(available_at=store._now(db) + 3600)
+        )
     return captured
 
 
@@ -380,7 +387,15 @@ async def test_v3_reconciliation_keeps_original_binding_and_approval(
 
     runtime._tools["read"] = replace(runtime._tools["read"], invoke=unknown)
     agents = SQLAgentStore(store)
-    run = submit(store, **v3_config(runtime))
+    config = v3_config(runtime)
+    run = submit(
+        store,
+        **config,
+        provider_context_egress={
+            "disclosure_mode": "bound_disclosure",
+            "rules": config["evidence_checkpoint"]["disclosure"]["rules"],
+        },
+    )
     provider = MockProvider([read_proposal(), final()])
     worker = executor(store, provider, runtime, agents=agents)
     assert await worker.tick()

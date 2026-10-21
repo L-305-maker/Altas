@@ -1,5 +1,10 @@
 # Durable Context Projection v1
 
+显式 [Provider Context Egress](provider-context-egress.md) 在完整历史验证后、窗口选择前过滤工具结果。
+未配置时 full/recent 保持兼容；新视图仍保留真实 Core Action ID、工具顺序及所有必要 system/user 消息。
+Manifest 的可选 egress 绑定历史 Action/观察和策略摘要；旧请求省略该字段。非 checkpoint 安全路径用
+过滤后消息长度累计搜索窗口，避免对每个候选重复序列化整个后缀；最后仍精确校验 UTF-8 字节与协议。
+
 Projection Manifest 的身份现由 [ModelRequestContract](model-request-contract.md) 与 Provider/model/输出参数绑定。
 0008 在 Attempt 增加可空请求契约，保留本页的投影语义；旧失败调用的升级风险可通过只读核查脚本识别。
 

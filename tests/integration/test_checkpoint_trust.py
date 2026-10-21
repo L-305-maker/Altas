@@ -212,9 +212,11 @@ def test_upgrade_audit_reports_v1_pending_retry_without_rewriting_it(
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("phase", ["model", "tool"])
-@pytest.mark.parametrize("checkpoint_version", [2, 3])
+@pytest.mark.parametrize(
+    "checkpoint_version,egress", [(2, False), (3, False), (3, True)]
+)
 async def test_checkpoint_cancellation_preserves_identity_and_unknown(
-    store, phase, checkpoint_version
+    store, phase, checkpoint_version, egress
 ):
     import asyncio
 
@@ -228,6 +230,8 @@ async def test_checkpoint_cancellation_preserves_identity_and_unknown(
             "disclosure": {"policy_version": 2} if checkpoint_version == 3 else {},
         },
     }
+    if egress:
+        config["provider_context_egress"] = {"disclosure_mode": "metadata_only"}
     h = await launch(store, phase, agent_config=config)
     h.job.cancel("stop-v2")
     with pytest.raises(asyncio.CancelledError):
@@ -247,6 +251,10 @@ async def test_checkpoint_cancellation_preserves_identity_and_unknown(
         SQLAgentStore(store).load(h.task)
     assert all(
         a.context_projection.checkpoint.checkpoint_version == checkpoint_version
+        for a in before.model_attempts
+    )
+    assert all(
+        (a.context_projection.egress is not None) == egress
         for a in before.model_attempts
     )
 

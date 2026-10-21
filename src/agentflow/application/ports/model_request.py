@@ -8,7 +8,7 @@ from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Annotated, Literal, Protocol
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, model_serializer, model_validator
 
 from agentflow.application.ports.context_projection import (
     ContextProjectionManifest,
@@ -173,7 +173,15 @@ class ModelRequestContract(ModelRequestOptions):
     context_projection_digest: Digest
     tool_schema_digest: Digest
     token_count: TokenCount = Field(default_factory=TokenCount)
+    context_egress_digest: Digest | None = None
     request_contract_digest: Digest
+
+    @model_serializer(mode="wrap")
+    def historical_contract(self, handler):
+        data = handler(self)
+        if self.context_egress_digest is None:
+            data.pop("context_egress_digest", None)
+        return data
 
     @model_validator(mode="after")
     def valid_identity(self):
@@ -205,6 +213,7 @@ class ModelRequestContract(ModelRequestOptions):
                     "tool_schema_digest",
                     "token_count",
                     "request_contract_digest",
+                    "context_egress_digest",
                 },
             )
         )
@@ -214,6 +223,12 @@ class ModelRequestContract(ModelRequestOptions):
             self.request_contract_version != 1
             or self.context_projection_digest != projection.projected_context_digest
             or self.tool_schema_digest != projection.tool_schema_digest
+            or self.context_egress_digest
+            != (
+                request_digest(projection.egress.model_dump(mode="json"))
+                if projection.egress
+                else None
+            )
         ):
             raise ModelRequestError()
 
@@ -317,6 +332,10 @@ def build_request(
         "tool_schema_digest": projection.tool_schema_digest,
         "token_count": count.model_dump(mode="json"),
     }
+    if projection.egress is not None:
+        values["context_egress_digest"] = request_digest(
+            projection.egress.model_dump(mode="json")
+        )
     contract = ModelRequestContract(
         **values, request_contract_digest=request_digest(values)
     )

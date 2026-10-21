@@ -12,6 +12,7 @@ from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 
 from agentflow.application.agents.checkpoint import build_checkpoint
 from agentflow.application.agents.context import AgentContextBuilder, UnresolvedActions
+from agentflow.application.agents.egress import prepare_egress
 from agentflow.application.agents.projection import project_context
 from agentflow.application.ports.agent_store import (
     ActionObservation,
@@ -28,6 +29,7 @@ from agentflow.application.ports.agent_store import (
     StateConflict,
     StoredAction,
 )
+from agentflow.application.ports.context_egress import ProviderContextEgressPolicy
 from agentflow.application.ports.context_projection import (
     ContextProjectionError,
     ContextProjectionManifest,
@@ -931,6 +933,7 @@ class SQLAgentStore:
             if (
                 "context_projection" in config
                 or "evidence_checkpoint" in config
+                or "provider_context_egress" in config
                 or previous is not None
                 or contract is not None
             ):
@@ -947,6 +950,17 @@ class SQLAgentStore:
             if code := evidence_policy.reservation_error:
                 raise ContextProjectionError(code)
             full = AgentContextBuilder().build(state)
+            checkpoint = build_checkpoint(state, evidence_policy, step_spec=spec)
+            egress = prepare_egress(
+                full,
+                state,
+                ProviderContextEgressPolicy.model_validate(
+                    config["provider_context_egress"]
+                )
+                if config.get("provider_context_egress") is not None
+                else None,
+                checkpoint,
+            )
             projected = project_context(
                 full,
                 list(request.tools),
@@ -954,7 +968,8 @@ class SQLAgentStore:
                     config.get("context_projection", {})
                 ),
                 config.get("max_context_bytes", 1_000_000),
-                checkpoint=build_checkpoint(state, evidence_policy, step_spec=spec),
+                checkpoint=checkpoint,
+                egress=egress,
             )
             expected = projected.manifest
         except (ValidationError, UnresolvedActions):

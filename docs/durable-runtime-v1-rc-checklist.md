@@ -1,5 +1,35 @@
 # Durable Runtime v1：Release Candidate 验收
 
+## Provider Context Egress v1（2026-10-21）
+
+审核基线 `b0f4a7a031af2f8cab5df08ae3b6fdd50c68ce8b`，仅 main，无新分支/PR/迁移或生产数据库操作。
+配置、兼容矩阵及残余外发路径见 [Provider Context Egress](provider-context-egress.md)。
+
+| 检查 | 状态 | 本轮实际证据 |
+| --- | --- | --- |
+| 先失败回归 | PASS | 原基线 full/recent 不识别显式 metadata_only、不能创建会话；新增测试先失败，实施后实际 Worker/MockProvider 接收过滤视图，数据库仍保存原合成私密结果 |
+| 全模式披露与唯一策略 | PASS | full/recent 使用 v3 同一完整历史绑定决策；同名版本/摘要变化、缺绑定不继承公开授权；v3 策略完全相同才组合，metadata/public 冲突预约前拒绝 |
+| 请求身份与历史 | PASS | 可选 egress/Contract 摘要原子绑定；v1/v2 真实旧夹具不变，v3 从审核基线只读源码单独捕获并逐字节重建；策略漂移不重试，UNKNOWN/确认丢失不重发 |
+| 性能与容量 | PASS | 约 1.4 MB 合成结果、完整多工具批次与 UTF-8/Schema 硬边界；非 checkpoint 安全路径完整计量固定两次；清理余量与超大真实结果的 UNKNOWN 停止回归，不声称机器无关 SLO |
+| 完整 pytest | PASS | `uv run pytest -q`：964 passed、393 skipped，208.36 秒；1 项已有 TestClient 弃用警告，跳过不计通过 |
+| Ruff | PASS | check 与 format --check：164 files already formatted |
+| PostgreSQL 发布专项 | PASS | `verify_postgres.py --bin D:/PSQL/bin --release-gates`：758 passed、零跳过，378.57 秒；真实独立事务唯一预约、旧 token/CAS、迁移、取消和进程崩溃等回归 |
+| 最终新增/兼容性 PG 组合 | PASS | 独立临时 PostgreSQL 执行 Egress、v3 绑定、历史/取消及策略单元：102 passed、零跳过，32.62 秒；含发布专项收集后追加的大结果 UNKNOWN 用例，计数重叠，不合算唯一用例数 |
+| 三独立 Worker Soak | PASS | `--seconds 30 --workload 6 --seed 7`：35.50 秒、23 Run、13 派发、41 领取；新负载为 metadata_only + 等价 v3，含 PostgreSQL 短暂中断与恢复 |
+| 逻辑备份恢复 | PASS | 实际 pg_dump/pg_restore，0008、15 表、14 Run（4 个旧终态）；v1/v2/v3 与新 Egress 身份、历史绑定/授权/时间/Artifact 全事实比较；已完成重派 0，新批准派发 1 |
+| 构建 / Wheel / 离线参考应用 | PASS | uv build、仓库外安装及 Core/参考应用/metrics；离线评估 3/3，traceability 1.0；架构边界 3 passed |
+| 本地 Docker / Compose | NOT VERIFIED | DockerDesktopLinuxEngine daemon pipe 不存在；本次提交的实际 GitHub Actions 结果见最终交付报告，不将本地跳过计为通过 |
+| 真实 Provider / 跨宿主 / 生产长时负载 | NOT VERIFIED | 付费请求 0；单机三进程/Mock 不能替代真实供应商或跨主机网络演练 |
+
+393 skipped = 390 项专用 PostgreSQL + 2 项本地 Docker + 1 项显式付费测试；
+数据库另由以上隔离专项实际验证。原有测试的固定 fixture.available_at 可能随日期到期，恢复夹具的测试辅助函数
+仅把未选中 ready 场景隔离到未来，由用例显式置当前场景为到期；消息、Action、绑定、Snapshot、Attempt/Contract 不改写。
+
+没有改动 Domain、历史迁移、Worker Scheduler、ToolRuntime 授权或 UNKNOWN 对账规则。
+安全模式显式选择，未配置的旧 full/recent 仍完整回放工具结果；user/assistant/reasoning/arguments 仍有残余外发路径。
+公开分类不是 PII/Secret 检测，ToolBinding 不是实现签名，字节不是精确 Token 或账单上限。
+代码门禁不等于生产放行；Summary 的独立披露/派生身份/来源与不确定性/非特权承载前置条件见新文档，本轮未实现摘要。
+
 ## Evidence Disclosure v3 — ToolBinding 授权（2026-10-21）
 
 审核基线 `918ae9215b299fa4dd936e9c96e01bf1141b8be1`，仅 main；无新表/迁移，0001–0008 不变。

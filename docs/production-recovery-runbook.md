@@ -1,5 +1,15 @@
 # Durable Runtime v1：备份、恢复及 staging 演练
 
+## Provider Egress 发布检查
+
+策略/兼容矩阵见 [Provider Context Egress](provider-context-egress.md)。0008 schema 不变；旧 Attempt 的
+Manifest/Contract 无新字段，新请求包含 egress/context_egress_digest。备份恢复在源与恢复库逐事实比对
+这些身份；演练新工作负载显式 metadata_only + 等价 v3，旧 v1/v2 终态不补填权限或新字段。
+上线前停止所有旧 Writer/Worker，统一部署能解析新 JSON 的版本，再恢复；不能混跑旧二进制并假设它会过滤。
+不要修改旧 RunSpec/绑定/Attempt 为重试“升级权限”；无法证明相同视图的重试应停止并人工处置。
+恢复库仍禁止自动重放 UNKNOWN、重用消费的审批或重新派发已完成 Action。核查未配置策略的旧 Run：
+full/recent 仍会完整外发结果，不能把本次显式功能宣称为所有历史任务自动脱敏。
+
 这些入口使用通用测试工具，不安装到业务运行入口，不改变 Agent 审批策略。逻辑备份恢复不证明
 PostgreSQL 主从切换、网络分区容错、PITR 或零数据丢失。生产数据恢复必须由有权限的操作者执行。
 

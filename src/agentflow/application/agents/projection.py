@@ -23,6 +23,7 @@ from agentflow.application.ports.model_provider import AssistantMessage
 
 if TYPE_CHECKING:
     from agentflow.application.agents.checkpoint import EvidenceCheckpoint
+    from agentflow.application.agents.egress import EgressContext
 
 
 def digest_context(value) -> str:
@@ -81,6 +82,7 @@ def project_context(
     max_context_bytes: int,
     *,
     checkpoint: "EvidenceCheckpoint | EvidenceCandidates | None" = None,
+    egress: "EgressContext | None" = None,
 ) -> ProjectedContext:
     """Drop the fewest oldest complete rounds that make the request fit.
 
@@ -100,7 +102,13 @@ def project_context(
             and checkpoint.manifest.checkpoint_version != 1
         ):
             raise ValueError
-        view = disclose_context(full, checkpoint) if v2 else full
+        view = (
+            egress.messages
+            if egress
+            else disclose_context(full, checkpoint)
+            if v2
+            else full
+        )
         payload = {"messages": full, **({"tools": tools} if tools else {})}
         full_digest, schema_digest = digest_context(payload), digest_context(tools)
         removable = (
@@ -116,7 +124,30 @@ def project_context(
             else 0
         )
         last_failure = "AgentContextLimit"
-        for omitted in range(removable + 1):
+        omissions = range(removable + 1)
+        if egress is not None and checkpoint is None:
+            # Serialize each already-filtered message once. Avoid an O(R²) scan
+            # of the suffix for large histories in opt-in egress modes.
+            lengths = [
+                len(
+                    json.dumps(
+                        m, ensure_ascii=False, allow_nan=False, separators=(",", ":")
+                    ).encode("utf-8")
+                )
+                for m in view
+            ]
+            size, count = sum(lengths), len(lengths)
+            base = context_bytes([], tools)
+            omissions = ()
+            for omitted in range(removable + 1):
+                if base + size + max(0, count - 1) <= max_context_bytes:
+                    omissions = (omitted,)
+                    break
+                if omitted < removable:
+                    start, end = rounds[omitted]
+                    size -= sum(lengths[start:end])
+                    count -= end - start
+        for omitted in omissions:
             removed = {i for start, end in rounds[:omitted] for i in range(start, end)}
             selected = [message for i, message in enumerate(view) if i not in removed]
             rendered = checkpoint
@@ -163,6 +194,7 @@ def project_context(
                     omitted_round_count=omitted,
                     tool_schema_digest=schema_digest,
                     checkpoint=rendered.manifest if rendered else None,
+                    egress=egress.manifest if egress else None,
                 ),
             )
     except (

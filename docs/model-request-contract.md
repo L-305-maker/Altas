@@ -1,10 +1,15 @@
 # Immutable Model Request Contract & Capability Preflight v1.1
 
+显式 [Provider Context Egress](provider-context-egress.md) 在 ProjectionManifest 中保存可选 egress 身份，
+Contract.context_egress_digest 绑定整个该 Manifest 并参与 request_contract_digest；未启用时完全省略新键。
+模型重试核对整个投影/Contract，因此策略变化即使没有改变文本也 fail-closed。使用既有 JSON，无新迁移；
+v1/v2/v3 审核夹具的历史字节可重建。新增身份不包含正文，不改变已提交旧请求摘要。
+
 本功能固定一次模型尝试的应用请求身份，不证明供应商的模型权重、实际账单或网络副作用 exactly-once。
 完整历史、Context Projection、调用预算、Observed Usage、Provider Admission、CAS/fencing 和取消规则均保留。
 
 [Evidence Checkpoint](evidence-checkpoint.md) 显式模式在 ProjectionManifest 的可选 checkpoint 保存来源引用与身份。
-RequestContract 的 context_projection_digest 仍保护实际发送的全部消息（包括 user 角色证据摘录）及 Schema。
+RequestContract 的 context_projection_digest 仍保护实际发送的全部消息及 Schema；v3 工具证据只在真实 tool 内承载，旧 v1 只读保留原字节。
 Store 在 Permit 前从原始历史重建来源、摘录、Manifest 和请求视图；重试要求整个 Manifest/Contract 相同。
 未启用时省略新增 JSON 键，历史契约及摘要不变；无新迁移，不回填旧证据或改写 Usage/Permit。
 摘要证明一致性，不认证来源内容的现实真实性，也不能授予工具权限。

@@ -112,14 +112,21 @@ def database(request, tmp_path):
         "checkpoint_retry_scheduled",
         "checkpoint_model_reservation",
         "checkpoint_tool_result",
+        "egress_model_reservation",
+        "egress_tool_result",
+        "egress_retry_scheduled",
     ],
 )
 def test_real_process_crash_and_new_worker(
     database, tmp_path, stage, runtime_invariants
 ):
+    egress = stage.startswith("egress_")
+    stage = stage.removeprefix("egress_")
     evidence = stage.startswith("checkpoint_")
     stage = stage.removeprefix("checkpoint_")
     config = {"retry_base_seconds": 60} if stage == "retry_scheduled" else {}
+    if egress:
+        config["provider_context_egress"] = {"disclosure_mode": "metadata_only"}
     if evidence:
         config.update(
             {
@@ -179,6 +186,9 @@ def test_real_process_crash_and_new_worker(
             assert len(checkpoint.agent.model_attempts) == 1
             assert checkpoint.agent.model_attempts[0].context_projection is not None
             assert checkpoint.agent.model_attempts[0].request_contract is not None
+            assert (
+                checkpoint.agent.model_attempts[0].context_projection.egress is not None
+            ) == egress
             assert (
                 checkpoint.agent.model_attempts[0].context_projection.checkpoint
                 is not None

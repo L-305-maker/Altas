@@ -1,9 +1,17 @@
 # 持久执行语义
 
+## Provider Tool Result Egress
+
+可选 [Provider Context Egress](provider-context-egress.md) 对 full/recent 的工具结果提供 metadata_only 或
+完整历史 ToolBinding/字段授权。只改变 Provider 视图，原审计不删不改；默认无配置保留旧完整回放。
+与 v3 checkpoint 的策略完全一致才组合，冲突在预约前终止。新 Manifest/RequestContract 摘要随 Attempt
+原子保存，SQLStore 重算后才允许预算/用量/准入预约，提交后重读所有权；不放宽 UNKNOWN、取消或 fencing。
+JSON 扩展计入现有 8 MB 配额及清理余量，没有新迁移或数据回填。原始 user/assistant/arguments 不自动脱敏。
+
 ## Evidence-Anchored Context Checkpoint
 
 可选确定性证据摘录见 [Evidence Checkpoint](evidence-checkpoint.md)。默认关闭，仅来自持久 StepSpec。
-完整历史先经 ContextBuilder 验证，UNKNOWN 永不因旧轮次省略而绕过；有限摘录在 user 角色承载，无授权能力。
+完整历史先经 ContextBuilder 验证，UNKNOWN 永不因旧轮次省略而绕过；v3 工具摘录只在真实 tool 内承载，无授权能力（旧 v1 仅只读重建原字节）。
 Store 在模型预约事务中重算来源与整个投影视图，引用/Manifest 与 Attempt、RequestContract 原子保存。
 复用既有 JSON，旧记录无新增键，不修改历史迁移；新引用计入 Session 配额并保留取消/UNKNOWN 清理余量。
 模型已确认失败才能以相同身份重试，确认丢失依旧 fail-closed，不重复请求。

@@ -93,6 +93,7 @@ def main():
                     "tests/integration/test_durable_evidence_checkpoint.py",
                     "tests/integration/test_checkpoint_trust.py",
                     "tests/integration/test_evidence_binding.py",
+                    "tests/integration/test_provider_context_egress.py",
                     "tests/integration/test_durable_model_request.py",
                     "tests/integration/test_provider_compatibility.py",
                     "tests/integration/test_model_request_migrations.py",

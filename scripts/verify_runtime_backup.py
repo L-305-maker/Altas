@@ -171,6 +171,12 @@ def drill(cluster):
             a["context_projection"]["checkpoint"]["checkpoint_version"]
             for a in facts["agent_model_attempts"]
         } == {1, 2, 3}
+        assert all(
+            a.context_projection.egress is not None
+            and a.request_contract.context_egress_digest is not None
+            for checkpoint in checkpoints.values()
+            for a in checkpoint.agent.model_attempts
+        )
         legacy = {r: source.invariants(source.store, r) for r in legacy_runs}
         assert facts["provider_admissions"] and facts["provider_permits"]
         assert facts["provider_admissions"][0]["cooldown_until"] > 0

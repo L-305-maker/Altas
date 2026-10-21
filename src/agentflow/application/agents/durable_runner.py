@@ -18,6 +18,7 @@ from agentflow.application.agents.context import (
     mapped_calls,
     parse_tool_arguments,
 )
+from agentflow.application.agents.egress import prepare_egress
 from agentflow.application.agents.projection import project_context
 from agentflow.application.ports.agent_store import (
     ActionArguments,
@@ -30,6 +31,7 @@ from agentflow.application.ports.agent_store import (
     ObservedUsageBlocked,
     StateConflict,
 )
+from agentflow.application.ports.context_egress import ProviderContextEgressPolicy
 from agentflow.application.ports.context_projection import (
     ContextProjectionError,
     ContextProjectionPolicy,
@@ -103,6 +105,7 @@ class DurableAgentConfig(BaseModel):
     evidence_checkpoint: EvidenceCheckpointPolicy = Field(
         default_factory=EvidenceCheckpointPolicy
     )
+    provider_context_egress: ProviderContextEgressPolicy | None = None
     retry_base_seconds: float = Field(
         default=1, gt=0, le=3600, allow_inf_nan=False, strict=True
     )
@@ -294,14 +297,19 @@ class DurableAgentRunner:
         try:
             if code := config.evidence_checkpoint.reservation_error:
                 raise ContextProjectionError(code)
+            checkpoint = build_checkpoint(
+                state, config.evidence_checkpoint, step_spec=task.spec
+            )
+            egress = prepare_egress(
+                context, state, config.provider_context_egress, checkpoint
+            )
             projected = project_context(
                 context,
                 schemas,
                 config.context_projection,
                 config.max_context_bytes,
-                checkpoint=build_checkpoint(
-                    state, config.evidence_checkpoint, step_spec=task.spec
-                ),
+                checkpoint=checkpoint,
+                egress=egress,
             )
             if retry and (
                 not state.model_attempts

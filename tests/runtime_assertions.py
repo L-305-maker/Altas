@@ -58,6 +58,8 @@ class RuntimeInvariants:
                 actions = {a.action.id: a for a in state.actions}
                 for attempt in state.model_attempts:
                     projection = attempt.context_projection
+                    if projection is not None and attempt.request_contract is not None:
+                        attempt.request_contract.verify_projection(projection)
                     if projection is None or projection.checkpoint is None:
                         continue
                     for reference in projection.checkpoint.references:

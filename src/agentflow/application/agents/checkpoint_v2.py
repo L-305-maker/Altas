@@ -9,6 +9,10 @@ from agentflow.application.agents.checkpoint import (
     _json,
 )
 from agentflow.application.agents.context import AgentContextBuilder
+from agentflow.application.agents.disclosure import (
+    bound_disclosure,
+    historical_binding_digest,
+)
 from agentflow.application.ports.agent_store import StateConflict
 from agentflow.application.ports.context_projection import ContextProjectionError
 from agentflow.application.ports.evidence_checkpoint import (
@@ -45,32 +49,19 @@ def collect_evidence(state, policy, *, step_spec=None):
 
     def item(source, sequence, path, value, *, stored=None, key=None, limit=None):
         mode, classification, matched_binding = "metadata_only", "unknown", None
-        binding = stored.tool_binding if stored is not None else None
         actual_binding = (
-            digest_arguments(binding.model_dump(mode="json"))
-            if binding is not None and binding.matches(stored.action)
-            else None
+            historical_binding_digest(stored) if stored is not None else None
         )
         if key is not None:
             mode, classification = "approved_excerpt", "public"
         elif stored is not None and path[0] == "result":
             rule = rules.get((stored.action.tool_name, path[1:]))
             if version == 3:
-                rule = next(
-                    (
-                        r
-                        for r in disclosure.rules
-                        if actual_binding is not None
-                        and r.binding == binding
-                        and r.tool_name == stored.action.tool_name
-                        and r.result_path == path[1:]
-                    ),
-                    None,
-                )
-            if rule is not None:
+                decision = bound_disclosure(stored, path[1:], disclosure.rules)
+                mode, classification = decision.mode, decision.classification
+                matched_binding = decision.matched_tool_binding_digest
+            elif rule is not None:
                 mode, classification = rule.mode, rule.classification
-                if version == 3:
-                    matched_binding = actual_binding
             if stored.action.status == "denied":
                 mode = "metadata_only"
         text = value if isinstance(value, str) else _json(value)

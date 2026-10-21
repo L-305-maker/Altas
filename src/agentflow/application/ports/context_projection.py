@@ -11,6 +11,7 @@ from pydantic import (
     model_validator,
 )
 
+from agentflow.application.ports.context_egress import ProviderContextEgressManifest
 from agentflow.application.ports.evidence_checkpoint import EvidenceCheckpointManifest
 
 Positive = Annotated[int, Field(ge=1, strict=True)]
@@ -40,12 +41,15 @@ class ContextProjectionManifest(BaseModel):
     omitted_round_count: Count
     tool_schema_digest: Digest
     checkpoint: EvidenceCheckpointManifest | None = None
+    egress: ProviderContextEgressManifest | None = None
 
     @model_serializer(mode="wrap")
     def legacy_shape(self, handler):
         data = handler(self)
         if self.checkpoint is None:
             data.pop("checkpoint", None)
+        if self.egress is None:
+            data.pop("egress", None)
         return data
 
     @model_validator(mode="after")
