@@ -229,8 +229,9 @@ class Workload:
                         parameters={
                             "agent": {
                                 "context_projection": {
-                                    "mode": "recent_complete_rounds"
+                                    "mode": "evidence_anchored_recent_rounds"
                                 },
+                                "evidence_checkpoint": {"mode": "anchored_extracts"},
                                 "retry_base_seconds": retry_seconds,
                                 "retry_max_seconds": retry_seconds,
                                 **(

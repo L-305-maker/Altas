@@ -45,8 +45,13 @@ ContextBuilder 检查所有历史 Action 与 assistant 消息的模型调用、�
 5. 必须保留的 system/user、Schema 或最小完整后缀无法放入时，提交 EXHAUSTED / AgentContextLimit。
    不截断任何字段，不请求摘要，不在模型上下文中推断或解释被省略的工具结果。
 
-不插入摘要或省略标记。投影不是 LLM Summary、长期 Memory 或 RAG，无法恢复被省略内容的语义。
+full/recent_complete_rounds 不插入摘要或省略标记。投影不是 LLM Summary、长期 Memory 或 RAG，无法恢复被省略内容的语义。
 模型可能因为缺少早期上下文而改变决策，因此 recent_complete_rounds 必须显式选择，默认仍为 full。
+
+可选 `evidence_anchored_recent_rounds` 与 `evidence_checkpoint.mode=anchored_extracts` 配合，
+在 user 角色保留有来源的确定性摘录，再选择完整最近后缀。详见 [Evidence Checkpoint](evidence-checkpoint.md)。
+完整历史仍先验证；checkpoint 超限不临时删减选定证据。Manifest 的可选 checkpoint 在旧模式序列化时省略，
+不改变历史 JSON 或请求身份；不新增迁移。它只能保留有限原文，不能恢复被省略历史的全部语义。
 
 ## 身份与可重现性
 

@@ -11,6 +11,7 @@ from agentflow.application.ports.agent_store import (
     AgentTransition,
     LostLease,
 )
+from agentflow.domain.agent.action import digest_arguments
 from agentflow.domain.agent.run import AgentSnapshot
 from agentflow.domain.workflow.spec import WorkflowSpec
 from agentflow.infrastructure.persistence.agent_store import SQLAgentStore
@@ -54,6 +55,29 @@ class RuntimeInvariants:
                 if row is None:
                     continue
                 state = SQLAgentStore(store)._read(db, row)
+                actions = {a.action.id: a for a in state.actions}
+                for attempt in state.model_attempts:
+                    projection = attempt.context_projection
+                    if projection is None or projection.checkpoint is None:
+                        continue
+                    for reference in projection.checkpoint.references:
+                        message = state.messages[reference.source_sequence]
+                        if reference.source_type == "action":
+                            source = actions[reference.action_id]
+                            assert source.action.status.is_terminal
+                            assert (
+                                source.action.model_call_id
+                                == reference.model_call_id
+                                == message.model_call_id
+                            )
+                            assert reference.action_id in message.payload["action_ids"]
+                        else:
+                            source = message
+                            assert message.role == "user"
+                        assert (
+                            digest_arguments(source.model_dump(mode="json"))
+                            == reference.source_digest
+                        )
                 if state.observed_usage is not None:
                     assert state.observed_usage.summary.attempts == len(
                         state.model_attempts

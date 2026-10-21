@@ -106,6 +106,10 @@ def drill(cluster):
             a["context_projection"] is not None for a in facts["agent_model_attempts"]
         )
         assert all(
+            a["context_projection"]["checkpoint"]["references"]
+            for a in facts["agent_model_attempts"]
+        )
+        assert all(
             a["request_contract"] is not None for a in facts["agent_model_attempts"]
         )
         assert facts["provider_admissions"] and facts["provider_permits"]

@@ -10,6 +10,7 @@ from pydantic import JsonValue, ValidationError
 from sqlalchemy import select, update
 from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 
+from agentflow.application.agents.checkpoint import build_checkpoint
 from agentflow.application.agents.context import AgentContextBuilder, UnresolvedActions
 from agentflow.application.agents.projection import project_context
 from agentflow.application.ports.agent_store import (
@@ -32,6 +33,7 @@ from agentflow.application.ports.context_projection import (
     ContextProjectionManifest,
     ContextProjectionPolicy,
 )
+from agentflow.application.ports.evidence_checkpoint import EvidenceCheckpointPolicy
 from agentflow.application.ports.model_request import (
     ModelRequestContract,
     ModelRequestError,
@@ -264,7 +266,7 @@ class SQLAgentStore:
                     created_at=a.created_at,
                     confirmed_at=a.confirmed_at,
                     context_projection=ContextProjectionManifest.model_validate(
-                        checked_json(a.context_projection, 4096)
+                        checked_json(a.context_projection, 64_000)
                     )
                     if a.context_projection is not None
                     else None,
@@ -928,6 +930,7 @@ class SQLAgentStore:
         if request is None:
             if (
                 "context_projection" in config
+                or "evidence_checkpoint" in config
                 or previous is not None
                 or contract is not None
             ):
@@ -938,6 +941,9 @@ class SQLAgentStore:
                 raise ModelRequestError("ModelRequestContractUnavailable")
             return
         try:
+            evidence_policy = EvidenceCheckpointPolicy.model_validate(
+                config.get("evidence_checkpoint", {})
+            )
             full = AgentContextBuilder().build(state)
             projected = project_context(
                 full,
@@ -946,6 +952,7 @@ class SQLAgentStore:
                     config.get("context_projection", {})
                 ),
                 config.get("max_context_bytes", 1_000_000),
+                checkpoint=build_checkpoint(state, evidence_policy),
             )
             expected = projected.manifest
         except (ValidationError, UnresolvedActions):

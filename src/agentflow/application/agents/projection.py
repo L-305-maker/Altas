@@ -3,6 +3,7 @@
 import hashlib
 import json
 from dataclasses import dataclass
+from typing import TYPE_CHECKING
 
 from pydantic import ValidationError
 
@@ -13,6 +14,9 @@ from agentflow.application.ports.context_projection import (
     ContextProjectionPolicy,
 )
 from agentflow.application.ports.model_provider import AssistantMessage
+
+if TYPE_CHECKING:
+    from agentflow.application.agents.checkpoint import EvidenceCheckpoint
 
 
 def digest_context(value) -> str:
@@ -69,6 +73,8 @@ def project_context(
     tools: list[dict],
     policy: ContextProjectionPolicy,
     max_context_bytes: int,
+    *,
+    checkpoint: "EvidenceCheckpoint | None" = None,
 ) -> ProjectedContext:
     """Drop the fewest oldest complete rounds that make the request fit.
 
@@ -76,17 +82,35 @@ def project_context(
     This additional protocol check also runs on the selected provider view.
     """
     try:
+        if (policy.mode == "evidence_anchored_recent_rounds") != (
+            checkpoint is not None
+        ):
+            raise ValueError
         rounds = _rounds(full)
         payload = {"messages": full, **({"tools": tools} if tools else {})}
         full_digest, schema_digest = digest_context(payload), digest_context(tools)
         removable = (
-            max(0, len(rounds) - policy.min_recent_rounds)
-            if policy.mode == "recent_complete_rounds"
+            max(
+                0,
+                len(rounds)
+                - max(
+                    policy.min_recent_rounds,
+                    checkpoint.min_recent_rounds if checkpoint else 1,
+                ),
+            )
+            if policy.mode != "full"
             else 0
         )
         for omitted in range(removable + 1):
             removed = {i for start, end in rounds[:omitted] for i in range(start, end)}
             selected = [message for i, message in enumerate(full) if i not in removed]
+            if checkpoint is not None:
+                # User-role data before the first retained assistant/tool span.
+                insertion = next(
+                    (i for i, m in enumerate(selected) if m["role"] == "assistant"),
+                    len(selected),
+                )
+                selected.insert(insertion, checkpoint.message)
             size = context_bytes(selected, tools)
             if size > max_context_bytes:
                 continue
@@ -96,7 +120,10 @@ def project_context(
                 ContextProjectionManifest(
                     projection_version=policy.projection_version,
                     selection_policy=policy.mode,
-                    min_recent_rounds=policy.min_recent_rounds,
+                    min_recent_rounds=max(
+                        policy.min_recent_rounds,
+                        checkpoint.min_recent_rounds if checkpoint else 1,
+                    ),
                     max_context_bytes=max_context_bytes,
                     full_context_digest=full_digest,
                     projected_context_digest=digest_context(
@@ -106,6 +133,7 @@ def project_context(
                     included_round_count=len(rounds) - omitted,
                     omitted_round_count=omitted,
                     tool_schema_digest=schema_digest,
+                    checkpoint=checkpoint.manifest if checkpoint else None,
                 ),
             )
     except (

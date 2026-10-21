@@ -2,12 +2,21 @@
 
 from typing import Annotated, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, JsonValue, model_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    JsonValue,
+    model_serializer,
+    model_validator,
+)
+
+from agentflow.application.ports.evidence_checkpoint import EvidenceCheckpointManifest
 
 Positive = Annotated[int, Field(ge=1, strict=True)]
 Count = Annotated[int, Field(ge=0, strict=True)]
 Digest = Annotated[str, Field(pattern=r"^[0-9a-f]{64}$")]
-Selection = Literal["full", "recent_complete_rounds"]
+Selection = Literal["full", "recent_complete_rounds", "evidence_anchored_recent_rounds"]
 
 
 class ContextProjectionPolicy(BaseModel):
@@ -30,9 +39,21 @@ class ContextProjectionManifest(BaseModel):
     included_round_count: Count
     omitted_round_count: Count
     tool_schema_digest: Digest
+    checkpoint: EvidenceCheckpointManifest | None = None
+
+    @model_serializer(mode="wrap")
+    def legacy_shape(self, handler):
+        data = handler(self)
+        if self.checkpoint is None:
+            data.pop("checkpoint", None)
+        return data
 
     @model_validator(mode="after")
     def consistent_window(self):
+        if (self.selection_policy == "evidence_anchored_recent_rounds") != (
+            self.checkpoint is not None
+        ):
+            raise ValueError("checkpoint and selection policy must agree")
         if self.projected_context_bytes > self.max_context_bytes:
             raise ValueError("projected context exceeds its limit")
         if self.omitted_round_count and (

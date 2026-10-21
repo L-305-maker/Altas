@@ -109,11 +109,24 @@ def database(request, tmp_path):
         "retry_scheduled",
         "before_model_reservation",
         "tool_reservation",
+        "checkpoint_retry_scheduled",
+        "checkpoint_model_reservation",
+        "checkpoint_tool_result",
     ],
 )
 def test_real_process_crash_and_new_worker(
     database, tmp_path, stage, runtime_invariants
 ):
+    evidence = stage.startswith("checkpoint_")
+    stage = stage.removeprefix("checkpoint_")
+    config = {"retry_base_seconds": 60} if stage == "retry_scheduled" else {}
+    if evidence:
+        config.update(
+            {
+                "context_projection": {"mode": "evidence_anchored_recent_rounds"},
+                "evidence_checkpoint": {"mode": "anchored_extracts"},
+            }
+        )
     store = Store(database)
     run = store.submit(
         store.register(
@@ -125,9 +138,7 @@ def test_real_process_crash_and_new_worker(
                         handler="agent",
                         retry_delay=0,
                         max_attempts=1 if stage == "retry_scheduled" else 3,
-                        parameters={"agent": {"retry_base_seconds": 60}}
-                        if stage == "retry_scheduled"
-                        else {},
+                        parameters={"agent": config},
                     ),
                 ),
             )
@@ -163,6 +174,10 @@ def test_real_process_crash_and_new_worker(
             assert len(checkpoint.agent.model_attempts) == 1
             assert checkpoint.agent.model_attempts[0].context_projection is not None
             assert checkpoint.agent.model_attempts[0].request_contract is not None
+            assert (
+                checkpoint.agent.model_attempts[0].context_projection.checkpoint
+                is not None
+            ) == evidence
             assert checkpoint.agent.model_attempts[0].outcome == (
                 "inflight"
                 if stage == "model_reservation"
@@ -254,6 +269,11 @@ def test_real_process_crash_and_new_worker(
             else 1
         )
         restored = runtime_invariants(store, run)["work"].agent
+        if evidence:
+            assert (
+                restored.model_attempts[0].context_projection
+                == checkpoint.agent.model_attempts[0].context_projection
+            )
         if stage == "model_reservation":
             assert restored.model_attempts[0].outcome == "unknown"
             assert restored.model_attempts[0].raw_usage is None
@@ -265,5 +285,10 @@ def test_real_process_crash_and_new_worker(
             assert [a.attempt_index for a in restored.model_attempts] == [1, 2]
             assert len({a.model_call_id for a in restored.model_attempts}) == 1
             assert restored.model_attempts[0] == checkpoint.agent.model_attempts[0]
+            if evidence:
+                assert (
+                    restored.model_attempts[1].context_projection
+                    == restored.model_attempts[0].context_projection
+                )
     finally:
         store.close()

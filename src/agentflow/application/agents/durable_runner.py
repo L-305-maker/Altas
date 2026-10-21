@@ -12,6 +12,7 @@ from uuid import uuid4
 from jsonschema import ValidationError as SchemaError
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
 
+from agentflow.application.agents.checkpoint import build_checkpoint
 from agentflow.application.agents.context import (
     AgentContextBuilder,
     mapped_calls,
@@ -34,6 +35,7 @@ from agentflow.application.ports.context_projection import (
     ContextProjectionPolicy,
     ContextProjectionReservation,
 )
+from agentflow.application.ports.evidence_checkpoint import EvidenceCheckpointPolicy
 from agentflow.application.ports.handler_result import CommittedAgentResult
 from agentflow.application.ports.model_provider import (
     ModelConfigurationError,
@@ -98,6 +100,9 @@ class DurableAgentConfig(BaseModel):
     context_projection: ContextProjectionPolicy = Field(
         default_factory=ContextProjectionPolicy
     )
+    evidence_checkpoint: EvidenceCheckpointPolicy = Field(
+        default_factory=EvidenceCheckpointPolicy
+    )
     retry_base_seconds: float = Field(
         default=1, gt=0, le=3600, allow_inf_nan=False, strict=True
     )
@@ -107,6 +112,10 @@ class DurableAgentConfig(BaseModel):
 
     @model_validator(mode="after")
     def ordered_retry_limits(self) -> Self:
+        if (self.context_projection.mode == "evidence_anchored_recent_rounds") != (
+            self.evidence_checkpoint.mode == "anchored_extracts"
+        ):
+            raise ValueError("checkpoint requires explicit evidence projection mode")
         if self.retry_base_seconds > self.retry_max_seconds:
             raise ValueError("retry base must not exceed retry maximum")
         return self
@@ -284,7 +293,11 @@ class DurableAgentRunner:
             return state, await self._fail(task, state, "ToolConfigurationError")
         try:
             projected = project_context(
-                context, schemas, config.context_projection, config.max_context_bytes
+                context,
+                schemas,
+                config.context_projection,
+                config.max_context_bytes,
+                checkpoint=build_checkpoint(state, config.evidence_checkpoint),
             )
             if retry and (
                 not state.model_attempts
@@ -293,7 +306,11 @@ class DurableAgentRunner:
                 raise ContextProjectionError("AgentContextProjectionChanged")
         except ContextProjectionError as error:
             return state, await self._fail(
-                task, state, error.code, exhausted=error.code == "AgentContextLimit"
+                task,
+                state,
+                error.code,
+                exhausted=error.code
+                in {"AgentContextLimit", "AgentEvidenceCheckpointLimit"},
             )
         context = projected.messages
         try:
@@ -354,6 +371,7 @@ class DurableAgentRunner:
         restored = await asyncio.to_thread(self.store.load, task)
         if (
             restored.snapshot != state.snapshot
+            or restored.model_attempts[-1].context_projection != projected.manifest
             or restored.model_attempts[-1].request_contract != prepared.request.contract
         ):
             raise StateConflict("model dispatch differs from the reserved request")

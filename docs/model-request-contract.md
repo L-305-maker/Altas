@@ -3,6 +3,12 @@
 本功能固定一次模型尝试的应用请求身份，不证明供应商的模型权重、实际账单或网络副作用 exactly-once。
 完整历史、Context Projection、调用预算、Observed Usage、Provider Admission、CAS/fencing 和取消规则均保留。
 
+[Evidence Checkpoint](evidence-checkpoint.md) 显式模式在 ProjectionManifest 的可选 checkpoint 保存来源引用与身份。
+RequestContract 的 context_projection_digest 仍保护实际发送的全部消息（包括 user 角色证据摘录）及 Schema。
+Store 在 Permit 前从原始历史重建来源、摘录、Manifest 和请求视图；重试要求整个 Manifest/Contract 相同。
+未启用时省略新增 JSON 键，历史契约及摘要不变；无新迁移，不回填旧证据或改写 Usage/Permit。
+摘要证明一致性，不认证来源内容的现实真实性，也不能授予工具权限。
+
 ## 可信配置和不可变派发
 
 配置只来自部署 Settings / 适配器构造参数。Workflow 普通 inputs、Prompt、工具结果和模型输出不能更换配置。
