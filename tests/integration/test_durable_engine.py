@@ -4,7 +4,7 @@ import asyncio
 from concurrent.futures import ThreadPoolExecutor
 
 import pytest
-from sqlalchemy import update
+from sqlalchemy import select, update
 
 from agentflow.application.orchestration.worker import HandlerRegistry, Worker
 from agentflow.domain.workflow.spec import StepSpec, WorkflowSpec
@@ -139,14 +139,37 @@ async def test_worker_timeout_and_checkpoint(store):
 
 
 @pytest.mark.asyncio
-async def test_worker_heartbeats_during_execution(store):
+async def test_worker_heartbeats_during_execution(store, monkeypatch):
     registry = HandlerRegistry()
+    loop = asyncio.get_running_loop()
+    renewed = asyncio.Event()
+    clock, leases, renewal_times = [10_000.0], [], []
+    # Scheduling latency is not the lease contract. Move the test DB clock
+    # across the original deadline while observing three real persisted renewals.
+    monkeypatch.setattr(store, "_now", lambda _: clock[0])
+    heartbeat = store.heartbeat
+
+    def observe_renewal(task, lease_seconds):
+        clock[0] += lease_seconds * 2 / 3
+        result = heartbeat(task, lease_seconds)
+        if result:
+            renewal_times.append(clock[0])
+            with store.transaction() as db:
+                leases.append(db.scalar(select(StepRow.lease_until)))
+            if len(leases) >= 3:
+                loop.call_soon_threadsafe(renewed.set)
+        return result
+
+    monkeypatch.setattr(store, "heartbeat", observe_renewal)
 
     async def slow(task):
-        await asyncio.sleep(0.2)
+        await renewed.wait()
         return task.inputs
 
     registry.register("slow", slow)
     run_id = submit(store, StepSpec(id="a", handler="slow"))
-    assert await Worker(store, registry, lease_seconds=0.12).tick()
+    assert await asyncio.wait_for(Worker(store, registry, lease_seconds=0.12).tick(), 5)
+    assert len(leases) >= 3 and renewal_times[-1] > 10_000.12
+    assert leases == sorted(set(leases))
+    assert leases[-1] == pytest.approx(renewal_times[-1] + 0.12)
     assert store.get_run(run_id)["status"] == "succeeded"

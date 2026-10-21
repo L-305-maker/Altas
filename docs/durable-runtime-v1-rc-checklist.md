@@ -12,7 +12,7 @@
 | 来源与不可信数据 | PASS | 完整历史先验证；伪造来源/序号/摘录摘要即便重算引用摘要仍拒绝；仅首次 user goal；固定 StepSpec id/handler 来源受锁定定义核对；多工具、终态及对账结果准确配对 |
 | 窗口与治理 | PASS | UTF-8/JSON 转义及 Schema 精确计量；完整回放超过 8500 字节时摘录+完整最近后缀仍可执行；证据或总量超限无 Attempt/Permit；Token/Usage/Admission 门控保留 |
 | 请求及恢复身份 | PASS | 同逻辑失败重试 Manifest/Contract 不变；Schema 热更新拒绝；确认丢失不发 HTTP；真实子进程在预约、结果及延期重试边界退出后恢复 |
-| 完整本地回归 | PASS | `uv run pytest -q`：866 passed、346 skipped，193.13 秒；1 项已有 TestClient 弃用警告 |
+| 完整本地回归 | PASS | `uv run pytest -q`：866 passed、346 skipped，141.68 秒；1 项已有 TestClient 弃用警告 |
 | Ruff | PASS | `uv run ruff check src tests scripts migrations evals`；`uv run ruff format --check src tests scripts migrations evals`，154 files already formatted |
 | PostgreSQL 最终发布专项 | PASS | `verify_postgres.py --bin D:/PSQL/bin --release-gates`：668 passed、零跳过，328.00 秒；独立事务/CAS/旧 token、真实进程崩溃、取消/审批/对账及既有迁移回归 |
 | 三独立 Worker Soak | PASS | `verify_durable_soak.py --bin D:/PSQL/bin --seconds 30 --workload 6 --seed 7`；最终复验 37.72 秒、23 Run、13 派发、41 领取；共享断言逐条核对 checkpoint 来源 |
@@ -28,6 +28,13 @@ PG 由独立临时实例补齐，普通 CI 没有启用真实付费 Provider。
 该边界允许独立 peer 尚未完成并合法改变 Run 状态；现在先等待其持久成功再捕获停机快照，
 仍严格比较全部字段，失败仅输出变化字段名。复验通过，没有放宽 CAS、租约、审批或超时。
 新增可选来源不选择时的序列化和既有 v1 Manifest 摘要也由固定回归保护。
+
+第二次 main CI（run 39588032129）在 Python 3.13 的既有
+`test_worker_heartbeats_during_execution` 失败：120ms 租约、固定 200ms 睡眠后 Run 仍为 running。
+该测试把共享 CI 的墙钟调度延迟当作续租保证；现在使用受控数据库时间并观察三次真实 Store 续租，
+要求逻辑时间跨过原始租约期限后仍能完成，外层有 5 秒超时。没有延长租约、跳过测试或修改生产 Worker/Store。
+修正后该用例独立重复 5/5 通过，相关回归 78 passed / 70 skipped，完整回归结果如上。
+最终提交的实际 GitHub CI 状态以交付链接为准，不以前一提交的绿色结果代替。
 
 Manifest 只证明数据一致性，不认证现实事实；非特权摘录仍可能误导模型且丢失语义。
 checkpoint 字节预算和 max_context_bytes 都不是精确 Token/费用上限，不提供外部 exactly-once 保证。
