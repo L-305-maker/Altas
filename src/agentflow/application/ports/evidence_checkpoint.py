@@ -5,11 +5,12 @@ from typing import Annotated, Literal
 from pydantic import BaseModel, ConfigDict, Field, model_serializer, model_validator
 
 from agentflow.domain.agent.action import Identifier, digest_arguments
+from agentflow.domain.agent.review import ToolBinding
 
 Digest = Annotated[str, Field(pattern=r"^[0-9a-f]{64}$")]
 PathPart = Annotated[str, Field(min_length=1, max_length=80)]
 Path = Annotated[tuple[PathPart, ...], Field(max_length=8)]
-Version = Annotated[int, Field(ge=1, le=2, strict=True)]
+Version = Annotated[int, Field(ge=1, le=3, strict=True)]
 Classification = Literal["public", "sensitive", "unknown"]
 DisclosureMode = Literal["metadata_only", "approved_excerpt"]
 
@@ -20,6 +21,14 @@ class EvidenceDisclosureRule(BaseModel):
     result_path: Annotated[tuple[PathPart, ...], Field(max_length=7)]
     mode: DisclosureMode = "metadata_only"
     classification: Classification = "unknown"
+    binding: ToolBinding | None = None
+
+    @model_serializer(mode="wrap")
+    def historical_rule(self, handler):
+        data = handler(self)
+        if self.binding is None:
+            data.pop("binding", None)
+        return data
 
     @model_validator(mode="after")
     def explicit_public_only(self):
@@ -31,14 +40,26 @@ class EvidenceDisclosureRule(BaseModel):
 class EvidenceDisclosurePolicy(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
     source_type: Literal["action"] = "action"
-    policy_version: Annotated[int, Field(ge=1, le=1, strict=True)] = 1
+    policy_version: Annotated[int, Field(ge=1, le=2, strict=True)] = 1
     # Per-field raw UTF-8 limit; the whole request still has max_context_bytes.
     max_disclosure_bytes: Annotated[int, Field(ge=1, le=4096, strict=True)] = 256
     rules: Annotated[tuple[EvidenceDisclosureRule, ...], Field(max_length=32)] = ()
 
     @model_validator(mode="after")
     def unambiguous_rules(self):
-        identities = [(r.tool_name, r.result_path) for r in self.rules]
+        if self.policy_version == 1:
+            if any(r.binding is not None for r in self.rules):
+                raise ValueError("historical disclosure cannot invent bindings")
+            identities = [(r.tool_name, r.result_path) for r in self.rules]
+        else:
+            if any(
+                r.binding is None or r.binding.tool_name != r.tool_name
+                for r in self.rules
+            ):
+                raise ValueError(
+                    "bound disclosure requires complete matching tool identities"
+                )
+            identities = [(r.binding, r.result_path) for r in self.rules]
         if len(set(identities)) != len(identities):
             raise ValueError("disclosure paths must be unique per tool")
         return self
@@ -48,6 +69,14 @@ class EvidenceDisclosureDecision(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
     mode: DisclosureMode
     classification: Classification
+    matched_tool_binding_digest: Digest | None = None
+
+    @model_serializer(mode="wrap")
+    def historical_decision(self, handler):
+        data = handler(self)
+        if self.matched_tool_binding_digest is None:
+            data.pop("matched_tool_binding_digest", None)
+        return data
 
 
 class PinnedEvidenceReference(BaseModel):
@@ -106,12 +135,30 @@ class EvidenceCheckpointPolicy(BaseModel):
                     "historical v1 cannot acquire new disclosure semantics"
                 )
         elif self.disclosure is None or self.selection_policy != "pinned_then_recent":
-            raise ValueError("v2 requires explicit disclosure and selection policies")
+            raise ValueError(
+                "checkpoint requires explicit disclosure and selection policies"
+            )
+        elif self.disclosure.policy_version != (
+            2 if self.checkpoint_version == 3 else 1
+        ):
+            raise ValueError("checkpoint and disclosure versions differ")
         elif len(set(self.result_paths)) != len(self.result_paths) or len(
             set(self.workflow_identifiers)
         ) != len(self.workflow_identifiers):
             raise ValueError("v2 evidence sources must be unique")
         return self
+
+    @property
+    def reservation_error(self) -> str | None:
+        if self.mode == "disabled":
+            return None
+        if self.checkpoint_version == 1:
+            return "AgentEvidenceV1ReadOnly"
+        if self.checkpoint_version == 2 and any(
+            r.mode == "approved_excerpt" for r in self.disclosure.rules
+        ):
+            return "AgentEvidenceV2PublicReadOnly"
+        return None
 
     @model_serializer(mode="wrap")
     def legacy_policy(self, handler):
@@ -135,16 +182,23 @@ class EvidenceReference(BaseModel):
     excerpt_digest: Digest
     evidence_version: Version = 1
     source_key: Identifier | None = None
+    tool_binding_digest: Digest | None = None
 
     @model_serializer(mode="wrap")
     def legacy_reference(self, handler):
         data = handler(self)
         if self.source_key is None:
             data.pop("source_key", None)
+        if self.tool_binding_digest is None:
+            data.pop("tool_binding_digest", None)
         return data
 
     @model_validator(mode="after")
     def source_identity(self):
+        if self.tool_binding_digest is not None and (
+            self.evidence_version != 3 or self.source_type != "action"
+        ):
+            raise ValueError("historical references cannot invent binding identities")
         if (
             (
                 self.source_type == "action"
@@ -192,7 +246,7 @@ class EvidenceCheckpointManifest(BaseModel):
             ):
                 raise ValueError("v1 must not invent disclosure facts")
         elif self.disclosure_policy_digest is None or self.evidence_selection is None:
-            raise ValueError("v2 requires disclosure and selection identities")
+            raise ValueError("checkpoint requires disclosure and selection identities")
         if any(r.evidence_version != self.checkpoint_version for r in self.references):
             raise ValueError("evidence and manifest versions differ")
         if self.included_evidence_count != len(self.references) or (

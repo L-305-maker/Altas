@@ -944,11 +944,8 @@ class SQLAgentStore:
             evidence_policy = EvidenceCheckpointPolicy.model_validate(
                 config.get("evidence_checkpoint", {})
             )
-            if (
-                evidence_policy.mode != "disabled"
-                and evidence_policy.checkpoint_version == 1
-            ):
-                raise ContextProjectionError("AgentEvidenceV1ReadOnly")
+            if code := evidence_policy.reservation_error:
+                raise ContextProjectionError(code)
             full = AgentContextBuilder().build(state)
             projected = project_context(
                 full,

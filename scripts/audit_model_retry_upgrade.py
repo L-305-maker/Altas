@@ -14,11 +14,13 @@ from sqlalchemy import MetaData, Table, and_, create_engine, func, literal, sele
 from sqlalchemy.exc import SQLAlchemyError
 
 from agentflow.application.ports.context_projection import ContextProjectionManifest
+from agentflow.application.ports.evidence_checkpoint import EvidenceCheckpointPolicy
 from agentflow.application.ports.model_request import (
     ModelRequestContract,
     ModelRequestError,
 )
 from agentflow.domain.agent.run import AgentSnapshot
+from agentflow.domain.workflow.spec import WorkflowSpec
 from agentflow.infrastructure.models.deepseek import model_lifecycle
 
 
@@ -76,6 +78,8 @@ def audit(engine, *, limit=1000, offset=0, timeout_seconds=30):
             rows = db.execute(
                 select(
                     sessions.c.snapshot,
+                    runs.c.spec.label("run_spec"),
+                    steps.c.key.label("step_key"),
                     steps.c.status.label("step_status"),
                     runs.c.status.label("run_status"),
                     calls.c.status.label("call_status"),
@@ -115,19 +119,57 @@ def audit(engine, *, limit=1000, offset=0, timeout_seconds=30):
                     counts["operator_review_sessions"] += 1
                     continue
                 active = row["run_status"] not in {"succeeded", "failed", "cancelled"}
-                v1_checkpoint = False
+                checkpoint = None
                 if row["projection"] is not None:
                     try:
                         checkpoint = ContextProjectionManifest.model_validate(
                             row["projection"]
                         ).checkpoint
-                        v1_checkpoint = (
-                            checkpoint is not None
-                            and checkpoint.checkpoint_version == 1
-                        )
                     except ValueError:
                         pass  # The existing pending-retry checks report invalid identity.
-                counts["v1_checkpoint_sessions"] += int(v1_checkpoint)
+                for version in (1, 2, 3):
+                    counts[f"v{version}_checkpoint_sessions"] += int(
+                        checkpoint is not None
+                        and checkpoint.checkpoint_version == version
+                    )
+                evidence_error, public_policy, evidence_policy = None, False, None
+                try:
+                    spec = next(
+                        s
+                        for s in WorkflowSpec.model_validate(row["run_spec"]).steps
+                        if s.id == row["step_key"]
+                    )
+                    raw = spec.parameters.get("agent", {}).get(
+                        "evidence_checkpoint", {}
+                    )
+                    public_policy = raw.get("mode") == "anchored_extracts" and any(
+                        r.get("mode") == "approved_excerpt"
+                        for r in raw.get("disclosure", {}).get("rules", [])
+                    )
+                    evidence_policy = EvidenceCheckpointPolicy.model_validate(raw)
+                    evidence_error = evidence_policy.reservation_error
+                except (ValueError, TypeError, KeyError, AttributeError, StopIteration):
+                    evidence_error = "AgentEvidencePolicyInvalid"
+                v2_public = (
+                    public_policy
+                    and evidence_policy is not None
+                    and evidence_policy.checkpoint_version == 2
+                )
+                counts["v2_public_excerpt_policy_sessions"] += int(v2_public)
+                active_session = active and not status.is_terminal
+                counts["active_unbound_public_policy_sessions"] += int(
+                    active_session
+                    and public_policy
+                    and (
+                        evidence_policy is None
+                        or evidence_policy.disclosure.policy_version == 1
+                    )
+                )
+                counts["evidence_reservation_blocked_sessions"] += int(
+                    active_session and evidence_error is not None
+                )
+                if active_session and evidence_error:
+                    findings[evidence_error] += 1
                 invalid_contract = False
                 saved_contract = None
                 if row["contract"] is not None:
@@ -153,8 +195,8 @@ def audit(engine, *, limit=1000, offset=0, timeout_seconds=30):
                 counts["terminal_historical_calls"] += (
                     row["call_count"] if status.is_terminal else 0
                 )
-                review = (
-                    active and not status.is_terminal and (unusable or invalid_contract)
+                review = active_session and (
+                    unusable or invalid_contract or evidence_error is not None
                 )
                 if active and not status.is_terminal and unusable:
                     findings[
@@ -187,10 +229,8 @@ def audit(engine, *, limit=1000, offset=0, timeout_seconds=30):
                     or missing_request
                     or unusable
                     or invalid_contract
-                    or v1_checkpoint
+                    or evidence_error is not None
                 )
-                if v1_checkpoint:
-                    findings["AgentEvidenceV1ReadOnly"] += 1
                 if missing_projection:
                     findings["AgentContextProjectionChanged"] += 1
                 if missing_request:
@@ -225,6 +265,11 @@ def audit(engine, *, limit=1000, offset=0, timeout_seconds=30):
                         "terminal_historical_calls",
                         "operator_review_sessions",
                         "v1_checkpoint_sessions",
+                        "v2_checkpoint_sessions",
+                        "v2_public_excerpt_policy_sessions",
+                        "v3_checkpoint_sessions",
+                        "active_unbound_public_policy_sessions",
+                        "evidence_reservation_blocked_sessions",
                     )
                 },
                 "scope": {

@@ -66,7 +66,7 @@ def build_checkpoint(
 ) -> "EvidenceCheckpoint | EvidenceCandidates | None":
     if policy.mode == "disabled":
         return None
-    if policy.checkpoint_version == 2:
+    if policy.checkpoint_version in {2, 3}:
         from agentflow.application.agents.checkpoint_v2 import collect_evidence
 
         return collect_evidence(state, policy, step_spec=step_spec)

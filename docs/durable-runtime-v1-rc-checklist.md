@@ -1,6 +1,44 @@
 # Durable Runtime v1：Release Candidate 验收
 
-## Evidence Checkpoint v2 信任边界修复（2026-10-21）
+## Evidence Disclosure v3 — ToolBinding 授权（2026-10-21）
+
+审核基线 `918ae9215b299fa4dd936e9c96e01bf1141b8be1`，仅 main；无新表/迁移，0001–0008 不变。
+契约与出处/角色矩阵见 [Evidence Checkpoint](evidence-checkpoint.md)，升级步骤见
+[恢复手册](production-recovery-runbook.md)。公开授权、模型转述和 Action 执行权限分别核对。
+
+| 检查 | 状态 | 本轮实际证据 |
+| --- | --- | --- |
+| 条件性 P1 失败复现 | PASS | 基线真实 Runner/Store 生成 read v1/v2 两次合法行动，工具名/路径相同但绑定不同；旧 v2 公开规则使重试 MockProvider 收到敏感合成结果，失败码 ToolVersionDisclosureNotAuthorized |
+| 完整历史绑定与 Provider 消息 | PASS | 完整 ToolBinding 相等且 matches(action)，路径/public/mode/终态均核对；缺绑定、版本/摘要/Schema/description/timeout/副作用/审批漂移不披露原文；真实 Worker 多轮/审批/对账、元数据与 tool 角色配对通过 |
+| v1/v2 原历史与 v3 身份 | PASS | v1 8219b93 夹具保留；v2 在修改生产代码前由 918ae92 捕获五类会话/九个 Attempt，旧 Manifest/Contract 逐字节身份可重建；v2 metadata 重试原身份继续，公开规则新预约拒绝，无补造绑定或升级 |
+| 只读升级核查 | PASS | 按末次 Manifest 计三种版本，按持久 StepSpec 计公开策略/活跃未绑定/待重试阻断/人工处置；零尝试也核查，终态不重启，不输出正文、凭据、Action ID 或原契约 |
+| 完整 pytest | PASS | `uv run pytest -q`：926 passed、371 skipped，136.29 秒；1 项已有 TestClient 弃用警告，跳过不计通过 |
+| Ruff | PASS | check 与 format --check 完整通过，159 files already formatted |
+| PostgreSQL 发布专项 | PASS | `verify_postgres.py --bin D:/PSQL/bin --release-gates`：717 passed、零跳过，314.51 秒；包含独立事务/CAS/fencing、迁移、真实崩溃、取消和审批/对账等原回归 |
+| 最终绑定/兼容性 PostgreSQL 组合 | PASS | 新共享断言核对 v3 引用绑定摘要；单独临时 PG 执行绑定、checkpoint、升级核查与单元组合：107 passed、零跳过，29.67 秒 |
+| 三独立 Worker Soak | PASS | `--seconds 30 --workload 6 --seed 7`：38.22 秒、23 Run、13 派发、41 领取；新工作负载使用 v3，未放宽 CAS、审批、UNKNOWN、租约或超时 |
+| v1/v2/v3 逻辑备份恢复 | PASS | 真实 pg_dump/pg_restore，0008、15 表、14 Run（4 个真实旧 v1/v2 合成终态）；源与恢复库全部事实相等，旧身份/绑定/审批/用量保留，已完成工具重派 0，新批准派发 1 |
+| 构建 / Wheel / 架构 / 离线参考应用 | PASS | uv build、仓库外 verify_wheel.py 安装及核心/参考应用验证；架构 3 passed，离线评估 3/3 |
+| 本地 Docker / Compose | NOT VERIFIED | Docker Desktop daemon pipe 不存在；实际远端门禁结果以交付报告中本提交 CI 链接为准 |
+| 真实 Provider / 跨宿主 / 生产长时负载 | NOT VERIFIED | 真实付费请求 0；Mock 消息契约不等于真实模型抗注入或事实正确性验收 |
+
+371 skipped = 368 项专用 PostgreSQL + 2 项本地 Docker + 1 项显式付费测试。
+数据库覆盖另以隔离 PostgreSQL 专项完成，Docker/Compose 以最终交付所指提交的实际 CI 为准。
+
+v3 使用 checkpoint_version=3 / disclosure.policy_version=2，规则包含完整 binding；
+来源实际 binding 摘要和匹配决定参与 Manifest/RequestContract，8 MB 配额和清理控制空间保留。
+v1 新预约仍 AgentEvidenceV1ReadOnly；v2 公共规则新预约 AgentEvidenceV2PublicReadOnly，
+不得更改旧 RunSpec/Binding 或把旧公开权限自动转成 v3。metadata_only 的 v2 没有原文输出分支，可原身份恢复。
+
+本轮未发现其他可复现 P0/P1；已复现的按名称继承公开授权路径已阻断。
+剩余边界：绑定不是实现签名，部署者必须在行为或敏感性改变时更新工具版本；public 不是 PII/Secret 检测；
+摘录可能丢失语义，公开文本仍可误导模型。部署须停止旧 Writer 并统一升级，不能混用仍会公开旧结果的二进制。
+以上代码门禁不等于生产环境放行。LLM-assisted Summary 仍需单独披露/执行授权、来源/不确定性、派生版本、
+用量账本及非特权承载设计，本轮未实现或调用。
+
+## 历史 Evidence Checkpoint v2 信任边界修复（2026-10-21）
+
+以下为原验收记录；v2 广义公开规则当前只读，新的预约限制及 ToolBinding 核查以上节为准。
 
 审核基线 `8219b9364ca2453dc27c733462d76e2e9c11012b`，仅 main，未新增迁移或修改 0001–0008。
 信任角色矩阵、显式披露配置、固定来源和有限窗口算法见 [Evidence Checkpoint](evidence-checkpoint.md)。

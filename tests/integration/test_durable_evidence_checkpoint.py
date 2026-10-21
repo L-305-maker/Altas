@@ -40,17 +40,26 @@ from agentflow.infrastructure.models.mock import MockProvider
 from agentflow.infrastructure.persistence.agent_store import SQLAgentStore
 from agentflow.infrastructure.persistence.store import Store
 
+
+async def config_only_tool(_):
+    pytest.fail("configuration cannot dispatch tools")
+
+
 CONFIG = {
     "context_projection": {"mode": "evidence_anchored_recent_rounds"},
     "evidence_checkpoint": {
         "mode": "anchored_extracts",
-        "checkpoint_version": 2,
+        "checkpoint_version": 3,
         "selection_policy": "pinned_then_recent",
         "disclosure": {
+            "policy_version": 2,
             "max_disclosure_bytes": 4096,
             "rules": [
                 {
                     "tool_name": "echo",
+                    "binding": tools(config_only_tool)
+                    .binding("echo")
+                    .model_dump(mode="json"),
                     "result_path": ["value"],
                     "mode": "approved_excerpt",
                     "classification": "public",
@@ -296,7 +305,6 @@ async def test_reconciliation_checkpoint_uses_final_action_and_keeps_unknown_aud
     store, runtime_invariants
 ):
     agents = SQLAgentStore(store)
-    run = submit(store, **CONFIG)
     invocations = []
 
     async def invoke(args):
@@ -304,6 +312,22 @@ async def test_reconciliation_checkpoint_uses_final_action_and_keeps_unknown_aud
         raise TimeoutError
 
     runtime = tools(invoke, requires_approval=True)
+    config = {
+        **CONFIG,
+        "evidence_checkpoint": {
+            **CONFIG["evidence_checkpoint"],
+            "disclosure": {
+                **CONFIG["evidence_checkpoint"]["disclosure"],
+                "rules": [
+                    {
+                        **CONFIG["evidence_checkpoint"]["disclosure"]["rules"][0],
+                        "binding": runtime.binding("echo").model_dump(mode="json"),
+                    }
+                ],
+            },
+        },
+    }
+    run = submit(store, **config)
     provider = MockProvider([proposal(), final()])
     executor = worker(store, provider, agents=agents, runtime=runtime)
     assert await executor.tick()
@@ -337,7 +361,7 @@ async def test_reconciliation_checkpoint_uses_final_action_and_keeps_unknown_aud
     assert state.snapshot.status == "succeeded" and len(invocations) == 1
     assert len([m for m in state.messages if m.role == "tool"]) == 2
     built = build_checkpoint(
-        state, EvidenceCheckpointPolicy(**CONFIG["evidence_checkpoint"])
+        state, EvidenceCheckpointPolicy(**config["evidence_checkpoint"])
     )
     assert (
         built.items[-1].status == "succeeded" and built.items[-1].excerpt == "confirmed"

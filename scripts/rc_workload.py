@@ -233,9 +233,9 @@ class Workload:
                                 },
                                 "evidence_checkpoint": {
                                     "mode": "anchored_extracts",
-                                    "checkpoint_version": 2,
+                                    "checkpoint_version": 3,
                                     "selection_policy": "pinned_then_recent",
-                                    "disclosure": {},
+                                    "disclosure": {"policy_version": 2},
                                     "workflow_identifiers": ["id", "handler"],
                                 },
                                 "retry_base_seconds": retry_seconds,

@@ -212,12 +212,23 @@ def test_upgrade_audit_reports_v1_pending_retry_without_rewriting_it(
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("phase", ["model", "tool"])
-async def test_v2_cancellation_preserves_identity_and_unknown(store, phase):
+@pytest.mark.parametrize("checkpoint_version", [2, 3])
+async def test_checkpoint_cancellation_preserves_identity_and_unknown(
+    store, phase, checkpoint_version
+):
     import asyncio
 
     from test_agent_cancellation import assert_unknown, launch
 
-    h = await launch(store, phase, agent_config=V2)
+    config = {
+        **V2,
+        "evidence_checkpoint": {
+            **V2["evidence_checkpoint"],
+            "checkpoint_version": checkpoint_version,
+            "disclosure": {"policy_version": 2} if checkpoint_version == 3 else {},
+        },
+    }
+    h = await launch(store, phase, agent_config=config)
     h.job.cancel("stop-v2")
     with pytest.raises(asyncio.CancelledError):
         await asyncio.wait_for(h.job, 2)
@@ -235,7 +246,7 @@ async def test_v2_cancellation_preserves_identity_and_unknown(store, phase):
     with pytest.raises(LostLease):
         SQLAgentStore(store).load(h.task)
     assert all(
-        a.context_projection.checkpoint.checkpoint_version == 2
+        a.context_projection.checkpoint.checkpoint_version == checkpoint_version
         for a in before.model_attempts
     )
 

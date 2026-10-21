@@ -1,8 +1,10 @@
-# Evidence Checkpoint v2：信任边界、披露与确定性选择
+# Evidence Checkpoint v3：ToolBinding 披露授权、信任边界与历史兼容
 
 完整 AgentMessage、Action、Observation、审批、对账和 Usage Ledger 不变；只改变 Provider 视图。
 默认 disabled，原 full / recent_complete_rounds 行为不变。v1 保留只读重建，禁止新预约；
-新启用必须显式选择 v2。没有新增迁移，复用 0007/0008 JSON，不修改 0001–0008。
+v2 的公开摘录也只读，metadata_only 可继续。新的公开授权使用显式 v3。
+没有新增迁移，复用 0007/0008 JSON，不修改 0001–0008。
+披露策略只作用于启用 Evidence 投影的请求；disabled/full 的既有回放没有被改成全局数据防泄露机制。
 
 ## 来源与实际 Provider Role
 
@@ -18,7 +20,7 @@
 | 可信 StepSpec id/handler | 显式选定的 public 数据；有 tool 时随 tool 承载，无工具来源时可放 user 数据索引 | 不复制 parameters 或把工具内容包装成用户意图 |
 | 原始 goal 的派生索引 | 只含摘要/定位、不复制 goal；无 tool 时为 user 索引 | 原 goal 已完整保留，不重复生成用户指令 |
 
-v2 不使用合成 tool_calls、伪造工具或假数据库 Action。若选中了工具来源证据但最近窗口没有真实 tool
+v3 延续 v2 的角色结构，不使用合成 tool_calls、伪造工具或假数据库 Action。若选中了工具来源证据但最近窗口没有真实 tool
 可承载，返回 AgentEvidenceCarrierUnavailable；不会降级为 user。即使工具来源仅剩元数据，也遵守此规则。
 工具视图的披露同样作用于最近保留的原观察，避免从另一条回放路径泄露未授权原文。
 原 assistant 文本及工具参数不作隐式脱敏；它们的现有可信输入/Provider 数据政策仍适用。
@@ -39,11 +41,11 @@ StepSpec 重建并比对 Manifest；传入伪造 Task.spec 也不能改变权限
   "context_projection": {"mode": "evidence_anchored_recent_rounds"},
   "evidence_checkpoint": {
     "mode": "anchored_extracts",
-    "checkpoint_version": 2,
+    "checkpoint_version": 3,
     "selection_policy": "pinned_then_recent",
     "disclosure": {
       "source_type": "action",
-      "policy_version": 1,
+      "policy_version": 2,
       "max_disclosure_bytes": 256,
       "rules": []
     },
@@ -58,10 +60,33 @@ StepSpec 重建并比对 Manifest；传入伪造 Task.spec 也不能改变权限
 }
 ```
 
-所有配置类型 frozen，拒绝额外字段；不传入 AgentBudget。披露规则精确匹配 tool_name / result_path；
+所有配置类型 frozen，拒绝额外字段；不传入 AgentBudget。v3 披露规则精确匹配完整历史 ToolBinding / result_path；
 仅 classification=public 且 mode=approved_excerpt 允许原文。unknown（默认）和 sensitive 只能 metadata_only。
-例如显式公开 echo.value：`{"tool_name":"echo","result_path":["value"],"mode":"approved_excerpt","classification":"public"}`。
-重复路径拒绝；没有通配符、字段名猜测、正则脱敏或 PII 检测。空路径显式选择整个结果，授权者必须检查整个对象。
+公开配置由部署者在注册 Workflow 前明确生成，例如：
+
+```python
+binding = trusted_runtime.binding("read")  # 可信注册定义；不是 Tool Result 或模型建议。
+rule = {
+    "tool_name": binding.tool_name,
+    "binding": binding.model_dump(mode="json"),
+    "result_path": ["value"],
+    "mode": "approved_excerpt",
+    "classification": "public",
+}
+```
+
+binding 必须完整包含 tool_name、tool_version、tool_policy_digest、side_effect、requires_approval，
+且与规则 tool_name 一致。v3 只接受 disclosure.policy_version=2；v2 只接受旧 policy_version=1，
+旧规则不能追加 binding 来假装已经升级。相同完整绑定/路径拒绝重复，不同版本可分别显式授权。
+只有 StoredAction.tool_binding 存在、binding.matches(action)、完整绑定与该规则相等、路径相等，
+才采用该规则。缺失、不匹配或旧 Action 无绑定时仅元数据，不依据当前 Worker 注册表补造历史身份。
+当前注册版本发生变化，不会撤销或扩大已经显式授权的历史版本；新 Action 使用新的持久绑定，必须另获匹配授权。
+
+ToolRuntime 的策略摘要覆盖 name、version、Schema、side_effect、requires_approval、timeout、description。
+它不是代码签名，也不计算 invoke 函数或外部服务的实现摘要：行为/结果敏感性改变时必须诚实更新工具版本。
+public classification 是操作者声明，不是自动 PII/Secret 识别。提取授权、模型转述与工具执行/审批是不同边界；
+公开摘录不能授予或消费 Action Approval。没有通配符、字段名猜测或正则脱敏。
+空路径显式选择整个结果，授权者必须检查整个对象。
 DENIED 即使有 public 规则也仅发送元数据，不把拒绝变成成功事实。FAILED 保留失败状态及安全错误码。
 
 max_disclosure_bytes 是每个字段 UTF-8 原文的上限，最大 4096；checkpoint 摘录另取与 max_excerpt_bytes
@@ -98,7 +123,10 @@ EvidenceReference 保留 source_type/sequence/key、Core Action/model_call_id、
 extraction_path、excerpt_digest、evidence_version。action 来源摘要覆盖整个 StoredAction；workflow 来源绑定完整
 真实 StepSpec；消息绑定原 AgentMessage。摘录摘要覆盖 format/excerpt/truncated。
 Manifest 包含版本、policy/source_history/reference/content digests、字节和 included/omitted 数量及有界引用；
-v2 另有 disclosure_policy_digest 和 evidence_selection=pinned_then_recent。每项内容包含实际 disclosure decision。
+v2/v3 另有 disclosure_policy_digest 和 evidence_selection=pinned_then_recent。每项内容包含实际 disclosure decision。
+v3 Action 引用额外绑定 tool_binding_digest（实际有效历史 ToolBinding 的规范摘要）；缺失/不匹配时为 None 并省略。
+匹配规则时 decision 含 matched_tool_binding_digest，随内容摘要进入请求身份；它不表示 Action 成功或已批准执行。
+未匹配的来源仍有 source_digest，不能伪造原始身份。旧 v1/v2 字段省略规则保持，不回填这些绑定摘要。
 摘要统一是排序键、紧凑、ensure_ascii=False、allow_nan=False JSON UTF-8 SHA-256；不归一化 Unicode。
 原审计 source_history_digest 与规范回放 full_context_digest 区分，projected digest 覆盖实际披露与承载消息。
 RequestContract 绑定完整 ProjectionManifest 和实际 messages/tools；不是只信调用者提交的一个摘要。
@@ -113,19 +141,34 @@ Manifest 计入 8 MB Session 配额，单个 Manifest 限 64000 字节，原取�
 装不下时整个预约回滚；不为了摘要而覆盖历史、不补造用量、不增加独立状态账本或敏感日志。
 摘要是身份，不是加密、脱敏或数据库签名。没有新事件正文、指标 labels 或工具权限。
 
-## v1 只读兼容和运维
+## v1/v2 历史兼容和运维
 
-旧配置省略 checkpoint_version 时仍解释为 v1，不能默认改为 v2。冻结原 legacy_earliest 算法、旧字段省略规则
+旧配置省略 checkpoint_version 时仍解释为 v1，不能默认改为 v3。冻结原 legacy_earliest、v2 算法及字段省略规则
 及历史字节/摘要；旧 Manifest 不补造 disclosure。v1 Context/Request 身份可继续读取和只读验证。
 所有启用 v1 的新模型预约返回 AgentEvidenceV1ReadOnly；FAILED/READY_MODEL 不升级同一逻辑调用。
 已预约 UNKNOWN 不能升级重发，终态不重启；取消、已有工具结果保存及人工对账仍走原规则。
 
+v2 任何 approved_excerpt 规则都会在 Runner 和 Store 新预约前返回 AgentEvidenceV2PublicReadOnly，
+即使当前尚无工具结果、当前工具未变化或调用方提交了伪造 v3 Manifest，也不能获取 Permit、增加预算或发 HTTP。
+v2 只有 metadata_only 规则（含空 rules）可继续：冻结算法在 checkpoint 和全部保留工具观察中都只编码
+状态、定位、摘要和空 excerpt，没有按名称公开结果正文的分支。原 system/user/assistant 历史不做隐式脱敏。
+v2 metadata 重试保持原 v2 Manifest/RequestContract，不自动变为 v3。
+真实 918ae92 夹具覆盖公开成功/重试、metadata 重试、UNKNOWN 及审批等待，九次请求原字节身份可核对。
+当前代码没有重新生成这些旧请求；v1 的 8219b93 夹具仍保留。
+
 部署前停止 Writer、备份并升级全部 Worker，运行只读 audit_model_retry_upgrade.py。
-报告 v1_checkpoint_sessions（最后尝试是 v1 的会话，含终态）及待重试的 AgentEvidenceV1ReadOnly。
-终态历史无需重新运行。活跃 v1 由操作者审查已有外部副作用、审批和 UNKNOWN，允许其安全终止；
-如需新 v2 Run，必须显式配置并重新评估行动授权，不能编辑旧 RunSpec、Manifest、Contract、token 或预算。
-禁止手工把 UNKNOWN 改 FAILED 以重试。混合 v1/v2 的真实 pg_dump/pg_restore 检查两种身份原样保留。
-旧二进制不支持 v2；二进制回滚要先停止 Writer 并处置新会话，不能假定向后 reader 兼容。
+报告 v1/v2/v3_checkpoint_sessions（最后一次尝试的版本，含终态）；
+v2_public_excerpt_policy_sessions 从持久 StepSpec 策略计数，包含终态和零尝试会话。
+active_unbound_public_policy_sessions 仅统计活跃、非 Agent 终态的未绑定公开规则，不将合法历史当作恢复请求。
+evidence_reservation_blocked_sessions 统计活跃证据策略阻断；retry_recovery_blocked 是待重试的阻断数；
+operator_review_sessions 按 Session 去重，包含活跃不安全策略、执行中模型及原有契约/模型升级问题。
+这些是升级处置计数，不等于所有普通审批/对账等待数量；后者仍由 audit_durable_runtime.py 查询。
+无 Binding 的历史 Action 在 v3 只降为元数据，不借当前注册表回填；这本身不会赋予公开权限。
+
+终态历史无需重新运行。活跃 v1/v2 公开会话由操作者审查外部副作用、审批和 UNKNOWN，允许安全终止；
+如需新 v3 Run，须明确审查并授权具体绑定，不能编辑旧 RunSpec、Manifest、Contract、token 或预算。
+禁止手工把 UNKNOWN 改 FAILED 以重试。混合 v1/v2/v3 的 pg_dump/pg_restore 检查三种身份原样保留。
+旧二进制不支持 v3；二进制回滚要先停止 Writer 并处置新会话，不能假定向后 reader 兼容。
 
 ## 限制与下一阶段前置条件
 

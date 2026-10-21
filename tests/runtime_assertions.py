@@ -75,6 +75,14 @@ class RuntimeInvariants:
                                 == message.model_call_id
                             )
                             assert reference.action_id in message.payload["action_ids"]
+                            if reference.evidence_version == 3:
+                                binding = source.tool_binding
+                                assert reference.tool_binding_digest == (
+                                    digest_arguments(binding.model_dump(mode="json"))
+                                    if binding is not None
+                                    and binding.matches(source.action)
+                                    else None
+                                )
                         else:
                             message = state.messages[reference.source_sequence]
                             source = message

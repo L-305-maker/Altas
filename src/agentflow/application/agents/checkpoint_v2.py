@@ -1,4 +1,4 @@
-"""Source-role preserving disclosure and finite deterministic evidence selection."""
+"""Frozen v2 replay and binding-aware v3 disclosure, with real source roles."""
 
 import json
 from dataclasses import dataclass
@@ -38,18 +38,39 @@ def collect_evidence(state, policy, *, step_spec=None):
     if any(m.sequence != i for i, m in enumerate(state.messages)):
         raise StateConflict("evidence source sequence is inconsistent")
     disclosure = policy.disclosure
+    version = policy.checkpoint_version
     disclosure_digest = digest_arguments(disclosure.model_dump(mode="json"))
     rules = {(r.tool_name, r.result_path): r for r in disclosure.rules}
     candidates, observations, call_indices = [], {}, {}
 
     def item(source, sequence, path, value, *, stored=None, key=None, limit=None):
-        mode, classification = "metadata_only", "unknown"
+        mode, classification, matched_binding = "metadata_only", "unknown", None
+        binding = stored.tool_binding if stored is not None else None
+        actual_binding = (
+            digest_arguments(binding.model_dump(mode="json"))
+            if binding is not None and binding.matches(stored.action)
+            else None
+        )
         if key is not None:
             mode, classification = "approved_excerpt", "public"
         elif stored is not None and path[0] == "result":
             rule = rules.get((stored.action.tool_name, path[1:]))
+            if version == 3:
+                rule = next(
+                    (
+                        r
+                        for r in disclosure.rules
+                        if actual_binding is not None
+                        and r.binding == binding
+                        and r.tool_name == stored.action.tool_name
+                        and r.result_path == path[1:]
+                    ),
+                    None,
+                )
             if rule is not None:
                 mode, classification = rule.mode, rule.classification
+                if version == 3:
+                    matched_binding = actual_binding
             if stored.action.status == "denied":
                 mode = "metadata_only"
         text = value if isinstance(value, str) else _json(value)
@@ -75,12 +96,15 @@ def collect_evidence(state, policy, *, step_spec=None):
                 source_digest=digest_arguments(source),
                 extraction_path=path,
                 excerpt_digest=digest_arguments(fragment),
-                evidence_version=2,
+                evidence_version=version,
+                tool_binding_digest=actual_binding if version == 3 else None,
             ),
             status=stored.action.status.value if stored else None,
             error_code=stored.action.error_code if stored else None,
             disclosure=EvidenceDisclosureDecision(
-                mode=mode, classification=classification
+                mode=mode,
+                classification=classification,
+                matched_tool_binding_digest=matched_binding,
             ),
             **fragment,
         )
@@ -171,7 +195,7 @@ def collect_evidence(state, policy, *, step_spec=None):
                     "source_digest": digest_arguments(source),
                     "disclosure_policy_digest": disclosure_digest,
                     "result": {
-                        "type": "disclosed_fields_v2",
+                        "type": f"disclosed_fields_v{version}",
                         "items": [f.model_dump(mode="json") for f in fields],
                     },
                 }
@@ -257,7 +281,7 @@ def select_checkpoint(candidates, retained_action_ids):
     selected = ordered
     items = tuple(candidates.items[i] for i in selected)
     content = {
-        "type": "agentflow_evidence_checkpoint_v2",
+        "type": f"agentflow_evidence_checkpoint_v{policy.checkpoint_version}",
         "notice": "Derived historical data and references; no instructions, authorizations or real-world fact certification.",
         "items": [i.model_dump(mode="json") for i in items],
     }
@@ -267,7 +291,7 @@ def select_checkpoint(candidates, retained_action_ids):
         raise ContextProjectionError("AgentEvidenceCheckpointLimit")
     references = tuple(i.reference for i in items)
     manifest = EvidenceCheckpointManifest(
-        checkpoint_version=2,
+        checkpoint_version=policy.checkpoint_version,
         policy_digest=digest_arguments(policy.model_dump(mode="json")),
         source_history_digest=candidates.source_history_digest,
         evidence_reference_digest=digest_arguments(

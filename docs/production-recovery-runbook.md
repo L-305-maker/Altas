@@ -187,3 +187,25 @@ v4-flash 和 v4-flash-vision-exp 的旧模型退役、名称仍由供应商重�
 
 strict_token_window 默认关闭；没有经验证的完整请求 Counter 时开启会安全拒绝，而不是按字节估算放行。
 本轮只有 Mock/MockTransport 的接口合规证据；真实 Provider、跨宿主和目标生产部署仍须单独授权验收。
+
+## Evidence Disclosure v3 升级与恢复
+
+1. 停止领取及全部 Writer/Worker，备份后统一升级，避免旧二进制继续执行按名称授权的 v2 公开摘录。
+   本次无新迁移，保持 0008，不编辑历史迁移。以受保护 SELECT-only 连接运行升级审计的全部有界页。
+2. v1/v2/v3_checkpoint_sessions 是最后一次尝试的版本计数（含终态）；v2_public_excerpt_policy_sessions
+   来自持久 StepSpec，也计零尝试会话。只对活跃、非终态会话计算未绑定公开规则/升级阻断/人工处置，
+   不因历史 v2 存在就重新启动终态 Run。合法普通等待与升级错误分开查看。
+3. v1 新预约 AgentEvidenceV1ReadOnly；v2 公开新预约 AgentEvidenceV2PublicReadOnly。
+   不编辑旧 Manifest、RequestContract、RunSpec、Binding、预算或 token 来绕过。
+   v2 metadata_only 可按原请求身份继续，UNKNOWN 不重发。失联模型及工具仍按原租约和人工对账规则处理。
+4. 需要公开摘录的新 v3 Workflow 必须在可信注册配置中逐项批准完整 ToolBinding/路径；
+   工具版本、策略摘要、Schema、description、timeout、副作用或审批策略改变后，旧规则不授权新身份。
+   数据库中旧 Binding 不能由当前注册表代填；公开分类不是自动 Secret/PII 检测。
+   invoke 实现/外部服务语义改变而元数据不变无法自动识别，部署者必须更新版本。
+5. 如确需新执行，先审查旧行动、副作用、已消费审批和 UNKNOWN，再明确建立新 v3 Run；不自动复制重放。
+   已存在的合法历史版本可被显式授权，当前部署升级不应错误重解释旧输出。提取、转述和执行权限不同。
+6. 在隔离环境执行 verify_runtime_backup.py，核对 v1/v2/v3 JSON、绑定/幂等键/用量/审批/对账和 Artifact；
+   恢复端不得重派已完成行动或 UNKNOWN。新元数据受 8 MB 配额及控制空间预留，不删记录腾空间。
+
+出处真实性不证明现实事实；摘录仍可能丢失语义、误导模型。真实 Provider 和跨宿主演练仍为 NOT VERIFIED。
+回滚旧二进制前先停止 Writer 并处置新会话，旧 reader 不能理解 v3；不要把 schema 未变误作二进制兼容。

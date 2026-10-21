@@ -126,9 +126,9 @@ def test_real_process_crash_and_new_worker(
                 "context_projection": {"mode": "evidence_anchored_recent_rounds"},
                 "evidence_checkpoint": {
                     "mode": "anchored_extracts",
-                    "checkpoint_version": 2,
+                    "checkpoint_version": 3,
                     "selection_policy": "pinned_then_recent",
-                    "disclosure": {},
+                    "disclosure": {"policy_version": 2},
                 },
             }
         )

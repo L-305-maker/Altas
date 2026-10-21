@@ -292,11 +292,8 @@ class DurableAgentRunner:
         except ToolDeniedError:
             return state, await self._fail(task, state, "ToolConfigurationError")
         try:
-            if (
-                config.evidence_checkpoint.mode != "disabled"
-                and config.evidence_checkpoint.checkpoint_version == 1
-            ):
-                raise ContextProjectionError("AgentEvidenceV1ReadOnly")
+            if code := config.evidence_checkpoint.reservation_error:
+                raise ContextProjectionError(code)
             projected = project_context(
                 context,
                 schemas,

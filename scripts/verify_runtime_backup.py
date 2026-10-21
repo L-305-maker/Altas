@@ -31,10 +31,10 @@ def inventory(store):
         }
 
 
-def restore_historical_checkpoints(store):
-    """Reviewed synthetic v1 terminal facts, not reinterpreted as v2 fixtures."""
+def restore_historical_checkpoints(store, filename):
+    """Reviewed synthetic terminal facts, never upgraded by the current runtime."""
     facts = json.loads(
-        (ROOT / "tests/fixtures/checkpoint_v1_8219b93.json").read_text(encoding="utf-8")
+        (ROOT / "tests/fixtures" / filename).read_text(encoding="utf-8")
     )["tables"]
     runs = {r["id"] for r in facts["runs"] if r["status"] in {"succeeded", "failed"}}
     workflows = {r["workflow_id"] for r in facts["runs"] if r["id"] in runs}
@@ -146,7 +146,12 @@ def drill(cluster):
         admission_delayed = source.submit("final")
         source.wait(lambda: stop_at_admission_deferral(source, admission_delayed))
         source.reconcile(resolved)
-        legacy_runs = restore_historical_checkpoints(source.store)
+        legacy_runs = restore_historical_checkpoints(
+            source.store, "checkpoint_v1_8219b93.json"
+        )
+        legacy_runs |= restore_historical_checkpoints(
+            source.store, "checkpoint_v2_918ae92.json"
+        )
         before = source.check()
         facts = inventory(source.store)
         checkpoints = {r: source.state(r) for r in source.runs}
@@ -165,7 +170,7 @@ def drill(cluster):
         assert {
             a["context_projection"]["checkpoint"]["checkpoint_version"]
             for a in facts["agent_model_attempts"]
-        } == {1, 2}
+        } == {1, 2, 3}
         legacy = {r: source.invariants(source.store, r) for r in legacy_runs}
         assert facts["provider_admissions"] and facts["provider_permits"]
         assert facts["provider_admissions"][0]["cooldown_until"] > 0
@@ -282,7 +287,7 @@ def drill(cluster):
             "replayed_tool_dispatches": 0,
             "admission_restored": True,
             "observed_usage_restored": True,
-            "checkpoint_versions_restored": [1, 2],
+            "checkpoint_versions_restored": [1, 2, 3],
             "backup": "logical pg_dump/pg_restore; not HA/PITR",
         }
     finally:
