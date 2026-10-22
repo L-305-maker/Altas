@@ -1,5 +1,10 @@
 # Immutable Model Request Contract & Capability Preflight v1 / v2
 
+[独立 RC 验收 v2](rc-independent-acceptance.md) 只核对历史 Contract/Projection 摘要及已验证 Summary
+身份，不修改或重新预约旧调用。Live Smoke 的 `--report-version 2` 分离请求协议、响应模型名称、
+Attempt、Usage 和 Artifact 验证；缺少响应模型名称是 NOT_VERIFIED，明确不匹配是 FAIL。
+默认 v1 CLI 保持历史 Smoke 语义，不能把其 PASS 解释为完整 Provider 身份或 Token 计数验收。
+
 [RC Staging 门禁](production-rc-staging.md) 比对 API/Worker 的构建、策略、UsageMapping、工具、
 Contract 版本及已安装 Counter Profile 身份；不改变历史 v1/v2 的序列化或请求摘要。
 配置清单相同不是服务端 framing 证明，真实 Token 门禁仍未验证；不回填旧 usage。

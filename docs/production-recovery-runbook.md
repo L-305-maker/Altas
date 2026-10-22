@@ -1,5 +1,14 @@
 # Durable Runtime v1：备份、恢复及 staging 演练
 
+## 独立证据验收 v2
+
+恢复后的目标部署需依照 [独立验收流程](rc-independent-acceptance.md) 重新签发绑定该环境、数据库端点、
+OID、构建和批次的 Challenge；不得把恢复前的收据重新用于新环境放行。
+公钥信任清单由独立发布渠道固定版本及 SHA，私有防重放登记由验收机保存，不能随上传包替换。
+丢失登记、提交/消费确认未知时停止发布，重新授权演练，不修补历史 Attempt/Approval/UNKNOWN。
+只读快照失败不是健康空库；数据库恢复后仍需确认合法 waiting、UNKNOWN、延期重试和终态一致性。
+逻辑备份恢复不证明 HA/PITR，离线收据接纳不证明当前数据库在线；发布负责人另行授权实际双宿主与必要 Provider 验收。
+
 ## Token Counter Profile 部署与恢复
 
 先阅读 [合规证据与版本边界](token-window-conformance.md)。本轮无新迁移，仍为 0008。

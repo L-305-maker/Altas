@@ -1,5 +1,10 @@
 # Verified Token Window Preflight v1
 
+[RC Independent Acceptance v2](rc-independent-acceptance.md) 继续将 Token Conformance 独立列为
+NOT_VERIFIED。有效签名、Provider Smoke、响应模型名称匹配或一次 reported usage 都不证明本地完整
+Chat Request 计量与托管模型等价；仍需固定模型修订、模板/特殊 Token/工具计量资产及经独立审核的保证证明。
+本次没有新增真实 DeepSeek exact/upper_bound Profile，也没有付费 Token 对照请求。
+
 RC 发布判定见 [Production RC Staging](production-rc-staging.md)：UNKNOWN 不能启用 strict；
 EXACT 需托管模型/完整 framing 等价证明；UPPER_BOUND 需覆盖声明范围的保守上界证明。
 当前部署身份的真实 Counter Profile 清单为空，报告不会把离线向量、配置 digest 或一次回传 Usage

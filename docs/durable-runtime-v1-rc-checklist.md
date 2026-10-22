@@ -1,5 +1,32 @@
 # Durable Runtime v1：Release Candidate 验收
 
+## RC Evidence Verification & Independent Acceptance v2（2026-10-23）
+
+审核基线 `9b70938d9fa8df9645aaea8d792c8dfeabadd352`，仅 main；没有新分支、PR、迁移、真实付费请求或外部故障演练。
+新契约与操作者流程见 [RC Independent Acceptance v2](rc-independent-acceptance.md)。
+独立数据库、部署、基础设施、宿主、故障与审核收据分别验证；v1 非预检 PASS 禁令保持不变。
+软件门禁的实际执行结果如下；不能将下列 NOT_VERIFIED 当作代码 CI 的替代或失败跳过。
+
+| 软件验证命令 | 实际结果 |
+| --- | --- |
+| `uv run pytest -q` | 1173 passed、504 skipped、212.76 秒；1 条已有 TestClient 弃用警告；skipped 不计通过 |
+| `uv run python scripts/verify_postgres.py --bin D:/PSQL/bin --release-gates` | 506 passed、472 deselected、零跳过、268.61 秒；隔离临时 PG，包含新增只读采集、并发及历史迁移 |
+| 最终采集/预检专项 | 12 passed、零跳过、12.44 秒；全新隔离 PG，实际 Worker 审批/UNKNOWN 与 Summary/Consumer |
+| RC / Live / Staging 单元回归 | 78 passed、12.93 秒；合成独立密钥、MockTransport、CLI 防重放与付费禁用，不是真实宿主证明 |
+| Ruff check / format --check | PASS，src/tests/scripts/migrations/evals，192 文件 |
+| `uv build` / `scripts/verify_wheel.py` | PASS，仓库外安装 45 包；通用 Runtime、指标、Source→Summary→Consumer 与参考应用闭环 |
+| 架构边界 / `evals/run.py` | 3 passed；离线 3/3、traceability_rate=1.0 |
+| 三独立进程 Soak | PASS：`--seconds 180 --workload 6 --seed 7`；实际 196.39 秒、32 waves、200 Run、103 次工具派发、330 次领取；单机临时 PG，跨宿主 NOT_VERIFIED |
+| 实际 pg_dump / pg_restore | PASS：0008、15 表、17 恢复 Run（4 个历史夹具）、已完成工具重派 0、新明确批准派发 1；Admission/Usage/Checkpoint v1–3/Summary/Consumer 保留；不是 HA/PITR |
+| 本地 Docker / Compose | NOT_VERIFIED：DockerDesktopLinuxEngine 不可用；推送后实际 CI 结果另行核对，不能把跳过计为通过 |
+
+| 验收范围 | 状态 | 证据边界 |
+| --- | --- | --- |
+| 真实双宿主 A–J | NOT_VERIFIED | 本次仅离线合成签名与临时数据库；生产资产清单、受保护宿主收据与独立审核尚未提供 |
+| Live Provider | NOT_VERIFIED | 未授权付费；MockTransport 仅验证 v2 双层报告语义和单请求限制 |
+| Live Token Conformance | NOT_VERIFIED | 无托管模型/完整 framing 证明；strict 继续 fail-closed |
+| 生产发布 | NOT_VERIFIED | 离线验收报告始终不代表实时数据库核查或生产授权；发布负责人需独立确认目标环境与证据 |
+
 ## Production RC Staging & Evidence Gates v1（2026-10-22）
 
 审核基线 `de1b29eddd4e7b396aa7144fa3c5ffb717b5abac`，仅 main，无分支/PR、付费请求或外部数据库操作。

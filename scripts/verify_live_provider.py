@@ -39,7 +39,56 @@ def authorized():
     ) == "one-paid-request" and bool(os.environ.get("AGENTFLOW_DEEPSEEK_API_KEY"))
 
 
-async def verify(provider, url, *, progress=None):
+def versioned_report(report, version):
+    if version == 1:
+        return {
+            k: v
+            for k, v in report.items()
+            if k not in {"usage_record_verified", "attempt_outcome"}
+        }
+    smoke = (
+        "PASS"
+        if report.get("valid_assistant") and report.get("provider_request_accepted")
+        else "FAIL"
+    )
+    matched = report.get("model_identity_matches")
+    identity = (
+        "PASS" if matched is True else ("FAIL" if matched is False else "NOT_VERIFIED")
+    )
+    result = {
+        **report,
+        "schema_version": 2,
+        "request_smoke_status": smoke,
+        "provider_identity_acceptance": identity,
+        "model_identity_status": identity,
+        "durable_attempt_status": "PASS"
+        if report.get("durable_attempt_confirmed")
+        else "NOT_VERIFIED",
+        "artifact_status": "PASS"
+        if report.get("durable_step_and_artifact")
+        else "NOT_VERIFIED",
+        "usage_record_status": "PASS"
+        if report.get("usage_record_verified")
+        else "NOT_VERIFIED",
+    }
+    checks = (
+        smoke,
+        identity,
+        result["durable_attempt_status"],
+        result["artifact_status"],
+        result["usage_record_status"],
+    )
+    result["status"] = (
+        "FAIL"
+        if report.get("status") == "FAIL" or "FAIL" in checks
+        else ("PASS" if all(check == "PASS" for check in checks) else "NOT_VERIFIED")
+    )
+    return result
+
+
+async def verify(provider, url, *, progress=None, report_version=1):
+    if report_version not in {1, 2}:
+        raise ValueError("UnsupportedLiveReportVersion")
     metadata, calls = progress if progress is not None else {}, 0
     metadata.update(
         requests=0,
@@ -123,30 +172,47 @@ async def verify(provider, url, *, progress=None):
         handlers.register("live", handler)
         async with asyncio.timeout(65):
             assert await Worker(store, handlers, lease_seconds=15).tick()
-        assert store.get_run(run)["status"] == "succeeded"
-        assert len(store.artifacts(run)) == 1
+        succeeded = store.get_run(run)["status"] == "succeeded"
+        artifacts = len(store.artifacts(run))
+        if report_version == 1:
+            assert succeeded
+            assert artifacts == 1
         with store.transaction() as db:
             snapshot = db.scalar(select(AgentSessionRow)).snapshot
             attempts = db.scalars(select(AgentModelAttemptRow)).all()
-            assert len(attempts) == 1 and attempts[0].outcome == "succeeded"
+            assert len(attempts) == 1
+            if report_version == 1:
+                assert attempts[0].outcome == "succeeded"
             assert attempts[0].request_contract is not None
-            assert (
-                attempts[0].model is None
-                or attempts[0].model == attempts[0].request_contract["model"]
-            )
+            if report_version == 1:
+                assert (
+                    attempts[0].model is None
+                    or attempts[0].model == attempts[0].request_contract["model"]
+                )
+            metadata["usage_record_verified"] = (
+                attempts[0].raw_usage is not None
+            ) == bool(metadata["usage_present"]) and attempts[0].usage is not None
+            metadata["attempt_outcome"] = attempts[0].outcome
         assert snapshot["budget"]["model_attempts"] == 1
-        metadata.update(durable_attempt_confirmed=True, durable_step_and_artifact=True)
-        return {
-            "status": "PASS",
-            "requests": calls,
-            "finish_reason": "stop",
-            "durable_attempt_confirmed": True,
-            "durable_step_and_artifact": True,
-            "model_identity_status": "PASS"
-            if metadata["model_identity_matches"]
-            else "NOT_VERIFIED",
-            **metadata,
-        }
+        metadata.update(
+            durable_attempt_confirmed=metadata["attempt_outcome"]
+            in {"succeeded", "failed", "unknown"},
+            durable_step_and_artifact=succeeded and artifacts == 1,
+        )
+        return versioned_report(
+            {
+                "status": "PASS" if succeeded else "FAIL",
+                "requests": calls,
+                "finish_reason": "stop" if metadata["valid_assistant"] else None,
+                "durable_attempt_confirmed": True,
+                "durable_step_and_artifact": True,
+                "model_identity_status": "PASS"
+                if metadata["model_identity_matches"]
+                else "NOT_VERIFIED",
+                **metadata,
+            },
+            report_version,
+        )
     finally:
         store.close()
 
@@ -155,9 +221,20 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--allow-paid-request", action="store_true")
     parser.add_argument("--model", choices=SUPPORTED_MODELS, default=DEFAULT_MODEL)
+    parser.add_argument("--report-version", type=int, choices=(1, 2), default=1)
     args = parser.parse_args()
     if not args.allow_paid_request or not authorized():
-        print(json.dumps({"status": "LIVE PROVIDER NOT VERIFIED", "requests": 0}))
+        report = {"status": "LIVE PROVIDER NOT VERIFIED", "requests": 0}
+        if args.report_version == 2:
+            report.update(
+                schema_version=2,
+                request_smoke_status="NOT_VERIFIED",
+                provider_identity_acceptance="NOT_VERIFIED",
+                durable_attempt_status="NOT_VERIFIED",
+                artifact_status="NOT_VERIFIED",
+                usage_record_status="NOT_VERIFIED",
+            )
+        print(json.dumps(report))
         return 1 if args.allow_paid_request else 0
     progress = {}
     try:
@@ -171,20 +248,28 @@ def main():
                     provider,
                     f"sqlite:///{(Path(directory) / 'live.db').as_posix()}",
                     progress=progress,
+                    report_version=args.report_version,
                 )
             )
         print(json.dumps(report))
-        return 0
+        return (
+            int(report["status"] != "PASS")
+            if args.report_version == 2
+            else int(report["status"] == "FAIL")
+        )
     except Exception:
         # No traceback, exception message, prompt, key, response, or provider ID.
         print(
             json.dumps(
-                {
-                    "status": "FAIL",
-                    "requests": 0,
-                    **progress,
-                    "error": "LiveProviderAcceptanceFailed",
-                }
+                versioned_report(
+                    {
+                        "status": "FAIL",
+                        "requests": 0,
+                        **progress,
+                        "error": "LiveProviderAcceptanceFailed",
+                    },
+                    args.report_version,
+                )
             )
         )
         return 1

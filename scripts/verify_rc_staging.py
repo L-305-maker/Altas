@@ -143,6 +143,24 @@ def synthetic(config, args):
     if args.command == "seed":
         if plan.exists() or not 1 <= args.runs <= 20:
             raise ValueError("StagingPlanRejected")
+        scenarios = (
+            (
+                "final",
+                "normal",
+                "review",
+                "crash",
+                "unknown",
+                "retry",
+                "cancel",
+                "model_rate_limited",
+                "summary",
+                "summary_consumption",
+            )
+            if args.scenario == "acceptance_suite"
+            else (args.scenario,)
+        ) * args.runs
+        if len(scenarios) > 20 or getattr(args, "plan_index", None) is not None:
+            raise ValueError("StagingLimitsRejected")
         # Require a fresh private directory (Windows 3.12.4+ installs its ACL).
         # Never trust a pre-existing shared directory for private fixture IDs.
         plan.parent.mkdir(mode=0o700)
@@ -181,14 +199,18 @@ def synthetic(config, args):
     try:
         workload.deadline = time.monotonic() + args.seconds
         if args.command == "seed":
-            for _ in range(args.runs):
+            for scenario in scenarios:
                 if time.monotonic() >= workload.deadline:
                     raise ValueError("StagingOperationTimeout")
-                run = workload.submit(args.scenario, staging_batch=data["batch_id"])
-                data["runs"].append({"id": run, "scenario": args.scenario})
+                run = workload.submit(scenario, staging_batch=data["batch_id"])
+                data["runs"].append({"id": run, "scenario": scenario})
                 plan.write_text(json.dumps(data), encoding="utf-8")
         else:
-            for entry in data["runs"]:
+            index = getattr(args, "plan_index", None)
+            if index is not None and not 0 <= index < len(data["runs"]):
+                raise ValueError("StagingPlanRejected")
+            entries = data["runs"] if index is None else [data["runs"][index]]
+            for entry in entries:
                 if time.monotonic() >= workload.deadline:
                     raise ValueError("StagingOperationTimeout")
                 run = str(UUID(entry["id"]))
@@ -223,6 +245,9 @@ def main():
     parser.add_argument("--allow-staging-execution", action="store_true")
     parser.add_argument("--read-staging", action="store_true")
     parser.add_argument("--plan")
+    parser.add_argument(
+        "--plan-index", type=int, help="one bounded entry in a private mixed plan"
+    )
     parser.add_argument("--runs", type=int, default=1)
     parser.add_argument("--seconds", type=int, default=60)
     parser.add_argument(
@@ -238,6 +263,7 @@ def main():
             "model_rate_limited",
             "summary",
             "summary_consumption",
+            "acceptance_suite",
         ),
         default="normal",
     )
