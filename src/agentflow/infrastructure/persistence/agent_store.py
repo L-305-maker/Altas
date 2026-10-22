@@ -1,5 +1,6 @@
 """复用 Workflow Store 的连接、锁和时钟；数据库不保证外部副作用 exactly-once。"""
 
+import hashlib
 import json
 import math
 import re
@@ -25,6 +26,14 @@ from agentflow.application.agents.summary import (
     summary_messages,
     summary_policy,
     validate_summary_draft,
+    verify_summary_artifact,
+)
+from agentflow.application.agents.summary_consumption import (
+    build_consumption,
+    check_consumption_egress,
+    check_consumption_execution,
+    consumption_policy,
+    stored_consumption,
 )
 from agentflow.application.ports.agent_store import (
     ActionObservation,
@@ -70,6 +79,7 @@ from agentflow.application.ports.provider_admission import (
     ModelAdmission,
     ProviderAdmissionPolicy,
 )
+from agentflow.application.ports.summary_consumption import SummaryConsumptionInput
 from agentflow.domain.agent.action import Action, digest_arguments
 from agentflow.domain.agent.budget import AgentBudget
 from agentflow.domain.agent.review import (
@@ -92,6 +102,7 @@ from agentflow.infrastructure.persistence.models import (
     AgentModelAttemptRow,
     AgentModelCallRow,
     AgentSessionRow,
+    ArtifactRow,
     ProviderAdmissionRow,
     ProviderPermitRow,
     RunRow,
@@ -813,6 +824,12 @@ class SQLAgentStore:
         data = initial_snapshot.model_dump(mode="json")
         with self._owned_transaction(task) as (db, run, step):
             spec = self._step_spec(run, step)
+            if consumption_policy(spec).mode == "verified_tool":
+                plan = self._consumption_input(db, run, step)
+                if len(messages) != 2 or messages[1].payload.get(
+                    "summary_consumption"
+                ) != plan.model_dump(mode="json"):
+                    raise SummarySourceError("SummaryConsumptionInitializationInvalid")
             if spec.handler == HANDLER:
                 plan = self._summary_input(db, run, step)
                 limits = summary_agent_parameters(spec)
@@ -876,12 +893,88 @@ class SQLAgentStore:
             result = self._read(db, row)
             if self._step_spec(run, step).handler == HANDLER:
                 self._checked_summary_input(db, run, step, result)
+            if consumption_policy(self._step_spec(run, step)).mode == "verified_tool":
+                self._checked_consumption(db, run, step, result)
         return result
 
     def _step_spec(self, run, step):
         return next(
             s for s in WorkflowSpec.model_validate(run.spec).steps if s.id == step.key
         )
+
+    def _consumption_input(self, db, run, step):
+        policy = consumption_policy(self._step_spec(run, step))
+        if policy.mode != "verified_tool":
+            raise SummarySourceError("SummaryConsumptionDisabled")
+        # All writers first lock this Run. Read stable source rows without later
+        # row locks so Run -> Step -> Session -> ModelCall -> Attempt stays intact.
+        summary_step = db.scalar(
+            select(StepRow).where(
+                StepRow.run_id == run.id, StepRow.key == policy.source_summary_step
+            )
+        )
+        if (
+            summary_step is None
+            or summary_step.status != "succeeded"
+            or self._step_spec(run, summary_step).handler != HANDLER
+        ):
+            raise SummarySourceError("SummaryConsumptionSourceInvalid")
+        artifacts = list(
+            db.scalars(
+                select(ArtifactRow).where(ArtifactRow.step_id == summary_step.id)
+            )
+        )
+        if len(artifacts) != 1 or artifacts[0].run_id != run.id:
+            raise SummarySourceError("SummaryConsumptionArtifactMissing")
+        artifact = artifacts[0]
+        if (
+            artifact.content != summary_step.output
+            or hashlib.sha256(json_bytes(artifact.content)).hexdigest()
+            != artifact.digest
+        ):
+            raise SummarySourceError("SummaryConsumptionArtifactInvalid")
+        row = db.scalar(
+            select(AgentSessionRow).where(
+                AgentSessionRow.step_row_id == summary_step.id
+            )
+        )
+        if row is None:
+            raise SummarySourceError("SummaryConsumptionSessionMissing")
+        state = self._read(db, row, lock=False)
+        if state.snapshot.status != AgentStatus.SUCCEEDED:
+            raise SummarySourceError("SummaryConsumptionSourceInvalid")
+        plan = self._checked_summary_input(db, run, summary_step, state)
+        verified = verify_summary_artifact(plan, state, artifact.content)
+        return build_consumption(policy, verified, plan, artifact.digest)
+
+    def _checked_consumption(self, db, run, step, state):
+        plan = stored_consumption(state)
+        if self._consumption_input(db, run, step) != plan:
+            raise SummarySourceError("SummaryConsumptionChanged")
+        check_consumption_execution(plan, state)
+        return plan
+
+    def summary_consumption(self, task: Task) -> SummaryConsumptionInput:
+        with self._owned_transaction(task) as (db, run, step):
+            policy = consumption_policy(self._step_spec(run, step))
+            source_step = db.scalar(
+                select(StepRow).where(
+                    StepRow.run_id == run.id, StepRow.key == policy.source_summary_step
+                )
+            )
+            if (
+                source_step is None
+                or task.dependencies.get(policy.source_summary_step)
+                != source_step.output
+            ):
+                raise SummarySourceError("SummaryConsumptionDependencyMismatch")
+            row = self._session(db, step)
+            result = (
+                self._checked_consumption(db, run, step, self._read(db, row))
+                if row is not None
+                else self._consumption_input(db, run, step)
+            )
+        return result
 
     def _summary_input(self, db, run, step):
         spec = self._step_spec(run, step)
@@ -1041,6 +1134,20 @@ class SQLAgentStore:
             if spec.handler == HANDLER
             else None
         )
+        consumption = (
+            self._checked_consumption(db, run, step, state)
+            if consumption_policy(spec).mode == "verified_tool"
+            else None
+        )
+        if consumption is not None:
+            check_consumption_egress(
+                consumption.policy,
+                ProviderContextEgressPolicy.model_validate(
+                    config["provider_context_egress"]
+                )
+                if config.get("provider_context_egress") is not None
+                else None,
+            )
         retry = bool(state.model_calls and state.model_calls[-1].status == "failed")
         previous = state.model_attempts[-1].context_projection if retry else None
         # Preserve older direct Store clients. Explicit projection configuration
@@ -1050,6 +1157,7 @@ class SQLAgentStore:
                 "context_projection" in config
                 or "evidence_checkpoint" in config
                 or "provider_context_egress" in config
+                or consumption is not None
                 or previous is not None
                 or contract is not None
             ):
@@ -1088,6 +1196,9 @@ class SQLAgentStore:
                 egress=egress,
                 summary_input_digest=summary.manifest.summary_input_digest
                 if summary
+                else None,
+                summary_consumption_digest=consumption.view.view_digest
+                if consumption
                 else None,
             )
             expected = projected.manifest

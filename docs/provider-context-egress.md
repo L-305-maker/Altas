@@ -1,5 +1,8 @@
 # Provider Context Egress Control v1
 
+[Summary Consumption](summary-consumption.md) 是独立权限：默认不发送生成声明正文。
+显式 Egress 必须允许真实消费 Core ToolBinding 的根视图，消费策略不会扩大 metadata_only 或其他工具权限。
+
 独立 [Durable Summary](durable-summarization.md) 同样必须执行来源 Egress/v3 披露，不能借摘要扩大源显式
 metadata_only 或其他披露边界。模型通过真实、固定来源只读工具获取获准证据；不发送原 Session/Prompt。
 摘要自己的 ModelAttempt/Contract 另绑定 summary_input_digest，并继续经过预算、用量和准入门禁。

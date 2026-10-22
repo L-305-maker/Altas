@@ -1,5 +1,8 @@
 # First-Class Durable Summarization v1
 
+后续 [Summary Consumption v1](summary-consumption.md) 允许独立授权的真实只读工具消费；
+默认行为仍不自动注入。生成披露不等于消费授权，派生 Artifact 与原历史保持分离。
+
 Summary 是独立 Workflow Step 发布的 **派生 Artifact**，不是权威历史或事实认证。
 不替换 AgentMessage/Action，不自动注入后续 Agent Context，不实现 Memory、RAG 或 Planner。
 默认没有摘要请求；必须显式注册 `durable_summary` Step、`artifact=true`、依赖来源并设置 enabled=true。

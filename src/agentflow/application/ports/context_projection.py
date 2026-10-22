@@ -43,6 +43,7 @@ class ContextProjectionManifest(BaseModel):
     checkpoint: EvidenceCheckpointManifest | None = None
     egress: ProviderContextEgressManifest | None = None
     summary_input_digest: Digest | None = None
+    summary_consumption_digest: Digest | None = None
 
     @model_serializer(mode="wrap")
     def legacy_shape(self, handler):
@@ -53,6 +54,8 @@ class ContextProjectionManifest(BaseModel):
             data.pop("egress", None)
         if self.summary_input_digest is None:
             data.pop("summary_input_digest", None)
+        if self.summary_consumption_digest is None:
+            data.pop("summary_consumption_digest", None)
         return data
 
     @model_validator(mode="after")

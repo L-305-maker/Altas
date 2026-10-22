@@ -186,6 +186,36 @@ async def serve(url, root, seconds):
         ).run(task)
 
     handlers.register("durable_summary", summarize)
+
+    async def consume(task):
+        record(root, "claim", task=task_fence_record(task))
+
+        class Provider(MockProvider):
+            async def respond(self, messages, tools=None):
+                response = (
+                    {"role": "assistant", "content": "RC consumed derived metadata"}
+                    if any(m["role"] == "tool" for m in messages)
+                    else {
+                        "role": "assistant",
+                        "tool_calls": [
+                            {
+                                "id": "read",
+                                "type": "function",
+                                "function": {
+                                    "name": "read_verified_summary",
+                                    "arguments": "{}",
+                                },
+                            }
+                        ],
+                    }
+                )
+                return await MockProvider([response]).respond(messages, tools)
+
+        return await DurableAgentRunner(
+            agents, Provider(), ToolRuntime(), admission=agents if policy else None
+        ).run(task, "Read authorized summary metadata.", allowed=set())
+
+    handlers.register("agent", consume)
     handlers.register("rc-plain", plain)
     worker = Worker(store, handlers, concurrency=1, lease_seconds=3, poll_seconds=0.05)
     try:
@@ -264,16 +294,37 @@ class Workload:
                     StepSpec(
                         id="after",
                         handler="durable_summary"
-                        if scenario == "summary"
+                        if scenario in {"summary", "summary_consumption"}
                         else "rc-plain",
                         depends_on=("agent", "peer"),
                         artifact=True,
                         parameters={
                             "summary": {"enabled": True, "source_step": "agent"}
                         }
-                        if scenario == "summary"
+                        if scenario in {"summary", "summary_consumption"}
                         else {},
                     ),
+                )
+                + (
+                    (
+                        StepSpec(
+                            id="consumer",
+                            handler="agent",
+                            depends_on=("after",),
+                            artifact=True,
+                            parameters={
+                                "agent": {
+                                    "mode": "durable_v1",
+                                    "summary_consumption": {
+                                        "mode": "verified_tool",
+                                        "source_summary_step": "after",
+                                    },
+                                }
+                            },
+                        ),
+                    )
+                    if scenario == "summary_consumption"
+                    else ()
                 ),
             )
         )

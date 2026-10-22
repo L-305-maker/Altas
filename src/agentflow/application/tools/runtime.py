@@ -2,6 +2,7 @@
 
 import asyncio
 from collections.abc import Awaitable, Callable
+from copy import copy
 from dataclasses import dataclass
 from typing import Any
 
@@ -143,6 +144,13 @@ class ToolRuntime:
         Draft202012Validator.check_schema(tool.schema)
         TypeAdapter(Identifier).validate_python(tool.version)
         self._tools[tool.name] = tool
+
+    def with_tool(self, tool: Tool) -> "ToolRuntime":
+        """Task-local registration; never grant another Step this tool."""
+        runtime = copy(self)
+        runtime._tools = dict(self._tools)
+        runtime.register(tool)
+        return runtime
 
     def schemas(self, allowed: set[str]) -> list[dict]:
         if allowed - self._tools.keys():

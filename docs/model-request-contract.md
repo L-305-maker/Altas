@@ -1,5 +1,8 @@
 # Immutable Model Request Contract & Capability Preflight v1.1
 
+[Summary Consumption](summary-consumption.md) 的可选 summary_consumption_digest 原子绑定冻结视图；
+None 时省略，旧身份不变。重试不能更换 Artifact、Policy、声明选择或工具绑定。
+
 [Durable Summary](durable-summarization.md) 的 Projection/Contract 使用可选 summary_input_digest 固定来源、
 策略及证据身份；初始只读工具轮次和最终 JSON 轮次共享该身份，各有自己的 Attempt/Contract/usage。
 新字段参与契约摘要与重试连续性校验；普通历史请求完全省略此键。Store 重新验证来源后才发放 Permit，

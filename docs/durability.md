@@ -1,5 +1,9 @@
 # 持久执行语义
 
+[Summary Consumption v1](summary-consumption.md) 通过显式 Durable Consumer Policy 与真实只读工具读取
+同 Run 的成功摘要依赖；默认关闭。真实 Artifact/Attempt/来源重验，独立披露，不提升为系统或审批权限。
+Consumer 继续服从现有预算、准入、用量、CAS、Lease、UNKNOWN 和取消规则；没有隐藏模型请求或新迁移。
+
 ## 独立 Durable Summary
 
 [Durable Summarization v1](durable-summarization.md) 使用显式 durable_summary Step 与独立 Session/预算/Attempt。

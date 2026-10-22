@@ -42,6 +42,9 @@ def exercise(cluster, workload, *, seconds, count, seed):
     summarized = workload.submit("summary")
     workload.wait(lambda: workload.store.get_run(summarized)["status"] == "succeeded")
     completed.append(summarized)
+    consumed = workload.submit("summary_consumption")
+    workload.wait(lambda: workload.store.get_run(consumed)["status"] == "succeeded")
+    completed.append(consumed)
 
     retry = workload.submit("retry")
     delayed = workload.wait(
@@ -181,7 +184,9 @@ def exercise(cluster, workload, *, seconds, count, seed):
         workload.wait(
             lambda run=run: workload.store.get_run(run)["status"] == "succeeded"
         )
-        assert len(workload.store.artifacts(run)) == 3
+        assert len(workload.store.artifacts(run)) == (
+            4 if workload.scenarios[run] == "summary_consumption" else 3
+        )
     workload.stop()
     workload.fenced_claims()
     assert workload.store.get_run(reviewed) == isolated, "CrossRunMutation"

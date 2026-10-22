@@ -1,5 +1,8 @@
 # Evidence Checkpoint v3：ToolBinding 披露授权、信任边界与历史兼容
 
+[Summary Consumption](summary-consumption.md) 重验原 Snapshot、引用与真实摘要尝试；
+选定证据覆盖率不等于全文覆盖率，也不认证派生声明。Checkpoint 不能生成消费或行动审批权限。
+
 [Durable Summary v1](durable-summarization.md) 可显式选择已成功来源中的公开行动摘录与状态元数据。
 复用本页 v3 历史绑定决策，不能从被拒绝的结果路径生成有效公开引用；摘录/引用不是事实认证。
 摘要模型调用是独立 Workflow 执行，不在 build_checkpoint 内发生，也不自动替代当前 checkpoint。

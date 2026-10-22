@@ -1,5 +1,9 @@
 # Durable Runtime v1：备份、恢复及 staging 演练
 
+显式 [Summary Consumption](summary-consumption.md) 部署须统一升级 Writer，启用前检查 Consumer 的
+真实依赖及独立文本授权；显式 Egress 必须允许精确 Core Binding。备份恢复保留冻结视图、原 Artifact、
+SourceSnapshot、成功 Attempt 和 RequestContract；UNKNOWN/已完成读取不能自动重派，摘要不能替代行动审批。
+
 ## Durable Summary 发布与恢复
 
 摘要的配置及限制见 [Durable Summarization](durable-summarization.md)。无新 schema，仍为 Alembic 0008；

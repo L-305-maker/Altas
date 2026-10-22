@@ -1,5 +1,33 @@
 # Durable Runtime v1：Release Candidate 验收
 
+## Summary-Aware Context Consumption v1（2026-10-22）
+
+审核基线 `9395dba35364c176ad0c9cb8a499b78864c04af7`；仅 main，没有新分支、PR、生产数据库或付费请求。
+契约及部署边界见 [Summary Consumption](summary-consumption.md)。
+
+| 检查 | 状态 | 本轮实际证据 |
+| --- | --- | --- |
+| 先失败回归 | PASS | 基线缺少消费策略/工具；另先复现元数据携带模型自选 claim_id、UNKNOWN→FAILED 对账夹带任意结果、私有注册丢失 Runtime 授权及 Runner 校验、过滤声明后误用完整摘要覆盖率，再做最小修复 |
+| 持久身份与授权 | PASS | 同 Run 明确依赖、真实 Step/Artifact/成功 Session/Attempt/Contract、原响应与完整来源；伪造依赖、跨 Run、缺 Attempt、摘要/引用/digest/Source 损坏、策略漂移预约前停止 |
+| 角色与工具权限 | PASS | 元数据默认无生成正文/原声明标识；显式文本只出现在真实 tool 数据；普通工具 Egress、具体行动审批保留，视图与真实绑定进入请求身份 |
+| 恢复与容量 | PASS | 消费模型/工具预约、读取结果、完成提交的真实子进程退出；确认丢失不重发，UNKNOWN 挂起，旧 token/CAS、业务取消和原始 CancelledError；真实 2 MB 单事务/8 MB 会话限额与取消余量 |
+| 完整 pytest | PASS | 最终 `uv run pytest -q`：1056 passed、472 skipped，360.35 秒；1 项已有 TestClient 弃用警告，跳过不计通过；专用 PostgreSQL 另行实际执行 |
+| 完整 PostgreSQL 发布门禁 | PASS | 最终 `verify_postgres.py --bin D:/PSQL/bin --release-gates`：917 passed、零跳过、420.68 秒；包括所有历史迁移/旧身份、审批/对账/延期、真实独立事务 CAS/fencing、消费者崩溃及取消回归 |
+| Ruff | PASS | check 与 format --check，178 files already formatted |
+| 三独立 Worker Soak | PASS | `--seconds 30 --workload 6 --seed 7`：41.12 秒、25 Run、15 派发、46 领取；含 source→summary→consumer，与审批/对账/延期/取消混合 |
+| 逻辑备份恢复 | PASS | 实际 pg_dump/pg_restore：0008、15 表、16 Run（4 个旧 v1/v2 终态）；原始全部事实比较，摘要来源/Artifact/消费视图/请求契约可验证；已完成重派 0，新批准派发 1 |
+| 构建 / 仓库外 Wheel / 参考应用 | PASS | uv build；安装后 source→summary→consumer 真闭环，原参考应用、Core、metrics；离线评估 3/3、traceability 1.0；架构边界 3 passed |
+| 本地 Docker / Compose | NOT VERIFIED | 本机 Docker daemon 不可用；以最终提交的实际 GitHub CI 为准，不把本地跳过计为通过 |
+| 真实 Provider / 跨宿主 / 生产长时负载及 HA/PITR | NOT VERIFIED | 真实付费请求 0；Mock、单机多进程及逻辑备份不证明真实 LLM 安全/质量、网络分区或零数据丢失 |
+
+没有新增 Schema/迁移，0001–0008 保持；旧 Manifest/Contract 不补造消费身份，None 新字段省略。
+并发运行本地验证时曾有一次 PostgreSQL 专项触及 600 秒门限，未计为通过；结束并发后，同一完整门禁
+以原门限独占运行通过。没有放宽测试/租约/清理超时，也没有排除测试。
+摘要生成和消费分别授权，选定引用覆盖率不是全文覆盖率，引用不是事实认证；保持非特权数据角色。
+未发现已验证范围内未解决的 P0/P1。P2 边界包括生成内容幻觉/遗漏、公开分类并非 PII 检测、
+哈希并非加密、完整来源反复验证的成本，以及字节上限不等于可信 Token Window/费用硬上限。
+生产放行仍需独立 RC、真实 Provider 与跨主机验收；不得以本代码门禁代替。
+
 ## First-Class Durable Summary v1（2026-10-22）
 
 审核基线 `a05f7f26e3af3e1b0449f2abf895d70652198ca9`，仅 main，无新分支/PR/迁移或生产数据操作。

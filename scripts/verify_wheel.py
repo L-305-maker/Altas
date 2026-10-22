@@ -10,7 +10,7 @@ SMOKE = """
 import asyncio
 from fastapi.testclient import TestClient
 from pydantic import SecretStr
-from agentflow.application.orchestration.worker import Worker
+from agentflow.application.orchestration.worker import Worker, HandlerRegistry
 from agentflow.config import Settings
 from agentflow.infrastructure.persistence.store import Store
 from agentflow.bootstrap import build_handlers as core_handlers
@@ -95,6 +95,24 @@ try:
     outputs = [a["content"] for a in store.artifacts(summary_run)]
     artifact = SummaryArtifact.model_validate(next(a for a in outputs if "summary_version" in a))
     assert artifact.evidence_coverage == 1.0 and artifact.assurance == "generated_not_fact_verified"
+    # Explicit consumption must work from installed files too, without hidden
+    # model execution or trusting the dependency JSON as authorization.
+    async def consume(task):
+        provider = MockProvider([{"role":"assistant", "tool_calls":[{"id":"read", "type":"function", "function":{"name":"read_verified_summary", "arguments":"{}"}}]}, {"role":"assistant", "content":"consumed"}])
+        return await DurableAgentRunner(SQLAgentStore(store), provider, ToolRuntime()).run(task, "consume metadata", allowed=set())
+    consumed_run = store.submit(store.register(WorkflowSpec(name="installed-consumer", steps=(
+        StepSpec(id="source", handler="fixture-source", artifact=True),
+        StepSpec(id="summary", handler="durable_summary", artifact=True, depends_on=("source",), parameters={"summary":{"enabled":True,"source_step":"source"}}),
+        StepSpec(id="consume", handler="agent", depends_on=("summary",), parameters={"agent":{"mode":"durable_v1","summary_consumption":{"mode":"verified_tool"}}}),
+    ))), {})
+    # Use the explicitly controlled provider for the actual agent registry slot.
+    installed_handlers = HandlerRegistry()
+    installed_handlers.register("fixture-source", source)
+    installed_handlers.register("durable_summary", handlers.get("durable_summary"))
+    installed_handlers.register("agent", consume)
+    installed_worker = Worker(store, installed_handlers)
+    for _ in range(3): assert asyncio.run(installed_worker.tick())
+    assert store.get_run(consumed_run)["status"] == "succeeded"
 finally:
     store.close()
 from applications.living_guideline.evaluation import main

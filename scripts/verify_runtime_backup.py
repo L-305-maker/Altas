@@ -119,6 +119,8 @@ def drill(cluster):
         source.wait(lambda: source.store.get_run(done)["status"] == "succeeded")
         summarized = source.submit("summary")
         source.wait(lambda: source.store.get_run(summarized)["status"] == "succeeded")
+        consumed = source.submit("summary_consumption")
+        source.wait(lambda: source.store.get_run(consumed)["status"] == "succeeded")
         reviewed = source.submit("review")
         source.approve(reviewed)
         source.wait(lambda: source.status(reviewed, "succeeded"))
@@ -164,6 +166,7 @@ def drill(cluster):
         )
         assert all(
             a["context_projection"].get("summary_input_digest")
+            or a["context_projection"].get("summary_consumption_digest")
             or a["context_projection"]["checkpoint"]["references"]
             for a in facts["agent_model_attempts"]
         )
@@ -249,6 +252,21 @@ def drill(cluster):
                 summary_state.agent,
                 summary_state.artifacts[0],
             )
+            consumer_state = runtime.invariants(runtime.store, consumed)[
+                "consumer"
+            ].agent
+            from agentflow.application.agents.summary_consumption import (
+                stored_consumption,
+            )
+
+            view = stored_consumption(consumer_state).view
+            assert consumer_state.actions[0].result == view.model_dump(mode="json")
+            assert (
+                consumer_state.model_attempts[
+                    -1
+                ].request_contract.summary_consumption_digest
+                == view.view_digest
+            )
         assert {r: target.invariants(target.store, r) for r in legacy_runs} == legacy
         migrate(target_url)
         with target.store.engine.connect() as db:
@@ -311,6 +329,7 @@ def drill(cluster):
             "observed_usage_restored": True,
             "checkpoint_versions_restored": [1, 2, 3],
             "summary_artifact_restored": True,
+            "summary_consumption_restored": True,
             "backup": "logical pg_dump/pg_restore; not HA/PITR",
         }
     finally:

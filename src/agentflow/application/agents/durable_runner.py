@@ -5,7 +5,7 @@ import hashlib
 import json
 import math
 from collections.abc import Awaitable
-from copy import deepcopy
+from copy import copy, deepcopy
 from typing import Literal, Self
 from uuid import uuid4
 
@@ -23,6 +23,11 @@ from agentflow.application.agents.projection import project_context
 from agentflow.application.agents.summary import (
     stored_summary_input,
     summary_agent_parameters,
+)
+from agentflow.application.agents.summary_consumption import (
+    check_consumption_egress,
+    consumption_tool,
+    stored_consumption,
 )
 from agentflow.application.ports.agent_store import (
     ActionArguments,
@@ -64,6 +69,10 @@ from agentflow.application.ports.provider_admission import (
     ProviderAdmissionStore,
     ProviderBackpressure,
 )
+from agentflow.application.ports.summary_consumption import (
+    TOOL_NAME as SUMMARY_READ_TOOL,
+)
+from agentflow.application.ports.summary_consumption import SummaryConsumptionPolicy
 from agentflow.application.tools.runtime import (
     ToolApprovalRequired,
     ToolConfirmedFailure,
@@ -111,6 +120,9 @@ class DurableAgentConfig(BaseModel):
         default_factory=EvidenceCheckpointPolicy
     )
     provider_context_egress: ProviderContextEgressPolicy | None = None
+    summary_consumption: SummaryConsumptionPolicy = Field(
+        default_factory=SummaryConsumptionPolicy
+    )
     retry_base_seconds: float = Field(
         default=1, gt=0, le=3600, allow_inf_nan=False, strict=True
     )
@@ -203,10 +215,36 @@ class DurableAgentRunner:
             budget=config.initial_budget(),
         )
         messages = self._initial_messages(task, prompt)
+        execution = self
+        if config.summary_consumption.mode == "verified_tool":
+            plan = await asyncio.to_thread(self.store.summary_consumption, task)
+            check_consumption_egress(plan.policy, config.provider_context_egress)
+
+            async def read_summary(_):
+                current = await asyncio.to_thread(self.store.summary_consumption, task)
+                if current != plan:
+                    raise StateConflict("summary consumption changed")
+                return plan.view.model_dump(mode="json")
+
+            runtime = self.tools.with_tool(consumption_tool(plan.policy, read_summary))
+            execution = copy(self)
+            execution.tools = runtime
+            allowed = {*allowed, SUMMARY_READ_TOOL}
+            messages = (
+                messages[0],
+                AgentMessage(
+                    sequence=1,
+                    role="user",
+                    payload={
+                        **messages[1].payload,
+                        "summary_consumption": plan.model_dump(mode="json"),
+                    },
+                ),
+            )
         state = await asyncio.to_thread(
             self.store.open, task, initial, messages=messages
         )
-        return await self._execute(task, state, allowed, config)
+        return await execution._execute(task, state, allowed, config)
 
     def _initial_messages(self, task, prompt):
         # Summary v1 publishes artifacts only. Do not automatically promote a
@@ -338,6 +376,9 @@ class DurableAgentRunner:
                     state
                 ).manifest.summary_input_digest
                 if task.spec.handler == HANDLER
+                else None,
+                summary_consumption_digest=stored_consumption(state).view.view_digest
+                if config.summary_consumption.mode == "verified_tool"
                 else None,
             )
             if retry and (

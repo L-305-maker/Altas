@@ -1,5 +1,8 @@
 # Durable Context Projection v1
 
+[Summary Consumption](summary-consumption.md) 将冻结视图 digest 绑定到可选 summary_consumption_digest；
+仍先验证完整历史、真实来源和工具配对，再选择窗口；不在投影内部生成或自动替换摘要。
+
 [Durable Summary](durable-summarization.md) 是独立显式 Step。project_context 没有隐藏模型调用，也不
 自动用摘要替换历史。摘要请求的 Manifest 可额外绑定 summary_input_digest；旧记录省略新键、字节不变。
 

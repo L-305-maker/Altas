@@ -109,6 +109,24 @@ class RuntimeInvariants:
                     )
                 )
                 if (
+                    len(state.messages) > 1
+                    and "summary_consumption" in state.messages[1].payload
+                ):
+                    from agentflow.application.agents.summary_consumption import (
+                        stored_consumption,
+                    )
+
+                    plan = stored_consumption(state)
+                    assert (
+                        SQLAgentStore(store)._checked_consumption(db, run, step, state)
+                        == plan
+                    )
+                    for attempt in state.model_attempts:
+                        assert (
+                            attempt.context_projection.summary_consumption_digest
+                            == plan.view.view_digest
+                        )
+                if (
                     specs[step.key].handler == "durable_summary"
                     and state.snapshot.status == "succeeded"
                 ):

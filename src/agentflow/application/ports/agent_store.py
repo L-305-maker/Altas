@@ -26,6 +26,7 @@ from agentflow.application.ports.provider_admission import (
     ProviderBackpressure,
     ProviderKey,
 )
+from agentflow.application.ports.summary_consumption import SummaryConsumptionInput
 from agentflow.domain.agent.action import Action, ErrorCode, Identifier
 from agentflow.domain.agent.budget import Counter
 from agentflow.domain.agent.review import (
@@ -184,6 +185,10 @@ class AgentSession(BaseModel):
 
 
 class AgentStore(Protocol):
+    def summary_consumption(self, task: Task) -> SummaryConsumptionInput:
+        """Verify an explicitly authorized same-run summary and its original facts."""
+        ...
+
     def usage_summary(self, session_id: str) -> ModelUsageSummary:
         """Read persisted facts, including terminal sessions; caller controls access."""
         ...
