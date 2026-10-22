@@ -21,7 +21,7 @@ def test_core_starts_without_applications(tmp_path):
     )
     tools = ToolRuntime()
     handlers = build_handlers(settings, tools)
-    assert handlers.names() == ("agent",)
+    assert handlers.names() == ("agent", "durable_summary")
     assert tools.schemas(set()) == []
     store = Store(f"sqlite:///{(tmp_path / 'core.db').as_posix()}")
     store.create_schema()

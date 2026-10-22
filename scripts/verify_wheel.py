@@ -69,6 +69,32 @@ try:
         response = client.get("/metrics", headers={"Authorization":"Bearer wheel-smoke-test-token"})
         assert response.status_code == 200
         assert 'agentflow_agent_model_requests_total{outcome="reserved"} 1.0' in response.text
+    # The installed package must expose the explicit summary handler and its
+    # complete source/attempt/artifact relationship outside the checkout.
+    from agentflow.application.agents.durable_runner import DurableAgentRunner
+    from agentflow.application.ports.durable_summary import SummaryArtifact
+    from agentflow.application.tools.runtime import ToolRuntime, Tool
+    from agentflow.domain.agent.status import ToolSideEffect
+    from agentflow.infrastructure.models.mock import MockProvider
+    runtime = ToolRuntime()
+    async def read(_):
+        return {"value": "synthetic installed evidence"}
+    runtime.register(Tool("read", "read", {"type":"object"}, read, side_effect=ToolSideEffect.READ_ONLY))
+    handlers = core_handlers(settings, store=store)
+    async def source(task):
+        provider = MockProvider([{"role":"assistant", "tool_calls":[{"id":"read", "type":"function", "function":{"name":"read", "arguments":"{}"}}]}, {"role":"assistant", "content":"source"}])
+        return await DurableAgentRunner(SQLAgentStore(store), provider, runtime).run(task, "installed source", allowed={"read"})
+    handlers.register("fixture-source", source)
+    summary_run = store.submit(store.register(WorkflowSpec(name="installed-summary", steps=(
+        StepSpec(id="source", handler="fixture-source", artifact=True),
+        StepSpec(id="summary", handler="durable_summary", artifact=True, depends_on=("source",), parameters={"summary":{"enabled":True,"source_step":"source"}}),
+    ))), {})
+    worker = Worker(store, handlers)
+    assert asyncio.run(worker.tick()) and asyncio.run(worker.tick())
+    assert store.get_run(summary_run)["status"] == "succeeded"
+    outputs = [a["content"] for a in store.artifacts(summary_run)]
+    artifact = SummaryArtifact.model_validate(next(a for a in outputs if "summary_version" in a))
+    assert artifact.evidence_coverage == 1.0 and artifact.assurance == "generated_not_fact_verified"
 finally:
     store.close()
 from applications.living_guideline.evaluation import main

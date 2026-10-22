@@ -21,6 +21,7 @@ from sqlalchemy import select
 from sqlalchemy.exc import SQLAlchemyError
 
 from agentflow.application.agents.durable_runner import DurableAgentRunner
+from agentflow.application.agents.summary_runner import DurableSummaryRunner
 from agentflow.application.orchestration.worker import HandlerRegistry, Worker
 from agentflow.application.ports.agent_store import LostLease
 from agentflow.application.ports.model_provider import (
@@ -36,7 +37,7 @@ from agentflow.domain.agent.review import ApprovalDecision, ReconciliationDecisi
 from agentflow.domain.agent.status import ToolSideEffect
 from agentflow.domain.execution.task import Task
 from agentflow.domain.workflow.spec import StepSpec, WorkflowSpec
-from agentflow.infrastructure.models.mock import MockProvider
+from agentflow.infrastructure.models.mock import MockProvider, MockSummaryProvider
 from agentflow.infrastructure.persistence.agent_store import SQLAgentStore
 from agentflow.infrastructure.persistence.models import RunRow
 from agentflow.infrastructure.persistence.store import Store
@@ -177,6 +178,14 @@ async def serve(url, root, seconds):
         ).run(task, "Return a fixed harmless result.", allowed={"echo"})
 
     handlers.register("rc-agent", agent)
+
+    async def summarize(task):
+        record(root, "claim", task=task_fence_record(task))
+        return await DurableSummaryRunner(
+            agents, MockSummaryProvider(), admission=agents if policy else None
+        ).run(task)
+
+    handlers.register("durable_summary", summarize)
     handlers.register("rc-plain", plain)
     worker = Worker(store, handlers, concurrency=1, lease_seconds=3, poll_seconds=0.05)
     try:
@@ -254,9 +263,16 @@ class Workload:
                     StepSpec(id="peer", handler="rc-plain", artifact=True),
                     StepSpec(
                         id="after",
-                        handler="rc-plain",
+                        handler="durable_summary"
+                        if scenario == "summary"
+                        else "rc-plain",
                         depends_on=("agent", "peer"),
                         artifact=True,
+                        parameters={
+                            "summary": {"enabled": True, "source_step": "agent"}
+                        }
+                        if scenario == "summary"
+                        else {},
                     ),
                 ),
             )

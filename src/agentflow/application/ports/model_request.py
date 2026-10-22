@@ -174,6 +174,7 @@ class ModelRequestContract(ModelRequestOptions):
     tool_schema_digest: Digest
     token_count: TokenCount = Field(default_factory=TokenCount)
     context_egress_digest: Digest | None = None
+    summary_input_digest: Digest | None = None
     request_contract_digest: Digest
 
     @model_serializer(mode="wrap")
@@ -181,6 +182,8 @@ class ModelRequestContract(ModelRequestOptions):
         data = handler(self)
         if self.context_egress_digest is None:
             data.pop("context_egress_digest", None)
+        if self.summary_input_digest is None:
+            data.pop("summary_input_digest", None)
         return data
 
     @model_validator(mode="after")
@@ -223,6 +226,7 @@ class ModelRequestContract(ModelRequestOptions):
             self.request_contract_version != 1
             or self.context_projection_digest != projection.projected_context_digest
             or self.tool_schema_digest != projection.tool_schema_digest
+            or self.summary_input_digest != projection.summary_input_digest
             or self.context_egress_digest
             != (
                 request_digest(projection.egress.model_dump(mode="json"))
@@ -336,6 +340,8 @@ def build_request(
         values["context_egress_digest"] = request_digest(
             projection.egress.model_dump(mode="json")
         )
+    if projection.summary_input_digest is not None:
+        values["summary_input_digest"] = projection.summary_input_digest
     contract = ModelRequestContract(
         **values, request_contract_digest=request_digest(values)
     )

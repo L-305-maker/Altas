@@ -1,5 +1,6 @@
 """确定性的离线替身，仅验证接口和业务流程，不模拟真实推理质量。"""
 
+import json
 from copy import deepcopy
 
 from agentflow.application.ports.model_provider import ModelResponse
@@ -98,3 +99,51 @@ class MockProvider:
             assistant_message=response,
             finish_reason="tool_calls" if response.get("tool_calls") else "stop",
         )
+
+
+def summary_mock_response(messages):
+    """Canned protocol exercise, not summarization quality or truth evaluation."""
+    observations = [m for m in messages if m["role"] == "tool"]
+    if not observations:
+        return {
+            "role": "assistant",
+            "tool_calls": [
+                {
+                    "id": "read",
+                    "type": "function",
+                    "function": {"name": "read_summary_evidence", "arguments": "{}"},
+                }
+            ],
+        }
+    evidence = json.loads(observations[-1]["content"])["result"]["fields"][0]["value"][
+        "evidence"
+    ]
+    return {
+        "role": "assistant",
+        "content": json.dumps(
+            {
+                "summary_output_schema_version": 1,
+                "claims": [
+                    {
+                        "claim_id": "claim-1",
+                        "text": "Generated claim, not certified fact",
+                        "evidence_references": [
+                            item["reference_id"] for item in evidence
+                        ],
+                        "uncertainty": "evidence_linked",
+                        "source_attribution_status": "referenced",
+                    }
+                ],
+            }
+        ),
+    }
+
+
+class MockSummaryProvider(MockProvider):
+    def __init__(self, **options):
+        super().__init__(**options)
+        self.responses = []
+
+    async def respond(self, messages, tools=None):
+        self.responses.append(summary_mock_response(messages))
+        return await super().respond(messages, tools)

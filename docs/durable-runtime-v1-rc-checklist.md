@@ -1,5 +1,34 @@
 # Durable Runtime v1：Release Candidate 验收
 
+## First-Class Durable Summary v1（2026-10-22）
+
+审核基线 `a05f7f26e3af3e1b0449f2abf895d70652198ca9`，仅 main，无新分支/PR/迁移或生产数据操作。
+完整契约、权限及限制见 [Durable Summarization](durable-summarization.md)。
+
+| 检查 | 状态 | 本轮实际证据 |
+| --- | --- | --- |
+| 先失败回归 | PASS | 基线没有 SummaryPolicy/Runner；实现过程中另外先复现并修复源 metadata 权限扩大、对账替换冻结读取结果（Provider.calls=1 → 0）、策略漂移阻断取消三项边界 |
+| 独立执行与原始事实 | PASS | 显式 durable_summary Step；独立 Session/两轮 ModelAttempt/真实只读 Action/usage；源审批已消费、UNKNOWN 后人工确认、历史和 Artifact 不变；摘要失败只终结自身，不逆转源成功 |
+| 来源与模型角色 | PASS | 同 Run 的真实已成功依赖、Step key→UUID、完整源历史/StepSpec/revision/hash；完整绑定授权、私密字段无原文/结果路径引用；六类合成恶意字符串只在真实 tool 数据内，不在 system/user，伪造引用/审批/动作 JSON 拒绝 |
+| 确定性与 Artifact | PASS | 相同来源/策略/目标 Step 的 Manifest 固定；每条声明引用或不确定性、选定引用覆盖率/遗漏列表；事务内重验原响应/源/真实只读结果；恢复时只读复核成功 Attempt/Contract；不自动注入下游默认 Agent |
+| 完整 pytest | PASS | `uv run pytest -q`：1008 passed、425 skipped，155.63 秒；1 项已有 TestClient 弃用警告；专用 PostgreSQL、本地 Docker 及显式付费用例的跳过不计为通过 |
+| Ruff | PASS | `ruff check src tests scripts migrations evals` 与 `ruff format --check src tests scripts migrations evals`：171 files already formatted |
+| PostgreSQL 发布专项 | PASS | `verify_postgres.py --bin D:/PSQL/bin --release-gates`：822 passed、零跳过，337.72 秒；独立引擎/CAS/旧 token、全部历史迁移、真实崩溃、取消和原有 Agent 回归 |
+| 最后摘要/取消 PG 组合 | PASS | 独立临时 PostgreSQL 执行摘要契约、整体故障、真实子进程与完整取消回归：138 passed、零跳过，66.84 秒；包含发布专项收集后补充的取消策略漂移用例，计数重叠不合算唯一测试数 |
+| 三 Worker Soak | PASS | `--seconds 30 --workload 6 --seed 7`：34.50 秒、24 Run、14 派发、43 领取；新摘要 Run 与原审批/对账/延期/取消并存 |
+| 实际逻辑备份恢复 | PASS | pg_dump/pg_restore，0008、15 表、15 Run（4 个旧 v1/v2 终态）；Summary Source/Attempt/Contract/Artifact、原 v1/v2/v3、权限/审批/对账/用量全部事实一致；已完成重派 0，新批准派发 1 |
+| 构建 / 仓库外 Wheel / 参考应用 | PASS | uv build；安装后实际 source Agent→durable_summary 闭环及类型化 Artifact 校验，原 Core/metrics/参考应用继续；离线评估 3/3，traceability 1.0，架构与通用 API 组合 5 passed |
+| 本地 Docker / Compose | NOT VERIFIED | DockerDesktopLinuxEngine daemon pipe 不存在；以最终提交实际 GitHub CI 结果为准，不将本地跳过计为通过 |
+| 真实 Provider / 跨宿主 / 生产 HA/PITR | NOT VERIFIED | 真实付费请求 0；Mock 不证明真实 LLM 抗注入/质量，单机进程和逻辑恢复不证明网络分区/零数据丢失 |
+
+数据库专项另在隔离的真实 PostgreSQL 实际验证；不将其计数与完整 pytest 相加为唯一用例数。
+保持 0001–0008，使用现有 JSON 和 Artifact 表，没有历史摘要/usage 回填；旧请求的新键 None 完全省略。
+v1 仅行动公开摘录和状态元数据，4 KiB 来源输入；不摘要原 user/assistant 正文，不递归摘要，不接受 pins 或
+workflow_identifiers。引用可定位但不认证事实，模型可遗漏或幻觉，覆盖率只代表选定引用。
+确认可恢复模型失败才有界延期，终态失败/UNKNOWN 不重发；取消传播与最多五秒清理不变。
+生产发布仍需真实 Provider、跨主机、长时负载和恢复运维验收。后续消费 Summary 必须独立授权并保持非特权角色，
+不能授予行动、审批、对账或替换原历史的权限。
+
 ## Provider Context Egress v1（2026-10-21）
 
 审核基线 `b0f4a7a031af2f8cab5df08ae3b6fdd50c68ce8b`，仅 main，无新分支/PR/迁移或生产数据库操作。

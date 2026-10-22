@@ -1,5 +1,9 @@
 # Provider Context Egress Control v1
 
+独立 [Durable Summary](durable-summarization.md) 同样必须执行来源 Egress/v3 披露，不能借摘要扩大源显式
+metadata_only 或其他披露边界。模型通过真实、固定来源只读工具获取获准证据；不发送原 Session/Prompt。
+摘要自己的 ModelAttempt/Contract 另绑定 summary_input_digest，并继续经过预算、用量和准入门禁。
+
 本功能显式控制 **Tool Observation Result** 的 Provider 外发视图。完整消息、原始结果、审批、对账、
 Action ID、幂等键和用量账本不变。它不执行模型摘要，也不构成所有输入的 DLP。
 

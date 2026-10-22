@@ -13,6 +13,7 @@ from agentflow.application.ports.context_projection import (
     ContextProjectionManifest,
     ContextProjectionReservation,
 )
+from agentflow.application.ports.durable_summary import SummarySourceStore
 from agentflow.application.ports.model_request import ModelRequestContract
 from agentflow.application.ports.model_usage import (
     ModelUsage,
@@ -230,3 +231,7 @@ class AgentStore(Protocol):
     ) -> AgentSession:
         """确认模型失败并原子释放租约；延迟 (0, 3600] 秒按数据库时钟结算。"""
         ...
+
+
+class DurableSummaryStore(AgentStore, SummarySourceStore, Protocol):
+    """Same AgentStore transactions, plus owned stable summary-source reads."""

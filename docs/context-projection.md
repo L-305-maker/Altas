@@ -1,5 +1,8 @@
 # Durable Context Projection v1
 
+[Durable Summary](durable-summarization.md) 是独立显式 Step。project_context 没有隐藏模型调用，也不
+自动用摘要替换历史。摘要请求的 Manifest 可额外绑定 summary_input_digest；旧记录省略新键、字节不变。
+
 显式 [Provider Context Egress](provider-context-egress.md) 在完整历史验证后、窗口选择前过滤工具结果。
 未配置时 full/recent 保持兼容；新视图仍保留真实 Core Action ID、工具顺序及所有必要 system/user 消息。
 Manifest 的可选 egress 绑定历史 Action/观察和策略摘要；旧请求省略该字段。非 checkpoint 安全路径用

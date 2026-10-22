@@ -14,6 +14,18 @@ from agentflow.application.agents.checkpoint import build_checkpoint
 from agentflow.application.agents.context import AgentContextBuilder, UnresolvedActions
 from agentflow.application.agents.egress import prepare_egress
 from agentflow.application.agents.projection import project_context
+from agentflow.application.agents.summary import (
+    SummarySourceError,
+    build_summary_input,
+    check_source_disclosure,
+    check_summary_execution,
+    publish_summary,
+    stored_summary_input,
+    summary_agent_parameters,
+    summary_messages,
+    summary_policy,
+    validate_summary_draft,
+)
 from agentflow.application.ports.agent_store import (
     ActionObservation,
     AgentDataError,
@@ -35,6 +47,7 @@ from agentflow.application.ports.context_projection import (
     ContextProjectionManifest,
     ContextProjectionPolicy,
 )
+from agentflow.application.ports.durable_summary import HANDLER, SummaryInput
 from agentflow.application.ports.evidence_checkpoint import EvidenceCheckpointPolicy
 from agentflow.application.ports.model_request import (
     ModelRequestContract,
@@ -58,6 +71,7 @@ from agentflow.application.ports.provider_admission import (
     ProviderAdmissionPolicy,
 )
 from agentflow.domain.agent.action import Action, digest_arguments
+from agentflow.domain.agent.budget import AgentBudget
 from agentflow.domain.agent.review import (
     ActionApproval,
     ActionReconciliation,
@@ -155,7 +169,17 @@ class SQLAgentStore:
         spec = next(
             s for s in WorkflowSpec.model_validate(run.spec).steps if s.id == step.key
         )
-        raw = spec.parameters.get("agent", {}).get("observed_usage")
+        if spec.handler == HANDLER:
+            # Cleanup must not depend on today's dispatch policy being valid.
+            # Summary open verified this immutable initialization atomically.
+            message = db.scalar(
+                select(AgentMessageRow).where(
+                    AgentMessageRow.session_id == row.id, AgentMessageRow.sequence == 1
+                )
+            )
+            raw = message.payload["summary_input"]["policy"].get("observed_usage")
+        else:
+            raw = spec.parameters.get("agent", {}).get("observed_usage")
         workflow = ObservedUsagePolicy.model_validate(raw) if raw is not None else None
         return stricter_policy(binding.deployment_policy, workflow)
 
@@ -200,15 +224,19 @@ class SQLAgentStore:
             .with_for_update()
         )
 
-    def _read(self, db, row, *, reserve_capacity=False):
+    def _read(self, db, row, *, reserve_capacity=False, lock=True):
+        def locked(query):
+            return query.with_for_update() if lock else query
+
         try:
             # Run/Step/Session 已持锁；审批先于模型和 Action 获取锁。
             approval_rows = list(
                 db.scalars(
-                    select(AgentActionApprovalRow)
-                    .where(AgentActionApprovalRow.session_id == row.id)
-                    .order_by(AgentActionApprovalRow.id)
-                    .with_for_update()
+                    locked(
+                        select(AgentActionApprovalRow)
+                        .where(AgentActionApprovalRow.session_id == row.id)
+                        .order_by(AgentActionApprovalRow.id)
+                    )
                 )
             )
             snapshot = AgentSnapshot.model_validate(checked_json(row.snapshot))
@@ -243,12 +271,13 @@ class SQLAgentStore:
                     usage=checked_json(c.usage, MAX_MESSAGE_BYTES),
                 )
                 for c in db.scalars(
-                    select(AgentModelCallRow)
-                    .where(
-                        AgentModelCallRow.session_id == row.id,
+                    locked(
+                        select(AgentModelCallRow)
+                        .where(
+                            AgentModelCallRow.session_id == row.id,
+                        )
+                        .order_by(AgentModelCallRow.round_index)
                     )
-                    .order_by(AgentModelCallRow.round_index)
-                    .with_for_update()
                 )
             )
             call_order = {call.model_call_id: call.round_index for call in calls}
@@ -279,13 +308,14 @@ class SQLAgentStore:
                     else None,
                 )
                 for a in db.scalars(
-                    select(AgentModelAttemptRow)
-                    .where(AgentModelAttemptRow.session_id == row.id)
-                    .order_by(
-                        AgentModelAttemptRow.model_call_id,
-                        AgentModelAttemptRow.attempt_index,
+                    locked(
+                        select(AgentModelAttemptRow)
+                        .where(AgentModelAttemptRow.session_id == row.id)
+                        .order_by(
+                            AgentModelAttemptRow.model_call_id,
+                            AgentModelAttemptRow.attempt_index,
+                        )
                     )
-                    .with_for_update()
                 )
             ]
             if any(a.model_call_id not in call_order for a in attempts):
@@ -315,12 +345,13 @@ class SQLAgentStore:
             )
             actions = []
             for a in db.scalars(
-                select(AgentActionRow)
-                .where(
-                    AgentActionRow.session_id == row.id,
+                locked(
+                    select(AgentActionRow)
+                    .where(
+                        AgentActionRow.session_id == row.id,
+                    )
+                    .order_by(AgentActionRow.model_call_id, AgentActionRow.call_index)
                 )
-                .order_by(AgentActionRow.model_call_id, AgentActionRow.call_index)
-                .with_for_update()
             ):
                 arguments = checked_json(a.arguments, MAX_ARGUMENT_BYTES)
                 if digest_arguments(
@@ -781,6 +812,26 @@ class SQLAgentStore:
             raise StateConflict("initial messages must be context messages")
         data = initial_snapshot.model_dump(mode="json")
         with self._owned_transaction(task) as (db, run, step):
+            spec = self._step_spec(run, step)
+            if spec.handler == HANDLER:
+                plan = self._summary_input(db, run, step)
+                limits = summary_agent_parameters(spec)
+                expected_budget = AgentBudget(
+                    **{
+                        k: limits[k]
+                        for k in (
+                            "max_model_rounds",
+                            "max_model_attempts",
+                            "max_tool_calls",
+                        )
+                    },
+                    max_resource_units=0,
+                )
+                if (
+                    messages != summary_messages(plan)
+                    or initial_snapshot.budget != expected_budget
+                ):
+                    raise SummarySourceError("SummaryInitializationInvalid")
             if run.usage_governance is None:
                 run.usage_governance = UsageGovernanceBinding(
                     deployment_policy=self.observed_usage_policy,
@@ -818,11 +869,67 @@ class SQLAgentStore:
         return result
 
     def load(self, task: Task) -> AgentSession:
-        with self._owned_transaction(task) as (db, _run, step):
+        with self._owned_transaction(task) as (db, run, step):
             row = self._session(db, step)
             if row is None:
                 raise StateConflict("agent session is not initialized")
             result = self._read(db, row)
+            if self._step_spec(run, step).handler == HANDLER:
+                self._checked_summary_input(db, run, step, result)
+        return result
+
+    def _step_spec(self, run, step):
+        return next(
+            s for s in WorkflowSpec.model_validate(run.spec).steps if s.id == step.key
+        )
+
+    def _summary_input(self, db, run, step):
+        spec = self._step_spec(run, step)
+        policy = summary_policy(spec)
+        # The owned Run lock serializes every writer in this Run. Source reads
+        # take no later row locks, preserving Run -> Step -> Session -> Attempt.
+        source_step = db.scalar(
+            select(StepRow).where(
+                StepRow.run_id == run.id, StepRow.key == policy.source_step
+            )
+        )
+        if (
+            source_step is None
+            or source_step.status != "succeeded"
+            or self._step_spec(run, source_step).handler == HANDLER
+        ):
+            raise SummarySourceError("SummarySourceNotTerminal")
+        source_row = db.scalar(
+            select(AgentSessionRow).where(AgentSessionRow.step_row_id == source_step.id)
+        )
+        if source_row is None:
+            raise SummarySourceError()
+        check_source_disclosure(self._step_spec(run, source_step), policy)
+        return build_summary_input(
+            self._read(db, source_row, lock=False),
+            policy,
+            run_id=run.id,
+            source_step=source_step,
+            source_updated_at=source_row.updated_at,
+            owner_step_id=step.id,
+            source_spec=self._step_spec(run, source_step),
+        )
+
+    def _checked_summary_input(self, db, run, step, state):
+        plan = stored_summary_input(state)
+        if self._summary_input(db, run, step) != plan:
+            raise SummarySourceError("SummarySourceChanged")
+        check_summary_execution(plan, state)
+        return plan
+
+    def summary_source(self, task: Task) -> SummaryInput:
+        with self._owned_transaction(task) as (db, run, step):
+            row = self._session(db, step)
+            result = (
+                self._checked_summary_input(db, run, step, self._read(db, row))
+                if row is not None
+                else self._summary_input(db, run, step)
+            )
         return result
 
     def usage_summary(self, session_id: str) -> ModelUsageSummary:
@@ -860,7 +967,7 @@ class SQLAgentStore:
                 raise StateConflict(
                     "invalid model admission reservation or provider binding"
                 )
-            self._validate_projection(run, step, state, transition)
+            self._validate_projection(db, run, step, state, transition)
             row.provider_key = self.admission_policy.provider_key
             self._check_observed_usage(db, row, state)
             grant = self.admission.acquire(
@@ -908,7 +1015,7 @@ class SQLAgentStore:
                 db, task, self._read(db, row), permit, self.admission_policy
             )
 
-    def _validate_projection(self, run, step, state, transition):
+    def _validate_projection(self, db, run, step, state, transition):
         request = transition.context_projection
         contract = transition.request_contract
         starts = (
@@ -924,7 +1031,16 @@ class SQLAgentStore:
         spec = next(
             s for s in WorkflowSpec.model_validate(run.spec).steps if s.id == step.key
         )
-        config = spec.parameters.get("agent", {})
+        config = (
+            summary_agent_parameters(spec)
+            if spec.handler == HANDLER
+            else spec.parameters.get("agent", {})
+        )
+        summary = (
+            self._checked_summary_input(db, run, step, state)
+            if spec.handler == HANDLER
+            else None
+        )
         retry = bool(state.model_calls and state.model_calls[-1].status == "failed")
         previous = state.model_attempts[-1].context_projection if retry else None
         # Preserve older direct Store clients. Explicit projection configuration
@@ -970,6 +1086,9 @@ class SQLAgentStore:
                 config.get("max_context_bytes", 1_000_000),
                 checkpoint=checkpoint,
                 egress=egress,
+                summary_input_digest=summary.manifest.summary_input_digest
+                if summary
+                else None,
             )
             expected = projected.manifest
         except (ValidationError, UnresolvedActions):
@@ -1004,7 +1123,7 @@ class SQLAgentStore:
             old.advance(candidate)
         except (ValueError, InvalidStateTransitionError):
             raise StateConflict("invalid agent revision or state transition") from None
-        self._validate_projection(run, step, old_state, transition)
+        self._validate_projection(db, run, step, old_state, transition)
         if (
             old.status == AgentStatus.READY_MODEL
             and candidate.status == AgentStatus.MODEL_INFLIGHT
@@ -1374,6 +1493,22 @@ class SQLAgentStore:
             row = self._session(db, step)
             if row is None:
                 raise StateConflict("agent session is not initialized")
+            spec = self._step_spec(run, step)
+            if mode == "complete" and spec.handler == HANDLER:
+                before = self._read(db, row)
+                plan = self._checked_summary_input(db, run, step, before)
+                if len(transition.messages) != 1:
+                    raise SummarySourceError("SummaryOutputInvalid")
+                content = (
+                    transition.messages[0].payload.get("message", {}).get("content", "")
+                )
+                draft, _, _ = validate_summary_draft(plan, before, content)
+                if output != draft.model_dump(mode="json"):
+                    raise SummarySourceError("SummaryOutputInvalid")
+                output = publish_summary(
+                    plan, before, content, self.store._now(db)
+                ).model_dump(mode="json")
+                encoded = json_bytes(output)
             if mode == "defer":
                 old_state = self._read(db, row)
                 old = old_state.snapshot
@@ -1396,7 +1531,7 @@ class SQLAgentStore:
                     )
             result = self._apply(db, run, step, row, transition, task=task)
             if mode == "complete":
-                if result.observed_usage is not None:
+                if result.observed_usage is not None and spec.handler != HANDLER:
                     output = {
                         **(output if isinstance(output, dict) else {"value": output}),
                         "observed_usage": result.observed_usage.model_dump(mode="json"),

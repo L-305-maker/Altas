@@ -83,6 +83,7 @@ def project_context(
     *,
     checkpoint: "EvidenceCheckpoint | EvidenceCandidates | None" = None,
     egress: "EgressContext | None" = None,
+    summary_input_digest: str | None = None,
 ) -> ProjectedContext:
     """Drop the fewest oldest complete rounds that make the request fit.
 
@@ -195,6 +196,7 @@ def project_context(
                     tool_schema_digest=schema_digest,
                     checkpoint=rendered.manifest if rendered else None,
                     egress=egress.manifest if egress else None,
+                    summary_input_digest=summary_input_digest,
                 ),
             )
     except (

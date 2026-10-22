@@ -1,5 +1,14 @@
 # Durable Runtime v1：备份、恢复及 staging 演练
 
+## Durable Summary 发布与恢复
+
+摘要的配置及限制见 [Durable Summarization](durable-summarization.md)。无新 schema，仍为 Alembic 0008；
+必须统一升级 Writer 后启用新 Step。初始化消息中的冻结 SummaryInput、逐次请求的 summary_input_digest、
+只读 Action 结果和最终 SummaryArtifact 均须一并备份，不能只导出生成文本而丢弃引用/策略关系。
+逻辑恢复演练新增摘要 Run，对比全部表并用原输入、成功 Attempt/Contract 和原响应复核 Artifact；
+恢复 Worker 不重新请求 UNKNOWN 或重派已保存只读结果，不向原 Agent 预算补记摘要费用。
+未启用该 handler 的旧库继续运行；不存在历史摘要/usage 回填。真实供应商和生产 HA/PITR 不由逻辑演练证明。
+
 ## Provider Egress 发布检查
 
 策略/兼容矩阵见 [Provider Context Egress](provider-context-egress.md)。0008 schema 不变；旧 Attempt 的

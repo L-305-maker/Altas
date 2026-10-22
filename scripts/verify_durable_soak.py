@@ -39,6 +39,9 @@ def exercise(cluster, workload, *, seconds, count, seed):
     workload.wait(lambda: workload.store.get_run(reviewed)["status"] == "succeeded")
     isolated = workload.store.get_run(reviewed)
     completed.append(reviewed)
+    summarized = workload.submit("summary")
+    workload.wait(lambda: workload.store.get_run(summarized)["status"] == "succeeded")
+    completed.append(summarized)
 
     retry = workload.submit("retry")
     delayed = workload.wait(

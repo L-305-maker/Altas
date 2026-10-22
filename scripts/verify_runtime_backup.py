@@ -117,6 +117,8 @@ def drill(cluster):
         done = source.submit("normal")
         source.wait(lambda: source.status(done, "succeeded"))
         source.wait(lambda: source.store.get_run(done)["status"] == "succeeded")
+        summarized = source.submit("summary")
+        source.wait(lambda: source.store.get_run(summarized)["status"] == "succeeded")
         reviewed = source.submit("review")
         source.approve(reviewed)
         source.wait(lambda: source.status(reviewed, "succeeded"))
@@ -161,7 +163,8 @@ def drill(cluster):
             a["context_projection"] is not None for a in facts["agent_model_attempts"]
         )
         assert all(
-            a["context_projection"]["checkpoint"]["references"]
+            a["context_projection"].get("summary_input_digest")
+            or a["context_projection"]["checkpoint"]["references"]
             for a in facts["agent_model_attempts"]
         )
         assert all(
@@ -170,6 +173,7 @@ def drill(cluster):
         assert {
             a["context_projection"]["checkpoint"]["checkpoint_version"]
             for a in facts["agent_model_attempts"]
+            if a["context_projection"].get("checkpoint")
         } == {1, 2, 3}
         assert all(
             a.context_projection.egress is not None
@@ -233,6 +237,18 @@ def drill(cluster):
         target.runs = list(source.runs)
         target.scenarios = dict(source.scenarios)
         assert inventory(target.store) == facts, "RestoreFactMismatch"
+        from agentflow.application.agents.summary import (
+            stored_summary_input,
+            verify_summary_artifact,
+        )
+
+        for runtime in (source, target):
+            summary_state = runtime.invariants(runtime.store, summarized)["after"]
+            verify_summary_artifact(
+                stored_summary_input(summary_state.agent),
+                summary_state.agent,
+                summary_state.artifacts[0],
+            )
         assert {r: target.invariants(target.store, r) for r in legacy_runs} == legacy
         migrate(target_url)
         with target.store.engine.connect() as db:
@@ -294,6 +310,7 @@ def drill(cluster):
             "admission_restored": True,
             "observed_usage_restored": True,
             "checkpoint_versions_restored": [1, 2, 3],
+            "summary_artifact_restored": True,
             "backup": "logical pg_dump/pg_restore; not HA/PITR",
         }
     finally:

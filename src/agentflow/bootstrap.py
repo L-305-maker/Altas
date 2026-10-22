@@ -4,11 +4,12 @@ from pathlib import Path
 
 from agentflow.application.agents.durable_runner import DurableAgentRunner
 from agentflow.application.agents.runner import AgentRunner
+from agentflow.application.agents.summary_runner import DurableSummaryRunner
 from agentflow.application.orchestration.worker import HandlerRegistry
 from agentflow.application.tools.runtime import Tool, ToolRuntime
 from agentflow.config import Settings
 from agentflow.infrastructure.models.deepseek import DeepSeekProvider
-from agentflow.infrastructure.models.mock import MockProvider
+from agentflow.infrastructure.models.mock import MockProvider, MockSummaryProvider
 from agentflow.infrastructure.persistence.agent_store import SQLAgentStore
 from agentflow.infrastructure.persistence.store import Store
 from agentflow.infrastructure.sandbox.docker import DockerSandbox
@@ -103,4 +104,19 @@ def build_handlers(
         )
 
     registry.register("agent", agent)
+
+    async def summarize(task):
+        if agent_store is None:
+            raise ValueError("durable summary requires the worker Store")
+        return await DurableSummaryRunner(
+            agent_store,
+            provider
+            or MockSummaryProvider(
+                provider_key=settings.model_provider_key or "mock",
+                request_options=settings.model_request,
+            ),
+            admission=agent_store if settings.provider_admission else None,
+        ).run(task)
+
+    registry.register("durable_summary", summarize)
     return registry

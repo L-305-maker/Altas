@@ -1,5 +1,9 @@
 # Evidence Checkpoint v3：ToolBinding 披露授权、信任边界与历史兼容
 
+[Durable Summary v1](durable-summarization.md) 可显式选择已成功来源中的公开行动摘录与状态元数据。
+复用本页 v3 历史绑定决策，不能从被拒绝的结果路径生成有效公开引用；摘录/引用不是事实认证。
+摘要模型调用是独立 Workflow 执行，不在 build_checkpoint 内发生，也不自动替代当前 checkpoint。
+
 显式 [Provider Context Egress](provider-context-egress.md) 现在也支持 full/recent 工具结果过滤。
 未配置时本页旧 v3 字节不变；同时配置仅接受完全相同的 v3 disclosure（含规则顺序/限额），否则预约前
 AgentContextEgressPolicyConflict。metadata_only 不与公开 v3 规则取并集；不改写已有 checkpoint Manifest。

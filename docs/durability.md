@@ -1,5 +1,13 @@
 # 持久执行语义
 
+## 独立 Durable Summary
+
+[Durable Summarization v1](durable-summarization.md) 使用显式 durable_summary Step 与独立 Session/预算/Attempt。
+只读证据来自同 Run 的已成功依赖，完整历史先验证，经源策略与 v3/Egress 授权，不复制整个 Session。
+真实只读工具完成正常 Action 预约后供模型读取；生成引用在 Artifact/Step/Agent 原子成功事务内复核。
+摘要是派生记录，不替换历史，也不自动注入默认后续 Agent。确认可恢复模型失败才有界延期，UNKNOWN 不重发；
+原租约、CAS/fencing、审批/对账和五秒取消清理不变。使用原 JSON/Artifact 表，没有 0009。
+
 ## Provider Tool Result Egress
 
 可选 [Provider Context Egress](provider-context-egress.md) 对 full/recent 的工具结果提供 metadata_only 或

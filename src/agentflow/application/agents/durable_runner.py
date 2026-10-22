@@ -20,6 +20,10 @@ from agentflow.application.agents.context import (
 )
 from agentflow.application.agents.egress import prepare_egress
 from agentflow.application.agents.projection import project_context
+from agentflow.application.agents.summary import (
+    stored_summary_input,
+    summary_agent_parameters,
+)
 from agentflow.application.ports.agent_store import (
     ActionArguments,
     ActionObservation,
@@ -37,6 +41,7 @@ from agentflow.application.ports.context_projection import (
     ContextProjectionPolicy,
     ContextProjectionReservation,
 )
+from agentflow.application.ports.durable_summary import HANDLER
 from agentflow.application.ports.evidence_checkpoint import EvidenceCheckpointPolicy
 from agentflow.application.ports.handler_result import CommittedAgentResult
 from agentflow.application.ports.model_provider import (
@@ -186,14 +191,36 @@ class DurableAgentRunner:
     async def run(
         self, task: Task, prompt: str, *, allowed: set[str]
     ) -> CommittedAgentResult:
-        parameters = dict(task.spec.parameters.get("agent", {}))
+        parameters = (
+            summary_agent_parameters(task.spec)
+            if task.spec.handler == HANDLER
+            else dict(task.spec.parameters.get("agent", {}))
+        )
         parameters.pop("mode", None)
         config = DurableAgentConfig.model_validate(parameters)
         initial = AgentSnapshot(
             id=hashlib.sha256(task.idempotency_key.encode()).hexdigest(),
             budget=config.initial_budget(),
         )
-        messages = (
+        messages = self._initial_messages(task, prompt)
+        state = await asyncio.to_thread(
+            self.store.open, task, initial, messages=messages
+        )
+        return await self._execute(task, state, allowed, config)
+
+    def _initial_messages(self, task, prompt):
+        # Summary v1 publishes artifacts only. Do not automatically promote a
+        # derived artifact dependency into the next Agent's user context.
+        dependencies = {
+            k: v
+            for k, v in task.dependencies.items()
+            if not (
+                isinstance(v, dict)
+                and v.get("assurance") == "generated_not_fact_verified"
+                and "summary_version" in v
+            )
+        }
+        return (
             AgentMessage(
                 sequence=0,
                 role="system",
@@ -206,17 +233,14 @@ class DurableAgentRunner:
                 role="user",
                 payload={
                     "content": json.dumps(
-                        finite_json(
-                            {"goal": prompt, "dependencies": task.dependencies}
-                        ),
+                        finite_json({"goal": prompt, "dependencies": dependencies}),
                         ensure_ascii=False,
                     )
                 },
             ),
         )
-        state = await asyncio.to_thread(
-            self.store.open, task, initial, messages=messages
-        )
+
+    async def _execute(self, task, state, allowed, config):
         while True:
             status = state.snapshot.status
             if status == AgentStatus.MODEL_INFLIGHT:
@@ -310,6 +334,11 @@ class DurableAgentRunner:
                 config.max_context_bytes,
                 checkpoint=checkpoint,
                 egress=egress,
+                summary_input_digest=stored_summary_input(
+                    state
+                ).manifest.summary_input_digest
+                if task.spec.handler == HANDLER
+                else None,
             )
             if retry and (
                 not state.model_attempts
@@ -520,21 +549,28 @@ class DurableAgentRunner:
             model_result=self._model_result(state, "succeeded", response),
         )
         try:
+            output = self._final_output(state, response)
             saved = await asyncio.to_thread(
                 self.store.complete_agent_step,
                 task,
                 transition,
-                {"text": message.content, "rounds": state.snapshot.budget.model_rounds},
+                output,
             )
-        except AgentDataError:
+        except AgentDataError as error:
             return state, await self._fail(
                 task,
                 state,
-                "AgentStorageLimit",
+                getattr(error, "code", "AgentStorageLimit"),
                 model_status="failed",
                 response=response,
             )
         return saved, self._result(task, saved)
+
+    def _final_output(self, state, response):
+        return {
+            "text": response.assistant_message.content,
+            "rounds": state.snapshot.budget.model_rounds,
+        }
 
     def _assistant(self, state, response, ids, invalid=()):
         return AgentMessage(

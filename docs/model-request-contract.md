@@ -1,5 +1,10 @@
 # Immutable Model Request Contract & Capability Preflight v1.1
 
+[Durable Summary](durable-summarization.md) 的 Projection/Contract 使用可选 summary_input_digest 固定来源、
+策略及证据身份；初始只读工具轮次和最终 JSON 轮次共享该身份，各有自己的 Attempt/Contract/usage。
+新字段参与契约摘要与重试连续性校验；普通历史请求完全省略此键。Store 重新验证来源后才发放 Permit，
+不在 Capability/Token Preflight 内隐藏摘要请求，也不把生成结论当成工具执行授权。
+
 显式 [Provider Context Egress](provider-context-egress.md) 在 ProjectionManifest 中保存可选 egress 身份，
 Contract.context_egress_digest 绑定整个该 Manifest 并参与 request_contract_digest；未启用时完全省略新键。
 模型重试核对整个投影/Contract，因此策略变化即使没有改变文本也 fail-closed。使用既有 JSON，无新迁移；

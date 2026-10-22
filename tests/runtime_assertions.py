@@ -108,6 +108,19 @@ class RuntimeInvariants:
                         select(ArtifactRow).where(ArtifactRow.step_id == step.id)
                     )
                 )
+                if (
+                    specs[step.key].handler == "durable_summary"
+                    and state.snapshot.status == "succeeded"
+                ):
+                    from agentflow.application.agents.summary import (
+                        stored_summary_input,
+                        verify_summary_artifact,
+                    )
+
+                    assert len(artifacts) == 1
+                    verify_summary_artifact(
+                        stored_summary_input(state), state, artifacts[0]
+                    )
                 saved = Checkpoint(
                     state,
                     {
