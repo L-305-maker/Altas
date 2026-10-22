@@ -1,5 +1,36 @@
 # Durable Runtime v1：Release Candidate 验收
 
+## Verified Token Window Preflight v1（2026-10-22）
+
+审核基线 `68fc2675932c579b83809465e4e6bd9be35978dd`，仅 main；
+契约、官方来源及候选资产 SHA-256 见 [Token Window Conformance](token-window-conformance.md)。
+有可信 Profile 的请求使用显式 v2，旧 v1 摘要及读取不变；仍为迁移 0008，无生产数据库操作。
+
+| 检查 | 状态 | 证据/边界 |
+| --- | --- | --- |
+| 失败回归 | PASS | 先复现缺少 Profile 身份；另复现 Store 用 v1 已知计数预约绕过、版本布尔值被当作 1、冻结后并发修改导致计数/执行视图不同，再做最小修复 |
+| 模型绑定、边界及完整请求 | PASS | Profile 模型/能力/资产/模板漂移；等于窗口允许、超一拒绝；Unicode、多工具/Schema、JSON；只计最终投影/Egress，生成器/消费者各自计数 |
+| 旧事实与容量 | PASS | v1 固定 SHA、旧 Fixture；v2 复用 Attempt JSON；已有单事务/会话上限保留，取消 UNKNOWN 余量回归 |
+| 最终完整 pytest | PASS | `uv run pytest -q`：1108 passed、497 skipped，244.56 秒；1 项已有 TestClient 弃用警告。跳过不计通过，专用 PostgreSQL 独立实际执行 |
+| PostgreSQL 发布门禁 | PASS | `uv run python scripts/verify_postgres.py --bin D:/PSQL/bin --release-gates`：499 passed、467 deselected、零跳过，316.93 秒；全清单保留 489 个 PG 节点及 10 个共享用例，467 个 SQLite 副本交给完整 pytest |
+| Ruff / 架构 / 离线评估 | PASS | check 与 format --check：182 files；架构 3 passed；离线评估 3/3，traceability 1.0 |
+| 三独立 Worker 持续演练 | PASS | `verify_durable_soak.py --bin D:/PSQL/bin --seconds 180 --workload 6 --seed 7`：195.14 秒、32 波、200 Run、103 派发、329 领取；含合成 v2 Profile、旧审批/UNKNOWN/延期/取消和真实进程/数据库故障，cross_host=NOT VERIFIED |
+| 实际备份恢复 | PASS | `verify_runtime_backup.py --bin D:/PSQL/bin`：0008、15 表、17 个恢复 Run（含 4 个旧终态）；v2 Profile、v1/v2/v3 Checkpoint、Summary/Consumer、Admission/Usage 完整恢复，已完成重派 0、新批准派发 1；不是 HA/PITR |
+| 构建 / 仓库外 Wheel / 参考应用 | PASS | `uv build`；`verify_wheel.py dist/agentflow-1.0.0-py3-none-any.whl` 在新虚拟环境安装，实际 Core/metrics/参考应用与 source→summary→consumer 闭环，离线评估 3/3；包含新 Profile/Conformance API |
+| 本地 Docker / Compose | NOT VERIFIED | 本机 DockerDesktopLinuxEngine 不可用；两项 Sandbox 测试默认 opt-in 跳过。推送后核对最终提交的实际 Docker/Compose CI，不把本地跳过计为通过 |
+| 真实 DeepSeek Counter | NOT VERIFIED | 当前目录/公开 V4 包不能证明托管 V4.1-Flash-1017/Pro-0813 的完整 framing 等价性，exact/upper_bound Profile 均未启用，strict 拒绝 |
+| 真实付费 Token 对照 | NOT VERIFIED | LIVE TOKEN CONFORMANCE NOT VERIFIED，未授权、未发送付费请求；Mock Counter 只证明 Core 契约 |
+| 真实 Tokenizer 加载/吞吐 | NOT APPLICABLE | 本轮没有启用生产 Tokenizer；已有请求/向量/资产大小界限，启动时一次验证，纯计数线程不阻塞事件循环，不承诺终止有缺陷同步线程 |
+| 跨主机网络分区 | NOT VERIFIED | 隔离本机 PostgreSQL/多进程不能替代跨主机 staging |
+
+本表记录推送前的实际本地结果；最终交付报告提供对应 main Commit 的实际 GitHub CI 链接。
+代码契约可审核合入与真实 DeepSeek strict 可投产是两项不同结论。
+
+原先 PostgreSQL 门禁重复执行 SQLite/PG 两个后端，在本机独立执行两次均触及原 600 秒上限，
+这两次未计通过。现保留同一测试清单和 600 秒上限，专项去重 SQLite：收集比对确认原 966 项中
+全部 PG 节点保留，所去除的仅为 467 个 SQLite 副本；选择器另有实际 pytest 回归。
+完整 `uv run pytest -q` 仍执行 SQLite/全部共享测试，没有新增 skip 标记、关闭检查或放宽租约。
+
 ## Summary-Aware Context Consumption v1（2026-10-22）
 
 审核基线 `9395dba35364c176ad0c9cb8a499b78864c04af7`；仅 main，没有新分支、PR、生产数据库或付费请求。

@@ -1,5 +1,9 @@
 # Summary-Aware Context Consumption v1
 
+[Token Window](token-window-conformance.md) 在消费授权、Egress 和投影完成后计量实际冻结消息及完整工具 Schema。
+消费视图、声明数与 Artifact 字节数均不替代完整请求 Token 数；独立消费模型请求仍须预算、用量治理和 Admission。
+有 Profile 的 v2 Contract 同时保留 summary_consumption_digest；旧 v1 身份不变。
+
 Summary 是模型生成的派生 Artifact，不是权威历史、事实认证、操作员声明或执行许可。
 生成授权和消费授权分别检查。默认 `disabled` 保留原模型输入；没有隐藏模型请求、自动摘要替换、
 Memory、RAG 或 Planner。只有明确配置的 Durable Consumer Step 才注册真实只读工具。

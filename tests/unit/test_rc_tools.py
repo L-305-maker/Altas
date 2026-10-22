@@ -24,6 +24,38 @@ def test_rc_database_creation_rejects_external_names(monkeypatch):
         module.TemporaryPostgres("unused").database("production")
 
 
+def test_postgres_gate_keeps_every_pg_variant_and_common_case(monkeypatch, tmp_path):
+    module = script(monkeypatch, "verify_postgres")
+    fixture = tmp_path / "test_backend_selection.py"
+    fixture.write_text(
+        "import pytest\n"
+        "@pytest.mark.parametrize('backend', ['sqlite', 'postgres'])\n"
+        "def test_backend(backend): pass\n"
+        "@pytest.mark.parametrize('backend', ['sqlite', 'postgres'])\n"
+        "def test_sqlite_comparison(backend): pass\n"
+        "def test_shared(): pass\n",
+        encoding="utf-8",
+    )
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "pytest",
+            str(fixture),
+            "-q",
+            "-k",
+            module.POSTGRES_SELECTION,
+        ],
+        env={**os.environ, "PYTEST_DISABLE_PLUGIN_AUTOLOAD": "1"},
+        capture_output=True,
+        text=True,
+        timeout=20,
+        creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0,
+    )
+    assert result.returncode == 0, "PostgresGateSelectionFailed"
+    assert "3 passed, 2 deselected" in result.stdout
+
+
 @pytest.mark.parametrize("seconds,workload", [(0, 1), (3601, 1), (1, 0), (1, 1001)])
 def test_soak_rejects_unbounded_work(monkeypatch, seconds, workload):
     module = script(monkeypatch, "verify_durable_soak")

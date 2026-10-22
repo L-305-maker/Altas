@@ -1,5 +1,9 @@
 # Provider Context Egress Control v1
 
+[Token Window Preflight](token-window-conformance.md) 只计 Egress/Projection 后实际冻结的 wire 请求，
+不计尚未披露的原始工具结果；Counter 不能扩大披露、缩减协议字段或授权 UNKNOWN 自动重发。
+计数异常只保存安全错误码，不在日志、事件或指标中输出请求正文。
+
 [Summary Consumption](summary-consumption.md) 是独立权限：默认不发送生成声明正文。
 显式 Egress 必须允许真实消费 Core ToolBinding 的根视图，消费策略不会扩大 metadata_only 或其他工具权限。
 

@@ -149,7 +149,11 @@ def test_strict_window_requires_verified_counter():
 
 @pytest.mark.parametrize("assurance", ["exact", "upper_bound"])
 def test_trusted_count_reserves_output_and_enforces_window(assurance):
+    from token_counter_fixtures import profile as counter_profile
+
     class Counter:
+        profile = counter_profile(counting_assurance=assurance)
+
         def count(self, context_json):
             assert "PRIVATE" in context_json
             payload = json.loads(context_json)
@@ -206,11 +210,15 @@ def test_only_typed_bounded_parameters_are_accepted(parameters):
         ("declared_only", "ModelTokenCountUnavailable"),
         ("unknown", "ModelTokenCountUnavailable"),
         ("wrong_method", "ModelTokenCounterInvalid"),
-        ("no_window", "ModelTokenWindowUnavailable"),
+        ("no_window", "ModelTokenCounterInvalid"),
     ],
 )
 def test_counter_claims_cannot_substitute_for_trusted_measurement(case, code):
+    from token_counter_fixtures import profile as counter_profile
+
     class Counter:
+        profile = counter_profile(context_window_tokens=8192, max_output_tokens=4096)
+
         def count(self, payload):
             if case == "unknown":
                 return TokenCount()

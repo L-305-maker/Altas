@@ -8,6 +8,8 @@ from pathlib import Path
 
 SMOKE = """
 import asyncio
+from agentflow.application.ports.model_request import TokenCounterProfile
+from agentflow.infrastructure.models.token_conformance import TokenCounterVector, verify_counter_conformance
 from fastapi.testclient import TestClient
 from pydantic import SecretStr
 from agentflow.application.orchestration.worker import Worker, HandlerRegistry

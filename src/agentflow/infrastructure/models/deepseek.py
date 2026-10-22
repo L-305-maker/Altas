@@ -42,7 +42,7 @@ LEGACY_MODELS = (
 
 
 def model_lifecycle(model):
-    """Explicit allowlist checked against official docs on 2026-10-20."""
+    """Explicit allowlist checked against official docs on 2026-10-22."""
     if model in SUPPORTED_MODELS:
         return "supported"
     return "legacy" if model in LEGACY_MODELS else "unsupported"
@@ -55,6 +55,9 @@ def capabilities_for(model, provider_key):
             "ModelDeprecated" if lifecycle == "legacy" else "ModelCapabilityUnsupported"
         )
     # Preserve v1 wire identity for canonical names; no historical rewrite.
+    # Published window sizes do not establish complete hosted-chat counting.
+    # No verified model/template profile: strict mode remains fail-closed.
+    # See docs/token-window-conformance.md for pinned, non-production evidence.
     return ProviderCapabilities(
         provider_key=provider_key,
         model=model,

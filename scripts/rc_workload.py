@@ -173,8 +173,21 @@ async def serve(url, root, seconds):
                     model="rc-mock",
                 )
 
+        provider = Provider()
+        if scenario == "token_profile":
+            # Isolated RC fixture only; never a hosted-provider guarantee.
+            sys.path.insert(0, str(ROOT / "tests"))
+            from token_counter_fixtures import Counter, capabilities
+
+            from agentflow.application.ports.model_request import ModelRequestOptions
+
+            provider.token_counter = Counter(tokens=9)
+            provider.capabilities = capabilities()
+            provider.request_options = ModelRequestOptions(
+                max_output_tokens=10, strict_token_window=True
+            )
         return await DurableAgentRunner(
-            agents, Provider(), tools, admission=agents if policy else None
+            agents, provider, tools, admission=agents if policy else None
         ).run(task, "Return a fixed harmless result.", allowed={"echo"})
 
     handlers.register("rc-agent", agent)

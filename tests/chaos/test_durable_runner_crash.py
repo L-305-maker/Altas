@@ -72,6 +72,14 @@ provider = MockProvider([{'role': 'assistant', 'tool_calls': [{'id': 'provider-i
     {'role': 'assistant', 'content': 'done'}])
 if stage == 'retry_scheduled':
     provider = MockProvider([ModelRetryableError()])
+if os.environ.get('AGENTFLOW_CRASH_PROFILE') == '1':
+    import sys
+    sys.path.insert(0, str(Path.cwd() / 'tests'))
+    from token_counter_fixtures import Counter, capabilities
+    from agentflow.application.ports.model_request import ModelRequestOptions
+    provider.token_counter = Counter()
+    provider.capabilities = capabilities()
+    provider.request_options = ModelRequestOptions(max_output_tokens=10, strict_token_window=True)
 handlers = HandlerRegistry()
 async def handler(task):
     return await DurableAgentRunner(agents, provider, tools).run(task, 'goal', allowed={'echo'})
@@ -115,11 +123,15 @@ def database(request, tmp_path):
         "egress_model_reservation",
         "egress_tool_result",
         "egress_retry_scheduled",
+        "profile_model_reservation",
+        "profile_retry_scheduled",
     ],
 )
 def test_real_process_crash_and_new_worker(
     database, tmp_path, stage, runtime_invariants
 ):
+    profiled = stage.startswith("profile_")
+    stage = stage.removeprefix("profile_")
     egress = stage.startswith("egress_")
     stage = stage.removeprefix("egress_")
     evidence = stage.startswith("checkpoint_")
@@ -167,6 +179,7 @@ def test_real_process_crash_and_new_worker(
             AGENTFLOW_CRASH_TEST_DB=database,
             AGENTFLOW_CRASH_STAGE=stage,
             AGENTFLOW_CRASH_COUNTER=str(counter),
+            AGENTFLOW_CRASH_PROFILE="1" if profiled else "0",
         ),
         capture_output=True,
         timeout=30,
@@ -186,6 +199,9 @@ def test_real_process_crash_and_new_worker(
             assert len(checkpoint.agent.model_attempts) == 1
             assert checkpoint.agent.model_attempts[0].context_projection is not None
             assert checkpoint.agent.model_attempts[0].request_contract is not None
+            assert checkpoint.agent.model_attempts[
+                0
+            ].request_contract.request_contract_version == (2 if profiled else 1)
             assert (
                 checkpoint.agent.model_attempts[0].context_projection.egress is not None
             ) == egress
@@ -234,6 +250,16 @@ def test_real_process_crash_and_new_worker(
             )
         )
         provider = MockProvider([{"role": "assistant", "content": "done"}])
+        if profiled:
+            from token_counter_fixtures import Counter, capabilities
+
+            from agentflow.application.ports.model_request import ModelRequestOptions
+
+            provider.token_counter = Counter()
+            provider.capabilities = capabilities()
+            provider.request_options = ModelRequestOptions(
+                max_output_tokens=10, strict_token_window=True
+            )
         handlers = HandlerRegistry()
 
         async def handler(task):

@@ -12,6 +12,10 @@ import sys
 import tempfile
 from pathlib import Path
 
+# Full pytest covers SQLite; keep all PG variants even in SQLite-named tests,
+# plus shared unparameterized gates. Do not repeat the SQLite storage matrix.
+POSTGRES_SELECTION = "postgres or not sqlite"
+
 
 def main():
     parser = argparse.ArgumentParser()
@@ -102,6 +106,7 @@ def main():
                     "tests/chaos/test_summary_consumption_crash.py",
                     "tests/chaos/test_summary_process_crash.py",
                     "tests/integration/test_durable_model_request.py",
+                    "tests/integration/test_durable_token_window.py",
                     "tests/integration/test_provider_compatibility.py",
                     "tests/integration/test_model_request_migrations.py",
                     "tests/integration/test_model_retry_upgrade_audit.py",
@@ -132,6 +137,8 @@ def main():
                         if args.release_gates
                         else []
                     ),
+                    "-k",
+                    POSTGRES_SELECTION,
                     "-q",
                 ],
                 env=environment,

@@ -1,4 +1,8 @@
-# Immutable Model Request Contract & Capability Preflight v1.1
+# Immutable Model Request Contract & Capability Preflight v1 / v2
+
+[Token Window Preflight](token-window-conformance.md) 增加不可变 TokenCounterProfile 与显式 RequestContract v2。
+完整 Profile 绑定模型、模板/资产/证据及能力；只计最终冻结 wire 请求一次，窗口检查先于 Permit/Attempt。
+无 Profile 继续原 v1 序列化及摘要，旧历史只读，不回填。真实 DeepSeek 尚无已验证 Counter，strict 仍拒绝。
 
 [Summary Consumption](summary-consumption.md) 的可选 summary_consumption_digest 原子绑定冻结视图；
 None 时省略，旧身份不变。重试不能更换 Artifact、Policy、声明选择或工具绑定。

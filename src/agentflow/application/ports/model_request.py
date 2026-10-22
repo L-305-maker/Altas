@@ -109,12 +109,55 @@ class TokenCount(BaseModel):
         return self
 
 
+class TokenCounterProfile(BaseModel):
+    """Reviewed deployment evidence, not an attestation derived from a count.
+
+    Digests identify locally pinned assets and the reviewed conformance/proof
+    document. A finite vector suite alone does not prove exactness or a bound.
+    Unknown counters have no verified profile and cannot authorize strict mode.
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+    provider_key: ProviderKey
+    model: ModelName
+    adapter_version: Version
+    capability_version: Version
+    token_counting_method: Version
+    counting_assurance: Literal["exact", "upper_bound"]
+    tokenizer_asset_digest: Digest
+    chat_template_version: Version
+    chat_template_digest: Digest
+    framing_version: Version
+    framing_digest: Digest
+    evidence_digest: Digest
+    context_window_tokens: Positive
+    max_output_tokens: Positive
+    profile_version: Version
+
+    def verify(self, capabilities, adapter_version):
+        if (
+            self.provider_key != capabilities.provider_key
+            or self.model != capabilities.model
+            or self.adapter_version != adapter_version
+            or self.capability_version != capabilities.capability_version
+            or self.token_counting_method != capabilities.token_counting_method
+            or self.counting_assurance != capabilities.token_counting_assurance
+            or self.context_window_tokens != capabilities.context_window_tokens
+            or self.max_output_tokens != capabilities.max_output_tokens
+        ):
+            raise ModelRequestError("ModelTokenCounterInvalid")
+
+
 class TokenCounter(Protocol):
+    @property
+    def profile(self) -> TokenCounterProfile: ...
+
     def count(self, request_json: str) -> TokenCount:
         """Count framed INPUT for this model using the full effective request.
 
-        Trusted implementation must account for tools, options and chat framing;
-        it must not mistake output reservation or JSON length for input tokens.
+        Pure, bounded implementation with immutable assets loaded and verified
+        at startup, never I/O here. Must cover tools, options and chat framing;
+        output reservation and JSON length are not input tokens.
         """
         ...
 
@@ -173,6 +216,7 @@ class ModelRequestContract(ModelRequestOptions):
     context_projection_digest: Digest
     tool_schema_digest: Digest
     token_count: TokenCount = Field(default_factory=TokenCount)
+    token_counter_profile: TokenCounterProfile | None = None
     context_egress_digest: Digest | None = None
     summary_input_digest: Digest | None = None
     summary_consumption_digest: Digest | None = None
@@ -181,6 +225,8 @@ class ModelRequestContract(ModelRequestOptions):
     @model_serializer(mode="wrap")
     def historical_contract(self, handler):
         data = handler(self)
+        if self.token_counter_profile is None:
+            data.pop("token_counter_profile", None)
         if self.context_egress_digest is None:
             data.pop("context_egress_digest", None)
         if self.summary_input_digest is None:
@@ -191,12 +237,22 @@ class ModelRequestContract(ModelRequestOptions):
 
     @model_validator(mode="after")
     def valid_identity(self):
+        if self.request_contract_version not in {1, 2}:
+            raise ValueError("unsupported request contract version")
+        if (self.request_contract_version == 2) != (
+            self.token_counter_profile is not None
+        ):
+            raise ValueError("counter profile requires request contract v2")
         if (self.provider_key, self.model) != (
             self.capabilities.provider_key,
             self.capabilities.model,
         ):
             raise ValueError("request capability identity differs")
         try:
+            if self.token_counter_profile is not None:
+                self.token_counter_profile.verify(
+                    self.capabilities, self.adapter_version
+                )
             check_capabilities(self.capabilities, self, [], [])
             check_token_window(self.capabilities, self, self.token_count)
         except ModelRequestError:
@@ -209,6 +265,10 @@ class ModelRequestContract(ModelRequestOptions):
         ):
             raise ValueError("request contract digest differs")
         return self
+
+    @property
+    def reserved_output_tokens(self):
+        return self.max_output_tokens
 
     def profile_digest(self) -> str:
         return request_digest(
@@ -226,8 +286,7 @@ class ModelRequestContract(ModelRequestOptions):
 
     def verify_projection(self, projection: ContextProjectionManifest):
         if (
-            self.request_contract_version != 1
-            or self.context_projection_digest != projection.projected_context_digest
+            self.context_projection_digest != projection.projected_context_digest
             or self.tool_schema_digest != projection.tool_schema_digest
             or self.summary_input_digest != projection.summary_input_digest
             or self.summary_consumption_digest != projection.summary_consumption_digest
@@ -318,13 +377,24 @@ def build_request(
     try:
         context_json = canonical_json(context)
         count = TokenCount()
+        profile = None
         if token_counter is not None:
-            count = token_counter.count(
-                canonical_json(serialize_request(context, capabilities.model, options))
+            profile = TokenCounterProfile.model_validate(
+                token_counter.profile.model_dump()
             )
+            profile.verify(capabilities, adapter_version)
+            wire_json = canonical_json(
+                serialize_request(json.loads(context_json), capabilities.model, options)
+            )
+            # Session storage is bounded at 8 MB; allow framing/options overhead.
+            if len(wire_json.encode("utf-8")) > 8_100_000:
+                raise ValueError
+            count = token_counter.count(wire_json)
             if not isinstance(count, TokenCount):
                 raise ValueError
             count = TokenCount.model_validate(count.model_dump())
+            if token_counter.profile != profile:
+                raise ValueError
     except Exception:
         raise ModelRequestError("ModelTokenCounterInvalid") from None
     check_token_window(capabilities, options, count)
@@ -333,13 +403,15 @@ def build_request(
         "provider_key": capabilities.provider_key,
         "model": capabilities.model,
         "adapter_version": adapter_version,
-        "request_contract_version": 1,
+        "request_contract_version": 2 if profile is not None else 1,
         "capabilities": capabilities.model_dump(mode="json"),
         "endpoint_fingerprint": endpoint_fingerprint,
         "context_projection_digest": projection.projected_context_digest,
         "tool_schema_digest": projection.tool_schema_digest,
         "token_count": count.model_dump(mode="json"),
     }
+    if profile is not None:
+        values["token_counter_profile"] = profile.model_dump(mode="json")
     if projection.egress is not None:
         values["context_egress_digest"] = request_digest(
             projection.egress.model_dump(mode="json")

@@ -38,6 +38,12 @@ def exercise(cluster, workload, *, seconds, count, seed):
     workload.wait(lambda: workload.status(reviewed, "succeeded"))
     workload.wait(lambda: workload.store.get_run(reviewed)["status"] == "succeeded")
     isolated = workload.store.get_run(reviewed)
+    counted = workload.submit("token_profile")
+    workload.wait(lambda: workload.status(counted, "succeeded"))
+    assert all(
+        a.request_contract.request_contract_version == 2
+        for a in workload.state(counted).agent.model_attempts
+    )
     completed.append(reviewed)
     summarized = workload.submit("summary")
     workload.wait(lambda: workload.store.get_run(summarized)["status"] == "succeeded")

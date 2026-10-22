@@ -32,11 +32,23 @@ def old_facts(store):
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("profiled", [False, True])
 async def test_0008_roundtrip_preserves_old_facts_and_never_backfills_identity(
-    store, monkeypatch, runtime_invariants
+    store, monkeypatch, runtime_invariants, profiled
 ):
     run = submit(store)
-    assert await worker(store, MockProvider([final()])).tick()
+    provider = MockProvider([final()])
+    if profiled:
+        from token_counter_fixtures import Counter, capabilities
+
+        from agentflow.application.ports.model_request import ModelRequestOptions
+
+        provider.token_counter = Counter()
+        provider.capabilities = capabilities()
+        provider.request_options = ModelRequestOptions(
+            max_output_tokens=10, strict_token_window=True
+        )
+    assert await worker(store, provider).tick()
     state = runtime_invariants(store, run)["work"].agent
     assert state.model_attempts[0].request_contract is not None
     reviewed, agents, _, _, invoked, handlers, _ = setup(store, unknown=True)

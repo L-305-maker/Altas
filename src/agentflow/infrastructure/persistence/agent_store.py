@@ -1211,6 +1211,13 @@ class SQLAgentStore:
         ):
             raise ModelRequestError("ModelRequestContractUnavailable")
         if contract is not None:
+            # Historical v1 measurements remain readable, but new known counts
+            # must bind a reviewed counter profile before acquiring admission.
+            if (
+                contract.request_contract_version == 1
+                and contract.token_count.assurance != "unknown"
+            ):
+                raise ModelRequestError("ModelTokenCounterInvalid")
             contract.verify_projection(expected)
             contract.verify_context(projected.messages, list(request.tools))
             check_request_continuity(state.model_attempts, contract, retry=retry)

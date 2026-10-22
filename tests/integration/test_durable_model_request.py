@@ -115,6 +115,8 @@ async def test_preflight_rejects_before_budget_attempt_or_permit(
     elif case == "output":
         options = ModelRequestOptions(max_output_tokens=65537)
     elif case == "window":
+        from token_counter_fixtures import profile as counter_profile
+
         capabilities = ProviderCapabilities(
             provider_key="mock",
             model="mock-v1",
@@ -128,6 +130,8 @@ async def test_preflight_rejects_before_budget_attempt_or_permit(
         options = ModelRequestOptions(max_output_tokens=11, strict_token_window=True)
 
         class Counter:
+            profile = counter_profile()
+
             def count(self, _):
                 return TokenCount(
                     input_tokens=90, method="fixture-v1", assurance="exact"
@@ -221,14 +225,49 @@ def test_store_cannot_retry_unprovable_legacy_request(store, with_projection):
     assert agents.load(task) == failed
 
 
-def reservation_with_contract(state):
+def reservation_with_contract(state, *, profiled=False):
     transition = projected_reservation(state)
     full = AgentContextBuilder().build(state)
     manifest = project_context(full, [], ContextProjectionPolicy(), 1_000_000).manifest
-    contract = MockProvider().prepare_request(full, [], manifest).request.contract
+    provider = MockProvider()
+    if profiled:
+        from token_counter_fixtures import Counter, capabilities
+
+        provider = MockProvider(
+            capabilities=capabilities(),
+            token_counter=Counter(),
+            request_options=ModelRequestOptions(
+                max_output_tokens=10, strict_token_window=True
+            ),
+        )
+    contract = provider.prepare_request(full, [], manifest).request.contract
     return AgentTransition.model_validate(
         {**transition.model_dump(), "request_contract": contract.model_dump()}
     )
+
+
+def test_new_unprofiled_known_claim_is_readable_but_cannot_reserve(store):
+    from agentflow.application.ports.model_request import (
+        ModelRequestContract,
+        request_digest,
+    )
+
+    agents = SQLAgentStore(store, admission_policy=policy())
+    task, ready = opened(agents)
+    transition = reservation_with_contract(ready, profiled=True)
+    values = transition.request_contract.model_dump(mode="json")
+    values.pop("token_counter_profile")
+    values.pop("request_contract_digest")
+    values["request_contract_version"] = 1
+    legacy = ModelRequestContract(
+        **values, request_contract_digest=request_digest(values)
+    )
+    candidate = AgentTransition.model_validate(
+        {**transition.model_dump(), "request_contract": legacy}
+    )
+    with pytest.raises(ModelRequestError, match="ModelTokenCounterInvalid"):
+        agents.reserve_model_attempt(task, candidate)
+    assert agents.load(task) == ready
 
 
 @pytest.mark.parametrize("field", ["context_projection_digest", "tool_schema_digest"])
@@ -254,10 +293,11 @@ def test_store_rejects_forged_contract_before_permit(store, monkeypatch, field):
     assert agents.load(task) == ready
 
 
-def test_request_rolls_back_and_old_token_cannot_reserve(store):
+@pytest.mark.parametrize("profiled", [False, True])
+def test_request_rolls_back_and_old_token_cannot_reserve(store, profiled):
     agents = SQLAgentStore(store, admission_policy=policy())
     task, ready = opened(agents)
-    transition = reservation_with_contract(ready)
+    transition = reservation_with_contract(ready, profiled=profiled)
 
     def fail(conn, cursor, statement, parameters, context, executemany):
         if statement.startswith("INSERT INTO agent_model_attempts"):
@@ -274,7 +314,10 @@ def test_request_rolls_back_and_old_token_cannot_reserve(store):
         agents.reserve_model_attempt(replace(task, token="old"), transition)
 
 
-def test_contract_capacity_reserves_unknown_cancellation_space(store, monkeypatch):
+@pytest.mark.parametrize("profiled", [False, True])
+def test_contract_capacity_reserves_unknown_cancellation_space(
+    store, monkeypatch, profiled
+):
     from test_action_reviews import fill_to_admission_limit
 
     import agentflow.infrastructure.persistence.agent_store as module
@@ -282,7 +325,9 @@ def test_contract_capacity_reserves_unknown_cancellation_space(store, monkeypatc
     monkeypatch.setattr(module, "MAX_SESSION_BYTES", 120_000)
     agents = SQLAgentStore(store)
     task, state = opened(agents)
-    state = agents.commit_transition(task, reservation_with_contract(state))
+    state = agents.commit_transition(
+        task, reservation_with_contract(state, profiled=profiled)
+    )
     state = fill_to_admission_limit(agents, task, state)
     contract = state.model_attempts[0].request_contract
     store.cancel(task.run_id)
@@ -310,10 +355,11 @@ async def test_reservation_uses_frozen_contract_and_rejects_missing_strict_inter
 
 
 @pytest.mark.parametrize("store", ["postgres"], indirect=True)
-def test_independent_postgres_request_reservations_are_fenced(store):
+@pytest.mark.parametrize("profiled", [False, True])
+def test_independent_postgres_request_reservations_are_fenced(store, profiled):
     agents = SQLAgentStore(store, admission_policy=policy())
     task, ready = opened(agents)
-    transition = reservation_with_contract(ready)
+    transition = reservation_with_contract(ready, profiled=profiled)
     barrier = Barrier(2, timeout=10)
 
     def reserve(_):

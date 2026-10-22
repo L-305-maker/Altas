@@ -399,7 +399,9 @@ class DurableAgentRunner:
             prepare = getattr(self.provider, "prepare_request", None)
             if not callable(prepare):
                 raise ModelRequestError("ModelRequestContractUnavailable")
-            prepared = prepare(context, schemas, projected.manifest)
+            prepared = await asyncio.to_thread(
+                prepare, context, schemas, projected.manifest
+            )
             if not isinstance(prepared, PreparedModelRequest):
                 raise ModelRequestError()
             prepared.request.contract.verify_projection(projected.manifest)

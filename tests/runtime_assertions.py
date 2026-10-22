@@ -58,6 +58,18 @@ class RuntimeInvariants:
                 actions = {a.action.id: a for a in state.actions}
                 for attempt in state.model_attempts:
                     projection = attempt.context_projection
+                    contract = attempt.request_contract
+                    if contract is not None and contract.request_contract_version == 2:
+                        assert contract.token_counter_profile is not None
+                        contract.token_counter_profile.verify(
+                            contract.capabilities, contract.adapter_version
+                        )
+                        if contract.token_count.input_tokens is not None:
+                            assert (
+                                contract.token_count.input_tokens
+                                + contract.reserved_output_tokens
+                                <= contract.token_counter_profile.context_window_tokens
+                            )
                     if projection is not None and attempt.request_contract is not None:
                         attempt.request_contract.verify_projection(projection)
                     if projection is None or projection.checkpoint is None:

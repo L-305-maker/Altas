@@ -20,6 +20,7 @@ from agentflow.infrastructure.persistence.models import StepRow
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("profiled", [False, True])
 @pytest.mark.parametrize(
     "point",
     [
@@ -32,7 +33,7 @@ from agentflow.infrastructure.persistence.models import StepRow
     ],
 )
 async def test_worker_commit_fault_recovers_persisted_facts(
-    store, runtime_invariants, monkeypatch, point
+    store, runtime_invariants, monkeypatch, point, profiled
 ):
     async with asyncio.timeout(15):
         run = submit(store, retry_base_seconds=60)
@@ -47,6 +48,16 @@ async def test_worker_commit_fault_recovers_persisted_facts(
             if point == "retry_lost_ack"
             else [proposal(), measured]
         )
+        if profiled:
+            from token_counter_fixtures import Counter, capabilities
+
+            from agentflow.application.ports.model_request import ModelRequestOptions
+
+            provider.token_counter = Counter()
+            provider.capabilities = capabilities()
+            provider.request_options = ModelRequestOptions(
+                max_output_tokens=10, strict_token_window=True
+            )
         invocations, tasks = [], []
 
         async def invoke(args):

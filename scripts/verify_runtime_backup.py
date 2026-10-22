@@ -117,6 +117,8 @@ def drill(cluster):
         done = source.submit("normal")
         source.wait(lambda: source.status(done, "succeeded"))
         source.wait(lambda: source.store.get_run(done)["status"] == "succeeded")
+        counted = source.submit("token_profile")
+        source.wait(lambda: source.store.get_run(counted)["status"] == "succeeded")
         summarized = source.submit("summary")
         source.wait(lambda: source.store.get_run(summarized)["status"] == "succeeded")
         consumed = source.submit("summary_consumption")
@@ -159,6 +161,10 @@ def drill(cluster):
         before = source.check()
         facts = inventory(source.store)
         checkpoints = {r: source.state(r) for r in source.runs}
+        assert all(
+            a.request_contract.request_contract_version == 2
+            for a in checkpoints[counted].agent.model_attempts
+        )
         assert checkpoints[done].agent.usage_summary().total_tokens.value == 20
         assert facts["agent_model_attempts"]
         assert all(

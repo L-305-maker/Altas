@@ -1,5 +1,9 @@
 # First-Class Durable Summarization v1
 
+[Token Window](token-window-conformance.md) 复用 DurableRunner 对生成器每次最终冻结请求独立预检。
+证据读取轮次和 JSON 最终轮次各有自己的 Counter 结果、Attempt 和 Contract；源摘要字节数与覆盖率不替代 Token。
+Profile 变动不能重试旧调用；真实 DeepSeek strict 仍 fail-closed。
+
 后续 [Summary Consumption v1](summary-consumption.md) 允许独立授权的真实只读工具消费；
 默认行为仍不自动注入。生成披露不等于消费授权，派生 Artifact 与原历史保持分离。
 

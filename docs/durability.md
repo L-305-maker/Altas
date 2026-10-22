@@ -1,5 +1,9 @@
 # 持久执行语义
 
+[Verified Token Window Preflight](token-window-conformance.md) 在最终 Egress/Projection 后、预约前检查完整冻结请求。
+有可信 Profile 时使用 v2 身份并在重试/恢复时核对模板、资产及能力；无 Profile 保留 v1，strict 拒绝 unknown。
+Token 预检不生成 Usage，不削弱 Admission/CAS/租约；真实 DeepSeek 计数与付费对照尚未验证。
+
 [Summary Consumption v1](summary-consumption.md) 通过显式 Durable Consumer Policy 与真实只读工具读取
 同 Run 的成功摘要依赖；默认关闭。真实 Artifact/Attempt/来源重验，独立披露，不提升为系统或审批权限。
 Consumer 继续服从现有预算、准入、用量、CAS、Lease、UNKNOWN 和取消规则；没有隐藏模型请求或新迁移。

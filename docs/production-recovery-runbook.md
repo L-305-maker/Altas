@@ -1,5 +1,16 @@
 # Durable Runtime v1：备份、恢复及 staging 演练
 
+## Token Counter Profile 部署与恢复
+
+先阅读 [合规证据与版本边界](token-window-conformance.md)。本轮无新迁移，仍为 0008。
+备份包含 v2 Attempt.request_contract 中的 Profile；恢复不得重算覆盖历史计数。
+升级前核对全部 Writer 的模型/adapter/capability、Tokenizer/template/framing 资产与证据 SHA-256。
+每进程启动时验证并复用只读资产，禁止请求期间动态下载；保持数据库时钟、租约与 Admission 部署条件。
+待重试旧调用必须保持原 Contract；v1→v2 或 Profile 漂移不能静默接续，UNKNOWN 必须按已有流程处理。
+不得通过把 unknown 改成 exact 或 0 来解锁恢复。真实 DeepSeek strict 尚不可启用；付费对照和跨主机演练需另行验收。
+本轮隔离备份演练包含合成 v2 Profile Run，完整比较恢复后的 Attempt JSON，保留旧 v1 与摘要/消费身份。
+PostgreSQL 专项只执行 PG/共享用例；完整 pytest 另覆盖 SQLite，两个命令必须配套验收，去重数不计通过数。
+
 显式 [Summary Consumption](summary-consumption.md) 部署须统一升级 Writer，启用前检查 Consumer 的
 真实依赖及独立文本授权；显式 Egress 必须允许精确 Core Binding。备份恢复保留冻结视图、原 Artifact、
 SourceSnapshot、成功 Attempt 和 RequestContract；UNKNOWN/已完成读取不能自动重派，摘要不能替代行动审批。
