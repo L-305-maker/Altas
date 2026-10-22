@@ -8,14 +8,12 @@ and must only be pointed at a dedicated staging database with RC fixture data.
 import argparse
 import asyncio
 import json
-import os
 import random
 import subprocess
 import time
 
 from rc_support import TemporaryPostgres, migrate
-from rc_workload import Workload, serve
-from sqlalchemy.engine import make_url
+from rc_workload import Workload
 
 
 def validate_limits(seconds, workload):
@@ -215,24 +213,37 @@ def main():
     parser.add_argument("--workload", type=int, default=6)
     parser.add_argument("--seed", type=int, default=7)
     parser.add_argument("--worker", action="store_true")
+    parser.add_argument("--config")
+    parser.add_argument("--environment-id")
+    parser.add_argument("--allow-staging-execution", action="store_true")
+    parser.add_argument("--slot", type=int, default=0)
     args = parser.parse_args()
     validate_limits(args.seconds, args.workload)
     if args.worker:
-        url = os.environ["AGENTFLOW_RC_DATABASE_URL"]
-        parsed = make_url(url)
-        if parsed.get_backend_name() != "postgresql" or not (
-            parsed.database or ""
-        ).startswith("agentflow_rc_"):
-            parser.error(
-                "worker mode requires a dedicated agentflow_rc_ PostgreSQL database"
+        from verify_rc_staging import worker
+
+        try:
+            asyncio.run(
+                worker(
+                    args.seconds,
+                    config_path=args.config,
+                    environment=args.environment_id,
+                    allowed=args.allow_staging_execution,
+                    slot=args.slot,
+                )
             )
-        asyncio.run(
-            serve(
-                url,
-                os.environ["AGENTFLOW_RC_RECORDS"],
-                args.seconds,
+        except (Exception, KeyboardInterrupt):
+            print(
+                json.dumps(
+                    {
+                        "status": "FAIL",
+                        "error": "StagingAuthorizationRequired"
+                        if not args.allow_staging_execution
+                        else "StagingWorkerStopped",
+                    }
+                )
             )
-        )
+            return 2
         return 0
     if not args.bin:
         parser.error("--bin is required for an isolated soak")

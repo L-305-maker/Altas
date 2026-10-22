@@ -1,5 +1,33 @@
 # Durable Runtime v1：Release Candidate 验收
 
+## Production RC Staging & Evidence Gates v1（2026-10-22）
+
+审核基线 `de1b29eddd4e7b396aa7144fa3c5ffb717b5abac`，仅 main，无分支/PR、付费请求或外部数据库操作。
+完整操作者流程、A–J 检查来源与边界见 [Production RC Staging](production-rc-staging.md)。
+仅修改 RC 脚本、测试和文档；`src/agentflow` 与历史 0001–0008 不变。
+
+| 门禁 | 状态 | 本轮实际记录 / 边界 |
+| --- | --- | --- |
+| TDD 与只读预检 | PASS | 先复现缺失契约/旧文档、跨批次 plan 未拒绝、清理覆盖停止原因；离线门禁与 Live Mock 组合最终 40 passed；临时 PG 定向组合 23 passed。权限/环境标记/默认超时在真实隔离 PG 检查，TLS 为 false 时正确拒绝，未假装真实 staging |
+| Schema / 证据 / 安全边界 | PASS | 双宿主手册 0005 → 实际 head 0008，版本不匹配不启动；冻结 v1 报告只为实际只读预检生成 PASS，含八项安全结果与校验 digest，不导入人为 passed=true。拒绝跨宿主/Provider/Token 伪 PASS；公开输出不含 URL、Token、原始正文或凭据 |
+| PostgreSQL release gates | PASS | `uv run python scripts/verify_postgres.py --bin D:/PSQL/bin --release-gates`：502 passed、468 deselected、零跳过，265.03 秒；独立事务、租约/CAS、历史迁移、审批/UNKNOWN、Admission、Summary/Consumer、取消、旧身份及新最小权限/槽位检查 |
+| 新增槽位清理回归 | PASS | 首次完整 PG 为 501 passed / 1 failed，真实发现池归还连接不释放 session advisory lock；显式解锁后完整重跑通过。未删断言、跳过失败或改变 Workflow 锁/租约语义 |
+| 最终完整 pytest | PASS | `uv run pytest -q`：1131 passed、500 skipped、1 项已有 TestClient 弃用警告，229.33 秒。专用 PG、Docker 和显式付费的 skipped 不计通过；PG 已另行实际验证 |
+| Ruff / 架构 / 离线评估 | PASS | check、format --check：186 files；架构 3 passed；离线评估 3/3、traceability 1.0 |
+| 三 Worker 本机 Soak | PASS | `verify_durable_soak.py --bin D:/PSQL/bin --seconds 180 --workload 6 --seed 7`：192.42 秒、27 波、170 Run、88 派发、285 领取；混合审批/UNKNOWN、延期、取消、Summary/Consumer 与真实本机进程/数据库故障，cross_host=NOT VERIFIED |
+| 实际逻辑备份恢复 | PASS | `verify_runtime_backup.py --bin D:/PSQL/bin`：head 0008、15 表逐项比较、17 个恢复 Run（4 个旧历史）；审批、v1/v2/v3 Checkpoint、v1/v2 Contract、Summary/Consumer、Admission/Usage 保留；已完成重派 0、新批准派发 1。不是 HA/PITR |
+| 构建 / 仓库外 Wheel | PASS | `uv build`；`verify_wheel.py dist/agentflow-1.0.0-py3-none-any.whl`：新临时 venv 安装 45 包，Core、metrics、参考应用、摘要消费和离线评估通过。已有 hardlink-copy 与 TestClient 弃用警告保留 |
+| 本地 Docker / Compose | NOT_VERIFIED | DockerDesktopLinuxEngine pipe 不存在；不将默认 Docker skip 计通过，最终交付报告核对新 main 的实际 GitHub CI |
+| 双宿主网络故障 / 目标部署 TLS / 生产 HA-PITR | NOT_VERIFIED | 没有环境或独立授权。本机多进程、隔离 PG 重启和逻辑备份不能替代；提供只读预检、分离授权的有界合成命令、私有 plan 和 A–J 操作手册 |
+| 真实 DeepSeek Smoke | NOT_VERIFIED | LIVE PROVIDER NOT VERIFIED。仅 Mock/MockTransport；显式付费双授权、单请求/无重试保护及安全进度报告测试通过，没有真实付费请求 |
+| 真实托管模型 Token Conformance | NOT_VERIFIED | LIVE TOKEN CONFORMANCE NOT VERIFIED。实际生产 Profile 清单为空，DeepSeek strict 仍拒绝；离线向量或一次 usage 匹配不能证明 hosted framing 等价/普遍上界 |
+| 新数据库迁移 | NOT_APPLICABLE | 本阶段没有 schema 变化；继续通过已有全部历史升级、回退与恢复测试 |
+
+本表为推送前本地执行记录；最终交付报告提供新 main SHA 对应 GitHub Actions 链接和结果。
+报告的 digest 不是签名/真实性认证，机器标识摘要不是物理宿主独立证明。
+代码门禁通过可以支持下一步受控 RC 演练，不能据此宣称生产部署已放行；仍需 DBA 登记的独立 staging、
+可信构建/镜像来源、实际 A–J 证据审查、真实 Provider 付费授权与独立 Token 证明。
+
 ## Verified Token Window Preflight v1（2026-10-22）
 
 审核基线 `68fc2675932c579b83809465e4e6bd9be35978dd`，仅 main；

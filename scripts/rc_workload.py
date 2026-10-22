@@ -266,7 +266,7 @@ class Workload:
         self.scenarios = {}
         self.deadline = time.monotonic() + 600
 
-    def submit(self, scenario, *, retry_seconds=4):
+    def submit(self, scenario, *, retry_seconds=4, staging_batch=None):
         workflow = self.store.register(
             WorkflowSpec(
                 name=f"rc-{scenario}-{retry_seconds}",
@@ -341,7 +341,13 @@ class Workload:
                 ),
             )
         )
-        run = self.store.submit(workflow, {"scenario": scenario})
+        run = self.store.submit(
+            workflow,
+            {
+                "scenario": scenario,
+                **({"rc_staging_batch": staging_batch} if staging_batch else {}),
+            },
+        )
         self.runs.append(run)
         self.scenarios[run] = scenario
         return run
@@ -352,13 +358,16 @@ class Workload:
             child = subprocess.Popen(
                 [
                     sys.executable,
-                    str(ROOT / "scripts/verify_durable_soak.py"),
-                    "--worker",
-                    "--seconds",
-                    str(min(seconds, 3600)),
+                    "-c",
+                    "import asyncio, os; from rc_workload import serve; "
+                    "asyncio.run(serve(os.environ['AGENTFLOW_RC_DATABASE_URL'], "
+                    "os.environ['AGENTFLOW_RC_RECORDS'], "
+                    "int(os.environ['AGENTFLOW_RC_SECONDS'])))",
                 ],
+                cwd=ROOT / "scripts",
                 env=dict(
                     os.environ,
+                    AGENTFLOW_RC_SECONDS=str(min(seconds, 3600)),
                     AGENTFLOW_RC_DATABASE_URL=self.url,
                     AGENTFLOW_RC_RECORDS=str(self.root),
                     AGENTFLOW_RC_SLOT=slot,

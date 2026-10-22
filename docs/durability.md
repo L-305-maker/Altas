@@ -1,5 +1,11 @@
 # 持久执行语义
 
+[Production RC Staging](production-rc-staging.md) 增加独立只读预检、冻结证据报告及单独授权的合成夹具入口。
+Worker 启动前验证实际 Alembic Head（目前 0008）、管理员环境标记/OID、TLS、角色、超时及部署身份；
+不自动迁移外部数据库。固定 RC Worker 槽位只用于限制本轮进程数，不替代已有租约、CAS 或 fencing。
+本阶段未修改 Runtime/Store 事务、UNKNOWN、取消或审批规则，没有新迁移。
+软件 CI/本机多进程与真实双宿主/Provider/Token 证明分开验收；缺少实际证据时保持 NOT_VERIFIED。
+
 [Verified Token Window Preflight](token-window-conformance.md) 在最终 Egress/Projection 后、预约前检查完整冻结请求。
 有可信 Profile 时使用 v2 身份并在重试/恢复时核对模板、资产及能力；无 Profile 保留 v1，strict 拒绝 unknown。
 Token 预检不生成 Usage，不削弱 Admission/CAS/租约；真实 DeepSeek 计数与付费对照尚未验证。

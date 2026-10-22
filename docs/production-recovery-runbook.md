@@ -96,7 +96,7 @@ Python 的私有目录 ACL，只允许当前用户与管理员访问。Windows �
    提供；不要在命令参数、普通日志或 CI Artifact 中保存密码/URL。备份包含 Prompt/工具结果/操作员
    证据，应加密、限制访问、建立独立保管和到期删除策略；保留期与业务审计/恢复要求一致。
 4. 恢复到新隔离库，**不要默认覆盖或删除原库**。使用对应 PostgreSQL 工具版本，检查命令退出码，
-   比对迁移版本、记录数和关键 digest，运行只读审计。0001–0005 不改写；升级另行审批。
+   比对迁移版本、记录数和关键 digest，运行只读审计。0001–0008 不改写；升级另行审批。
 5. 对恢复点之后可能已经发生的外部操作进行盘点。备份之后的已完成调用可能在旧数据库中存在、
    在恢复库中不存在；逻辑恢复不能重建这些外部事实。保持稳定幂等键，UNKNOWN 必须人工核查。
 6. 隔离旧数据库/旧 Worker，使其不能继续提交。不要为了让旧 Task 成功而替换 token 或 revision。
@@ -139,23 +139,28 @@ Prometheus 是 best-effort 信号，COMMIT 后指标前退出会少计，默认�
 
 需要两台独立宿主及一个**专用** PostgreSQL，数据库名必须以 `agentflow_rc_` 开头，例如
 `agentflow_rc_staging_<deployment-id>`；仅给测试角色访问该库。部署匹配代码/工具版本，设置 TLS、
-connect_timeout、statement_timeout、lock_timeout；用已有 Alembic 初始化到 0005。禁止指向生产库。
+connect_timeout、statement_timeout、lock_timeout。Schema head：`0008`。
+通过 `rc_staging.required_revision()` 从实际 Alembic 图读取 Head；应用与数据库不一致时拒绝 Worker 启动。
+外部数据库初始化/升级由 DBA 单独批准执行，预检及 Worker 不运行迁移。禁止指向生产库。
 
-协调主机在仓库根目录可使用以下显式夹具（环境 URL 来自受保护 Secret，输出只有合成 Run ID）：
+**以下旧入口已加固**：操作前完成 [Production RC Staging](production-rc-staging.md) 的身份清单、
+数据库 OID/管理员环境标记、verify-full TLS 和最小权限检查。数据库名前缀不是隔离证明。
+
+协调主机必须通过新增门禁建立夹具（环境 URL 来自受保护 Secret；Run ID 只写私有 plan，不公开输出）：
 
 ```sh
-uv run python -c "import os,sys; sys.path.insert(0,'scripts'); from rc_workload import Workload; w=Workload(os.environ['AGENTFLOW_RC_DATABASE_URL'],'rc-records'); print(w.submit('crash')); w.close()"
+uv run python scripts/verify_rc_staging.py seed --config <private-config.json> --environment-id <staging-uuid> --allow-staging-execution --scenario crash --runs 1 --plan <new-private-directory/plan.json>
 ```
 
 在两台宿主分别创建本地记录目录，注入 `AGENTFLOW_RC_DATABASE_URL` 与 `AGENTFLOW_RC_RECORDS` 后运行：
 
 ```sh
-uv run python scripts/verify_durable_soak.py --worker --seconds 600
+uv run python scripts/verify_durable_soak.py --worker --seconds 600 --config <private-config.json> --environment-id <staging-uuid> --slot <0-or-1> --allow-staging-execution
 ```
 
-协调主机用相同 Workload 的 `approve(run_id)` 等待并批准具体行动；记录 Action 版本/参数 digest，
+协调主机用 `verify_rc_staging.py approve` 和同一私有 plan 批准具体行动；记录 Action 版本/参数 digest，
 批准消耗和 INFLIGHT 出现后终止实际持有租约的 Worker 进程树。另一主机继续轮询，应在租约过期后
-持久化 UNKNOWN/WAITING_RECONCILIATION。通过 `reconcile(run_id)` 提交合成外部证据，再验证完成与
+持久化 UNKNOWN/WAITING_RECONCILIATION。通过 `verify_rc_staging.py reconcile` 提交合成外部证据，再验证完成与
 Artifact 唯一。使用相同方法提交 retry/unknown/review/normal/cancel 夹具及真实业务取消。
 各宿主的合成记录文件用于核对派发；不要依赖本地文件作运行时状态。核对旧 Task LostLease、预算及
 幂等键，并对独立 Run 验证隔离。数据库短断、单宿主断链及恢复需由测试环境操作者实施，限制演练窗口，

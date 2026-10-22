@@ -1,5 +1,9 @@
 # Immutable Model Request Contract & Capability Preflight v1 / v2
 
+[RC Staging 门禁](production-rc-staging.md) 比对 API/Worker 的构建、策略、UsageMapping、工具、
+Contract 版本及已安装 Counter Profile 身份；不改变历史 v1/v2 的序列化或请求摘要。
+配置清单相同不是服务端 framing 证明，真实 Token 门禁仍未验证；不回填旧 usage。
+
 [Token Window Preflight](token-window-conformance.md) 增加不可变 TokenCounterProfile 与显式 RequestContract v2。
 完整 Profile 绑定模型、模板/资产/证据及能力；只计最终冻结 wire 请求一次，窗口检查先于 Permit/Attempt。
 无 Profile 继续原 v1 序列化及摘要，旧历史只读，不回填。真实 DeepSeek 尚无已验证 Counter，strict 仍拒绝。

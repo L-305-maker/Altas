@@ -86,6 +86,42 @@ async def test_live_harness_is_one_request_and_completes_real_durable_step(
     )
     assert report["status"] == "PASS" and report["requests"] == 1
     assert provider.calls == 1
+    assert report["provider_request_accepted"] is True
+    assert report["valid_assistant"] is True
+    assert report["model_identity_matches"] is None
+    assert report["model_identity_status"] == "NOT_VERIFIED"
+    assert report["durable_attempt_confirmed"] is True
+    assert report["durable_step_and_artifact"] is True
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("outcome", ["retryable", "unknown", "rate_limited"])
+async def test_live_failure_never_issues_second_request(monkeypatch, tmp_path, outcome):
+    module = script(monkeypatch, "verify_live_provider")
+    from agentflow.application.ports.model_provider import (
+        ModelOutcomeUnknown,
+        ModelRateLimitedError,
+        ModelRetryableError,
+    )
+    from agentflow.infrastructure.models.mock import MockProvider
+
+    error = {
+        "retryable": ModelRetryableError(),
+        "unknown": ModelOutcomeUnknown(),
+        "rate_limited": ModelRateLimitedError(),
+    }[outcome]
+    provider = MockProvider([error])
+    progress = {}
+    with pytest.raises(AssertionError):
+        await module.verify(
+            provider,
+            f"sqlite:///{(tmp_path / 'live.db').as_posix()}",
+            progress=progress,
+        )
+    assert provider.calls == 1
+    assert progress["requests"] == 1
+    assert progress["provider_request_accepted"] is None
+    assert progress["durable_step_and_artifact"] is None
 
 
 @pytest.mark.parametrize("model", ["deepseek-flash", "deepseek-v4-pro"])

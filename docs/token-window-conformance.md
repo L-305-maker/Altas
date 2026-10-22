@@ -1,5 +1,10 @@
 # Verified Token Window Preflight v1
 
+RC 发布判定见 [Production RC Staging](production-rc-staging.md)：UNKNOWN 不能启用 strict；
+EXACT 需托管模型/完整 framing 等价证明；UPPER_BOUND 需覆盖声明范围的保守上界证明。
+当前部署身份的真实 Counter Profile 清单为空，报告不会把离线向量、配置 digest 或一次回传 Usage
+提升为真实 Token Conformance PASS。LIVE TOKEN CONFORMANCE NOT VERIFIED。
+
 核实日期：**2026-10-22**。本阶段提供模型绑定 Profile、完整冻结请求预检与离线合规检查。
 **尚无真实 DeepSeek 完整 Chat 请求的已验证 Counter；其 strict 模式继续 fail-closed。**
 测试中的 synthetic Counter 只证明 Core 契约，不能证明真实供应商 Token 数或费用。

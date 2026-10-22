@@ -26,7 +26,10 @@ from agentflow.infrastructure.models.deepseek import (
     DeepSeekProvider,
 )
 from agentflow.infrastructure.persistence.agent_store import SQLAgentStore
-from agentflow.infrastructure.persistence.models import AgentSessionRow
+from agentflow.infrastructure.persistence.models import (
+    AgentModelAttemptRow,
+    AgentSessionRow,
+)
 from agentflow.infrastructure.persistence.store import Store
 
 
@@ -36,8 +39,17 @@ def authorized():
     ) == "one-paid-request" and bool(os.environ.get("AGENTFLOW_DEEPSEEK_API_KEY"))
 
 
-async def verify(provider, url):
-    metadata, calls = {}, 0
+async def verify(provider, url, *, progress=None):
+    metadata, calls = progress if progress is not None else {}, 0
+    metadata.update(
+        requests=0,
+        provider_request_accepted=None,
+        valid_assistant=None,
+        usage_present=None,
+        model_identity_matches=None,
+        durable_attempt_confirmed=None,
+        durable_step_and_artifact=None,
+    )
 
     class Once:
         def prepare_request(self, messages, tools, projection):
@@ -50,18 +62,26 @@ async def verify(provider, url):
                 if calls:
                     raise ValueError("LiveRequestLimit")
                 calls += 1
+                metadata["requests"] = calls
                 response = await prepared.execute()
-                assert response.assistant_message.role == "assistant"
-                assert response.finish_reason == "stop"
-                assert (
-                    response.assistant_message.content
-                    and not response.assistant_message.tool_calls
-                )
                 metadata.update(
+                    provider_request_accepted=True,
+                    valid_assistant=bool(
+                        response.assistant_message.role == "assistant"
+                        and response.finish_reason == "stop"
+                        and response.assistant_message.content
+                        and not response.assistant_message.tool_calls
+                    ),
                     usage_present=response.usage is not None,
                     request_id_present=response.request_id is not None,
                     model_present=response.model is not None,
+                    model_identity_matches=(
+                        response.model == prepared.request.contract.model
+                    )
+                    if response.model is not None
+                    else None,
                 )
+                assert metadata["valid_assistant"]
                 return response
 
             return PreparedModelRequest(prepared.request, execute)
@@ -107,11 +127,24 @@ async def verify(provider, url):
         assert len(store.artifacts(run)) == 1
         with store.transaction() as db:
             snapshot = db.scalar(select(AgentSessionRow)).snapshot
+            attempts = db.scalars(select(AgentModelAttemptRow)).all()
+            assert len(attempts) == 1 and attempts[0].outcome == "succeeded"
+            assert attempts[0].request_contract is not None
+            assert (
+                attempts[0].model is None
+                or attempts[0].model == attempts[0].request_contract["model"]
+            )
         assert snapshot["budget"]["model_attempts"] == 1
+        metadata.update(durable_attempt_confirmed=True, durable_step_and_artifact=True)
         return {
             "status": "PASS",
             "requests": calls,
             "finish_reason": "stop",
+            "durable_attempt_confirmed": True,
+            "durable_step_and_artifact": True,
+            "model_identity_status": "PASS"
+            if metadata["model_identity_matches"]
+            else "NOT_VERIFIED",
             **metadata,
         }
     finally:
@@ -126,6 +159,7 @@ def main():
     if not args.allow_paid_request or not authorized():
         print(json.dumps({"status": "LIVE PROVIDER NOT VERIFIED", "requests": 0}))
         return 1 if args.allow_paid_request else 0
+    progress = {}
     try:
         # Fixed HTTPS endpoint and allowlisted model; no credential redirection.
         provider = DeepSeekProvider(
@@ -134,14 +168,25 @@ def main():
         with tempfile.TemporaryDirectory(prefix="agentflow-live-") as directory:
             report = asyncio.run(
                 verify(
-                    provider, f"sqlite:///{(Path(directory) / 'live.db').as_posix()}"
+                    provider,
+                    f"sqlite:///{(Path(directory) / 'live.db').as_posix()}",
+                    progress=progress,
                 )
             )
         print(json.dumps(report))
         return 0
     except Exception:
         # No traceback, exception message, prompt, key, response, or provider ID.
-        print(json.dumps({"status": "FAIL", "error": "LiveProviderAcceptanceFailed"}))
+        print(
+            json.dumps(
+                {
+                    "status": "FAIL",
+                    "requests": 0,
+                    **progress,
+                    "error": "LiveProviderAcceptanceFailed",
+                }
+            )
+        )
         return 1
 
 
