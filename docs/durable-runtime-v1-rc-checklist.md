@@ -1,5 +1,34 @@
 # Durable Runtime v1：Release Candidate 验收
 
+## RC Host Witness Collection v1（2026-10-23）
+
+基线 aa6cead46e4d97ad116514b11f3d879a812802c2。实现和授权边界见
+[Host Witness 手册](rc-host-witness.md)。仅改验收脚本、适配器、测试和文档，Core 与 schema
+保持不变。先失败回归复现 A 将数据库不可用当作竞争失败，以及真实 F 首次创建 Session 被误判
+历史变化；修复限于验收判断，不绕过运行时 CAS、租约、审批、UNKNOWN 或取消规则。
+
+| 项目 | 状态 | 本轮证据 |
+| --- | --- | --- |
+| 本地采集入口 | PASS | `rc_host_witness.py local --bin D:/PSQL/bin`：42 passed、2 skipped；后两项是 SQLite 变体的 PG-only 用例，不计通过 |
+| 真实操作来源 | PASS | 独立 PostgreSQL 事务领取、实际 Admission/Permit/Attempt、受控 OS 子进程强退、UNKNOWN 恢复、审批/对账、真实取消写拒绝、确认丢失分类、日志故障不改数据库 |
+| v3 证据接纳 | PASS | A/F 实际数据库与采集事件经测试用独立签名/Reviewer 验证；合成资产和故障声明只证明软件契约，不证明物理双宿主 |
+| 外部签名服务 / 双宿主 A–J | NOT VERIFIED | 未连接目标 staging，未提供受保护签名服务；仅导出 unsigned draft，没有自动生成生产私钥或故障确认 |
+| Provider / Token / HA-PITR / 生产放行 | NOT VERIFIED | 无付费或目标环境授权，未发送真实模型请求，未做远端故障操作 |
+
+| 最终完整 pytest | PASS | `uv run pytest -q`：1249 passed、529 skipped、225.42 秒；已有 1 项 TestClient 弃用警告 |
+| PostgreSQL release gates / Alembic 历史回归 | PASS | `verify_postgres.py --bin D:/PSQL/bin --release-gates`：529 passed、495 deselected、无跳过，283.37 秒；新增采集并发/真实子进程测试已加入原门禁 |
+| Ruff / 发行包 / Wheel | PASS | 完整 check、format --check（198 文件）、uv build；最终 Wheel 仓库外隔离安装 45 依赖，Core/metrics/参考应用及摘要消费闭环通过 |
+| 三进程 Soak | PASS | 180 秒目标、实际 194.84 秒、seed=7、30 波、188 Run、97 次工具派发、312 次领取；cross_host=NOT VERIFIED |
+| 逻辑备份恢复 | PASS | 0008、15 表、17 Run（含 4 legacy）；已完成工具重派 0、新批准派发 1；Admission/Observed Usage/Checkpoint v1–v3/Summary/Consumer 保留 |
+| 架构 / 离线评估 / Web | PASS | 架构 3 passed；离线 3/3、traceability=1.0；npm audit 0 vulnerabilities、typecheck、Next 16.4.1 build 通过，构建遥测关闭 |
+| 本地 Docker / Compose | NOT VERIFIED | Docker Desktop daemon pipe 不可用；不能把 2 项 Sandbox 跳过记为通过，同 SHA GitHub CI 实际结果在交付报告单列 |
+
+529 项普通 pytest 跳过包括未启用的专用 PostgreSQL、未启用 Docker、默认禁用的付费
+Live 测试及 2 项 SQLite 不适用的真实并发/子进程用例；不计为通过。PG 由独立临时实例补齐，
+Docker/Compose 依赖实际 CI。495 deselected 是专项只选择 PostgreSQL/共用门禁，普通完整
+pytest 已覆盖 SQLite。没有运行付费 Provider、外部 staging 或生产故障；既有较早任务的
+PASS 不是本轮重跑证据。最终 main 五项 CI 的链接和 SHA 以交付报告为准。
+
 ## RC Evidence Verification & Independent Acceptance v2（2026-10-23）
 
 审核基线 `9b70938d9fa8df9645aaea8d792c8dfeabadd352`，仅 main；没有新分支、PR、迁移、真实付费请求或外部故障演练。

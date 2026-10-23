@@ -79,8 +79,15 @@ def record(root, kind, **data):
         )
 
 
-async def serve(url, root, seconds):
-    root = private_records(root)
+async def serve(url, root, seconds, *, witness=None, claim_only=False):
+    # The optional witness uses a separate, token-free journal. Existing local
+    # soak fencing records are never enabled by the witness staging entry.
+    root = private_records(root) if witness is None else None
+
+    def diagnostic(kind, **data):
+        if root is not None:
+            record(root, kind, **data)
+
     configured = os.environ.get("AGENTFLOW_RC_ADMISSION_POLICY")
     policy = (
         ProviderAdmissionPolicy.model_validate_json(configured) if configured else None
@@ -98,13 +105,25 @@ async def serve(url, root, seconds):
         ),
         HandlerRegistry(),
     )
+    execution_store = store
+    if witness is not None:
+        from rc_host_witness import ObservedAgents, ObservedStore
+
+        agents = ObservedAgents(agents, witness)
+        execution_store = ObservedStore(store, witness)
+    if claim_only:
+        try:
+            await asyncio.to_thread(execution_store.claim, min(seconds, 30))
+        finally:
+            store.close()
+        return
 
     async def plain(task):
-        record(root, "plain", run=task.run_id, step=task.step_id)
+        diagnostic("plain", run=task.run_id, step=task.step_id)
         return {"ok": True}
 
     async def agent(task):
-        record(root, "claim", task=task_fence_record(task))
+        diagnostic("claim", task=task_fence_record(task))
         scenario = task.inputs["scenario"]
         tools = ToolRuntime()
 
@@ -112,12 +131,15 @@ async def serve(url, root, seconds):
             return {"value": 1}
 
         async def durable(args, invocation):
-            record(
-                root,
+            diagnostic(
                 "dispatch",
                 action=invocation.action_id,
                 key=invocation.idempotency_key,
             )
+            if witness is not None:
+                await asyncio.to_thread(
+                    witness.best_effort, witness.dispatched, task, invocation
+                )
             if scenario == "crash":
                 # Parent kills this process after seeing the actual dispatch.
                 await asyncio.Event().wait()
@@ -146,6 +168,8 @@ async def serve(url, root, seconds):
                 if scenario == "model_rate_limited":
                     raise ModelRateLimitedError(retry_after_seconds=5)
                 if scenario == "retry" and state.snapshot.budget.model_attempts == 1:
+                    if witness is not None and witness.case == "G":
+                        raise ModelRateLimitedError(retry_after_seconds=5)
                     return await MockProvider([ModelRetryableError()]).respond(
                         messages, tools
                     )
@@ -193,7 +217,7 @@ async def serve(url, root, seconds):
     handlers.register("rc-agent", agent)
 
     async def summarize(task):
-        record(root, "claim", task=task_fence_record(task))
+        diagnostic("claim", task=task_fence_record(task))
         return await DurableSummaryRunner(
             agents, MockSummaryProvider(), admission=agents if policy else None
         ).run(task)
@@ -201,7 +225,7 @@ async def serve(url, root, seconds):
     handlers.register("durable_summary", summarize)
 
     async def consume(task):
-        record(root, "claim", task=task_fence_record(task))
+        diagnostic("claim", task=task_fence_record(task))
 
         class Provider(MockProvider):
             async def respond(self, messages, tools=None):
@@ -230,7 +254,10 @@ async def serve(url, root, seconds):
 
     handlers.register("agent", consume)
     handlers.register("rc-plain", plain)
-    worker = Worker(store, handlers, concurrency=1, lease_seconds=3, poll_seconds=0.05)
+    worker = Worker(
+        execution_store, handlers, concurrency=1, lease_seconds=3, poll_seconds=0.05
+    )
+    database_failed = False
     try:
         # Bounded loop; a database outage conservatively stops this process.
         async with asyncio.timeout(seconds):
@@ -240,9 +267,16 @@ async def serve(url, root, seconds):
     except TimeoutError:
         pass
     except SQLAlchemyError:
-        record(root, "database_stopped")
+        database_failed = True
+        diagnostic("database_stopped")
+        if witness is not None:
+            witness.best_effort(witness.unavailable)
     finally:
         store.close()
+        if witness is not None and database_failed:
+            # A safe-stop receipt is emitted only by the loop that actually
+            # stopped on a database exception, never by an arbitrary observer.
+            witness.best_effort(witness.stopped)
 
 
 class Workload:

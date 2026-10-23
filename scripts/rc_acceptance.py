@@ -479,7 +479,7 @@ def snapshot_failures(snapshot):
     return tuple(sorted(failures))
 
 
-def transition_failures(before, after):
+def transition_failures(before, after, *, allow_initialization=False):
     failures = set(snapshot_failures(before)) | set(snapshot_failures(after))
     if after.observed_at < before.observed_at:
         failures.add("InvalidPersistentState")
@@ -497,7 +497,18 @@ def transition_failures(before, after):
             current.revision is None or current.revision < old.revision
         ):
             failures.add("RevisionRollback")
-        if old.agent_identity != current.agent_identity or (
+        initialized = (
+            allow_initialization
+            and old.agent_identity is None
+            and old.agent_status is None
+            and old.revision is None
+            and old.snapshot_digest is None
+            and old.counters == (0, 0, 0, 0)
+            and not any(a.step_ref == ref for a in before.actions + before.attempts)
+            and current.agent_identity is not None
+            and current.revision is not None
+        )
+        if (old.agent_identity != current.agent_identity and not initialized) or (
             old.revision == current.revision
             and old.snapshot_digest != current.snapshot_digest
         ):
@@ -708,6 +719,7 @@ def _verify_acceptance(
     witness=scenario_witness,
     report_type=RCIndependentAcceptance,
     causal_check=None,
+    transition_check=transition_failures,
 ):
     now = now or datetime.now(timezone.utc)
     if not challenge.issued_at <= now <= challenge.expires_at:
@@ -885,7 +897,7 @@ def _verify_acceptance(
         if len(dispatched) != len(set(dispatched)):
             failures.add("CompletedRedispatched")
         if before and after:
-            failures.update(transition_failures(before[0], after[0]))
+            failures.update(transition_check(before[0], after[0]))
             if not witness(case, before[0], after[0], operations):
                 missing.add("ScenarioWitnessMissing")
         if causal_check is not None and before and after:

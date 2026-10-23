@@ -57,7 +57,9 @@ def preflight(config, *, mode="audit"):
         engine.dispose()
 
 
-async def worker(seconds, *, config_path, environment, allowed, slot):
+async def worker(
+    seconds, *, config_path, environment, allowed, slot, witness=None, claim_only=False
+):
     require_execution(environment, allowed)
     config = configuration(config_path, environment)
     if not 1 <= seconds <= 3600 or not 0 <= slot < config.max_workers:
@@ -88,7 +90,16 @@ async def worker(seconds, *, config_path, environment, allowed, slot):
                 from rc_workload import serve
 
                 job = asyncio.create_task(
-                    serve(url, os.environ["AGENTFLOW_RC_RECORDS"], seconds)
+                    serve(
+                        url,
+                        os.environ.get("AGENTFLOW_RC_RECORDS"),
+                        seconds,
+                        **(
+                            {"witness": witness, "claim_only": claim_only}
+                            if witness is not None
+                            else {}
+                        ),
+                    )
                 )
                 while not job.done():
                     await asyncio.wait({job}, timeout=0.5)

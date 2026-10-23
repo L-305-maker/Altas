@@ -1,5 +1,14 @@
 # Durable Runtime v1：备份、恢复及 staging 演练
 
+Host Witness 采集升级不新增数据库迁移或执行状态字段。按
+[受控采集流程](rc-host-witness.md) 保护新私有目录、Challenge 登记及消费 tombstone，
+保存签名信任根版本和完整 provenance binding；不要通过复制/清空登记重复使用旧 Challenge。
+新版部署摘要包含采集器代码，升级后重新核对部署和签发 Challenge，不改写旧签名文件。
+采集器或文件失败只使证据不完整；恢复时仍读取数据库事实，不重新发送 UNKNOWN，不补造
+预约成功，也不把旧日志当成新的执行授权。被强退子进程的日志不能补封成完整来源。
+父进程只有实际观察过其存活、真实 Action/lease 和退出才形成自己的退出收据。
+跨宿主、外部断链、受保护签名器、真实 Provider/Token 及 HA/PITR 仍需独立授权演练。
+
 ## 独立证据验收 v2
 
 恢复后的目标部署需依照 [独立验收流程](rc-independent-acceptance.md) 重新签发绑定该环境、数据库端点、

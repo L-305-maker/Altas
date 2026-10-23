@@ -1,5 +1,12 @@
 # Production RC Staging & Evidence Gates v1
 
+新的操作者采集流程见 [RC Host Witness v1](rc-host-witness.md)：identity/preflight/status
+与实际执行分离；probe/run 仍需环境 UUID、明确授权、TLS/OID/0008、干净部署、槽位锁及
+专用合成批次。默认不连接外部环境。run 只监督自己启动的本机固定子进程，不主动注入远端故障。
+日志不包含输入、Prompt、参数、结果或真实 token；缺失、截断、时钟不明和提交确认丢失不会
+升级成成功。G 的同调用 429/延期使用 retry fixture 的 case G 采集模式，既有单尝试耗尽 fixture
+继续用于终态/备份测试。没有独立签名和 Reviewer 时，只能得到 NOT_VERIFIED unsigned draft。
+
 本轮只验证离线软件门禁。**真实双宿主、真实 Provider、真实 Token Conformance 均为 NOT_VERIFIED**。
 软件 CI、单机三进程、逻辑备份通过，不等于目标生产环境已放行。没有自动远程故障操作。
 

@@ -26,6 +26,7 @@ from rc_acceptance import (
     _verify_acceptance,
     canonical_json,
     request_digest,
+    transition_failures,
 )
 
 
@@ -298,7 +299,10 @@ def _scenario(case, before, after, ops, fault, window_start):
                 and win.lease_until == step.lease_until
                 and any(
                     o.kind == "claim"
-                    and o.outcome in {"rejected", "unavailable"}
+                    and o.outcome == "rejected"
+                    and o.error_code is None
+                    and o.lease_digest == win.lease_digest
+                    and o.lease_until == win.lease_until
                     and o.target_step_ref == step.ref
                     and o.host_identity != win.host_identity
                     and win.at <= o.at < (win.lease_until or win.at)
@@ -693,4 +697,7 @@ def verify_causal_acceptance(challenge, trust, receipts, *, now=None):
         witness=lambda *args: True,
         report_type=RCCausalAcceptance,
         causal_check=check_causality,
+        transition_check=lambda before, after: transition_failures(
+            before, after, allow_initialization=True
+        ),
     )

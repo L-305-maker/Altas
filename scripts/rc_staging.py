@@ -219,7 +219,11 @@ def deployment_identity():
     if git("status", "--porcelain"):
         raise ValueError("UncommittedStagingBuild")
     paths = sorted((ROOT / "src/agentflow").rglob("*.py"))
-    paths += [ROOT / "scripts/rc_workload.py", ROOT / "scripts/rc_staging.py"]
+    paths += [
+        ROOT / "scripts/rc_workload.py",
+        ROOT / "scripts/rc_staging.py",
+        ROOT / "scripts/rc_host_witness.py",
+    ]
     runtime = request_digest(
         [
             (p.relative_to(ROOT).as_posix(), hashlib.sha256(p.read_bytes()).hexdigest())

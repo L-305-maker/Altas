@@ -291,7 +291,12 @@ def causal(monkeypatch, acceptance):
             )
         if case == "A":
             ops[0].update(kind="claim", lease_digest=digest(81), lease_until=stamp + 60)
-            ops[1].update(kind="claim", outcome="unavailable")
+            ops[1].update(
+                kind="claim",
+                outcome="rejected",
+                lease_digest=digest(81),
+                lease_until=stamp + 60,
+            )
         elif case == "B":
             before["steps"][0]["lease_until"] = stamp + 8
             before.update(actions=[action])

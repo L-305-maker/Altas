@@ -1,5 +1,16 @@
 # RC Causal Acceptance v3
 
+Host 事件的实际采集现在使用 [RC Host Witness v1](rc-host-witness.md)。执行返回值、
+数据库事实、私有 journal 与独立签名是不同信任层；手工填写合法 JSON 不产生可信执行证明。
+新入口仅导出 unsigned draft，原 v3 Ed25519 域、角色、公钥 pin、Reviewer 和 Challenge 消费
+保留。完整 journal 的摘要通过 ProvenanceBinding 进入独立签署 Fault 的 protected_record_digest；
+签名方必须实际核查来源，hash chain 本身没有认证能力。
+
+A 的 unavailable 不能替代真实未获租约：现在要求 rejected、无数据库错误、相同有效租约身份。
+本地 PostgreSQL 竞争测试也覆盖赢家尚未提交时证据不足的情况。F 采用真实 Permit/Attempt 和
+Admission deferred，统计全池事实。v3 允许真正的首次 Session 初始化，已有身份不可替换；
+v2 原签名/解析行为不变。实际双宿主及受保护签名服务仍为 NOT VERIFIED。
+
 新的生产验收入口是 `scripts/verify_rc_causal.py`；`verify_rc_acceptance.py` 明确保留为
 **历史 v2** 入口。v3 不修改 Agent Core、数据库状态或迁移，Alembic head 仍为 0008。
 两个入口都只验证保存证据，`exit 0` 不是生产发布许可。离线报告的实时数据库、Provider、Token
