@@ -25,7 +25,14 @@ def main():
         action="store_true",
         help="include cross-worker runtime release gates",
     )
+    parser.add_argument(
+        "--witness-only",
+        action="store_true",
+        help="independent PostgreSQL witness hardening gate (no SQLite substitute)",
+    )
     args = parser.parse_args()
+    if args.witness_only and args.release_gates:
+        parser.error("choose witness-only or release-gates")
     binaries = Path(args.bin).resolve()
     flags = subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
 
@@ -136,6 +143,7 @@ def main():
                             "tests/integration/test_staging_preflight.py",
                             "tests/integration/test_rc_acceptance_db.py",
                             "tests/integration/test_rc_host_witness.py",
+                            "tests/integration/test_rc_witness_hardening.py",
                         ]
                         if args.release_gates
                         else []
@@ -143,6 +151,21 @@ def main():
                     "-k",
                     POSTGRES_SELECTION,
                     "-q",
+                    "-ra",
+                ]
+                if not args.witness_only
+                else [
+                    sys.executable,
+                    "-m",
+                    "pytest",
+                    "tests/integration/test_rc_host_witness.py",
+                    "tests/integration/test_rc_witness_hardening.py",
+                    "tests/unit/test_host_witness_controls.py",
+                    "tests/unit/test_witness_provenance.py",
+                    "-k",
+                    POSTGRES_SELECTION,
+                    "-q",
+                    "-ra",
                 ],
                 env=environment,
                 creationflags=flags,

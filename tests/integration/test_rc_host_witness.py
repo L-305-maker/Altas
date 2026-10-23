@@ -313,8 +313,12 @@ def test_independent_claim_sessions_have_only_one_owner(store, witness):
             m.ObservedStore((store, other)[loser], (one, two)[loser]).claim(30) is None
         )
         records = observations(m, one) + observations(m, two)
-        assert {r.operation.outcome for r in records} == {"accepted", "rejected"}
-        assert len({r.lease_digest for r in records}) == 1
+        claims = [r for r in records if r.source == "store.claim"]
+        assert {r.operation.outcome for r in claims} == {"accepted", "rejected"}
+        assert len({r.lease_digest for r in claims}) == 1
+        for empty in (r for r in records if r.source == "store.claim.empty"):
+            assert empty.operation.outcome == "unavailable"
+            assert empty.invocation.outcome == "none" and empty.lease_digest is None
     finally:
         other.close()
 

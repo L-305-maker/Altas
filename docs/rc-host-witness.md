@@ -1,4 +1,4 @@
-# RC Host Witness Collection v1
+# RC Host Witness Collection — v2 Hardening
 
 核实日期：2026-10-23。此入口收集真实 RC 执行边界的脱敏观察，默认不执行外部
 操作、不签名，也不宣布生产放行。Core、数据库事务、调度器和 0001–0008 均不变。
@@ -68,9 +68,18 @@ uv run python scripts/rc_host_witness.py run --config <config.json> --environmen
 此种不完整采集不作为故障验收通过。正常 Worker journal 位于 child-*，父进程的 host-*
 journal 只含它亲自观察到的退出。被强退子进程没有 seal，不能补成完整日志。
 
-Store.claim 是全局领取，未增加第二调度器。入口拒绝批次外尚活跃的 Run，但这不是 RLS，
-不能阻止检查后其他 Writer 新增 Run；演练必须排除其他 Writer，并由操作者保证专库隔离。
-两个宿主必须实际尝试同一目标才能证明 A；领取了不同 Step 不可拼接。
+Store.claim 仍是全局领取，未增加第二调度器。入口检查之后，每个真实返回 Task 都须通过
+`HostCollector.authorize`，才能离开 `ObservedStore.claim` 进入 Worker 的 Handler。
+校验绑定冻结 plan 的 Run、batch、scenario、真实 Step UUID、完整 StepSpec、允许 Handler、
+Task 输入及当前 token/attempt；快照与执行共用 `plan_run` 的批次定义。原 plan 的外部修改
+不会改变授权集合，采集文件失败也不会跳过授权。普通 run 和 claim-only probe 使用同一边界。
+
+**残余限制：批次外 Lease 仍可能已被 Core 授予并提交。** 新检查保证批次外 Handler 零执行，
+不声称该事务没有发生，也不取消、完成、删除或自行归还 Task。此时进程退出 3，报告
+`WitnessExecutionRejected`、`lease_may_be_held=true`、`operator_review_or_lease_expiry`；
+尽可能写入只含哈希引用的 `execution-rejected.json`，journal 无法封为完整证据。
+操作者应冻结其他 Writer，核对获租对象并按既有租约到期/恢复程序处理；没有 RLS 或原子批次
+claim API，专库隔离仍然必要。该风险没有彻底消除。
 
 ## 分阶段 A–J
 
@@ -131,11 +140,56 @@ uv run python scripts/rc_host_witness.py export --config <config.json> --environ
 及相同租约证据；无法证明的旧 unavailable 收据不再满足 A。v3 状态检查允许原先无 Session、
 零预算且无 Action/Attempt 的 Step 首次初始化 Session；已有身份仍不可替换，v2 行为不变。
 
+## 独立离线 Provenance 预检
+
+`scripts/rc_witness_provenance.py` 只读完整的两至三份 sealed journal、原 registry、
+binding 和独立签署的 before/after/fault。它不连接数据库、不签名、不消费 Challenge，
+不接受 `concurrent=true`。固定 trust SHA 与独立审核的 collector SHA 由受保护通道提供。
+
+故障签名器须独立核对实际部署、进程 PID/nonce 与现场记录，然后在原 `ProvenanceBinding`
+中增加 `process_headers`：每份完整 `CollectorHeader.model_dump(mode="json")` 的规范摘要。
+该列表及全部 `(host_identity, sealed_journal_digest)` 一起被原 v3 Fault 的
+`protected_record_digest` 保护。只复制 Header 或自行重算 Hash Chain 不会得到受保护签名。
+空 `process_headers` 不改变旧 binding 的序列化摘要，旧导出继续可读，但不满足新门禁。
+该绑定仍属于本地来源元数据，没有引入 v4 或改变 Ed25519 签名域。
+
+```powershell
+uv run python scripts/rc_witness_provenance.py --challenge <challenge.json> --state-dir <registry> --binding <binding.json> --trust <trust.json> --trust-sha256 <独立固定SHA> --collector-sha256 <独立审核的采集器SHA> --journal <host1完整日志目录> --journal <host2完整日志目录>
+```
+
+输出确定性的脱敏 unsigned report（含 report_digest），不写回 journal。退出 1 表示
+`eligible_for_signing=true`，只供签名器继续审核；退出 2 表示拒绝。所有输出的发布状态均为
+`NOT_VERIFIED`，不得将退出 1 或本地报告当成 RC 放行。缺失签名器、来源绑定、完整日志、
+第二宿主、有效 Challenge、数据库对应关系或故障窗口时均不能进入签署准备状态。
+
+实际 claim 记录 invocation start/completion/outcome 和随机调用身份，绑定 journal 的
+Host/Process/Challenge/Batch 与观察的 Run/Step/Lease。在真实 DB 时钟查询两侧使用
+`perf_counter()` 校准，保存往返与漂移误差上界；最近校准最多 30 秒，最多 2 秒误差。
+当前漂移预算假设为每秒 1ms，跨校准不一致、跳变或不确定窗口均不能提供并发证明。
+连接失败保留 `database_error`，无目标有效租约的空查询保留 unavailable，不能充作拒绝。
+
+| Case A 观察 | 新独立门禁 | 原 v3 的含义 |
+| --- | --- | --- |
+| 第一宿主提交后，第二宿主才开始，仍在 competition_seconds 内 | SEQUENTIAL_VALID_LEASE，拒绝签署准备 | 可能 PASS，只证明有效 Lease 已存在 |
+| 同 Run/Step/Lease，两个调用在计入误差后仍有必然重叠 | OVERLAPPING_INVOCATIONS，可继续来源审核 | 时间邻近本身不能作出这个区分 |
+| 区间可能重叠但误差不能排除顺序 | TIMING_UNCERTAIN，NOT_VERIFIED | 不补造并发成功 |
+| 只有 DB 不可用、无有效 Lease 的空查询或缺失宿主事件 | NO_CONTENTION_PROOF，NOT_VERIFIED | 不充作真实竞争拒绝 |
+
+调用区间重叠仍不足以证明 SQL 锁竞争：进程可能在实际 SQL 前后暂停。v3 Host Operation
+没有完整调用区间，故新报告始终另列 `transaction_contention=NOT_VERIFIED`，并要求独立
+Reviewer 审核完整 fault-bound journal；不通过更改 v3 旧判定制造 PASS。本机签名 fixture、
+Hash Chain、软件 Host Identity 与 PID/nonce 均不能独立认证物理宿主，报告始终列
+`physical_hosts=NOT_VERIFIED`。原 Reviewer 签署和 Challenge 单次消费仍由原 v3 验证器执行。
+
 ## 本轮验收范围
 
 本地固定入口：`uv run python scripts/rc_host_witness.py local --bin D:/PSQL/bin`。
 它只创建临时 PG，运行真实 Store/Worker 集成与受控子进程退出；签名测试使用合成密钥及合成
 基础设施/故障声明，不是物理宿主证书。完整执行数字和同 SHA CI 在 RC checklist / 交付报告记录。
+
+Python 3.12 专项：`uv run python scripts/verify_postgres.py --bin D:/PSQL/bin --witness-only`。
+Python 3.13 全套仍使用 `--release-gates`，包含新增的独立连接、Barrier/事务同步回归。
+所有跳过原因通过 `-ra` 单独输出；SQLite 仅供离线回归，不能替代 PostgreSQL 验收。
 
 真实双宿主 A–J、受保护签名服务接入、目标数据库断链演练、DeepSeek、LIVE TOKEN
 CONFORMANCE、HA/PITR、生产放行：**NOT VERIFIED**。没有外部环境或付费授权，没有自动

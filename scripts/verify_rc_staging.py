@@ -14,6 +14,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from uuid import UUID, uuid4
 
+from rc_acceptance_db import checked_plan, plan_run
 from rc_staging import (
     RCStagingEvidenceReport,
     StagingConfiguration,
@@ -25,12 +26,11 @@ from rc_staging import (
     report,
     require_execution,
 )
-from sqlalchemy import select, text
+from sqlalchemy import text
 
 from agentflow.application.ports.model_request import request_digest
 from agentflow.application.ports.observed_usage import ObservedUsagePolicy
 from agentflow.application.ports.provider_admission import ProviderAdmissionPolicy
-from agentflow.infrastructure.persistence.models import RunRow
 
 
 def configuration(path, environment):
@@ -188,11 +188,7 @@ def synthetic(config, args):
         if plan.stat().st_size > 8000:
             raise ValueError("StagingPlanRejected")
         data = json.loads(plan.read_text("utf-8"))
-        if (
-            data["environment"] != str(config.environment_id)
-            or not 1 <= len(data["runs"]) <= 20
-        ):
-            raise ValueError("StagingPlanRejected")
+        checked_plan(data, config.environment_id)
     workload = Workload(
         os.environ["AGENTFLOW_RC_DATABASE_URL"],
         os.environ["AGENTFLOW_RC_RECORDS"],
@@ -225,14 +221,8 @@ def synthetic(config, args):
                 if time.monotonic() >= workload.deadline:
                     raise ValueError("StagingOperationTimeout")
                 run = str(UUID(entry["id"]))
-                current = workload.store.get_run(run)
                 with workload.store.transaction() as db:
-                    inputs = db.scalar(select(RunRow.inputs).where(RunRow.id == run))
-                if inputs != {
-                    "scenario": entry["scenario"],
-                    "rc_staging_batch": str(UUID(data["batch_id"])),
-                } or not current["spec"]["name"].startswith(f"rc-{entry['scenario']}-"):
-                    raise ValueError("StagingPlanRejected")
+                    plan_run(db, data, entry)
                 if args.command == "cancel":
                     workload.store.cancel(run)
                 elif args.command == "approve":

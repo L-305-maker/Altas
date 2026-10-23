@@ -223,6 +223,8 @@ def deployment_identity():
         ROOT / "scripts/rc_workload.py",
         ROOT / "scripts/rc_staging.py",
         ROOT / "scripts/rc_host_witness.py",
+        ROOT / "scripts/rc_acceptance_db.py",
+        ROOT / "scripts/rc_witness_provenance.py",
     ]
     runtime = request_digest(
         [

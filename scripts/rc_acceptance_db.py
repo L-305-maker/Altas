@@ -93,6 +93,19 @@ def database_identity(config, url):
     )
 
 
+def plan_run(db, plan, entry):
+    """One batch definition shared by snapshots and execution authorization."""
+    run = db.get(RunRow, entry["id"])
+    if (
+        run is None
+        or run.inputs
+        != {"scenario": entry["scenario"], "rc_staging_batch": plan["batch_id"]}
+        or not run.spec["name"].startswith(f"rc-{entry['scenario']}-")
+    ):
+        raise ValueError("StagingPlanRejected")
+    return run
+
+
 def collect_snapshot(engine, plan, environment, *, evidence_version=2):
     if evidence_version not in (2, 3):
         raise ValueError("EvidenceVersionMismatch")
@@ -151,17 +164,7 @@ def collect_snapshot(engine, plan, environment, *, evidence_version=2):
                 agents = SQLAgentStore(SimpleNamespace())
                 provider_keys = set()
                 for entry in plan["runs"]:
-                    run = db.get(RunRow, entry["id"])
-                    if (
-                        run is None
-                        or run.inputs
-                        != {
-                            "scenario": entry["scenario"],
-                            "rc_staging_batch": plan["batch_id"],
-                        }
-                        or not run.spec["name"].startswith(f"rc-{entry['scenario']}-")
-                    ):
-                        raise ValueError("StagingPlanRejected")
+                    run = plan_run(db, plan, entry)
                     specs = {
                         s.id: s for s in WorkflowSpec.model_validate(run.spec).steps
                     }

@@ -16,12 +16,13 @@ import threading
 import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from types import MappingProxyType
 from typing import Annotated, Literal
 from uuid import UUID, uuid4
 
-from pydantic import AwareDatetime, Field
+from pydantic import AwareDatetime, Field, model_serializer, model_validator
 from rc_acceptance import Digest, Frozen, Operation
-from rc_acceptance_db import checked_plan, collect_snapshot, database_identity
+from rc_acceptance_db import checked_plan, collect_snapshot, database_identity, plan_run
 from rc_causal import (
     CausalChallenge,
     CausalHost,
@@ -46,6 +47,7 @@ from agentflow.application.ports.agent_store import (
     LostLease,
 )
 from agentflow.application.ports.model_request import canonical_json, request_digest
+from agentflow.domain.workflow.spec import WorkflowSpec
 from agentflow.infrastructure.persistence.models import RunRow, StepRow
 
 MAX_EVENTS = 200
@@ -73,6 +75,21 @@ class JournalSeal(Frozen):
     complete: bool = Field(strict=True)
 
 
+class ClaimInvocation(Frozen):
+    invocation_id: Annotated[str, Field(pattern=r"^[a-f0-9]{32}$")]
+    started_at: float = Field(allow_inf_nan=False)
+    completed_at: float = Field(allow_inf_nan=False)
+    clock_error_seconds: float = Field(ge=0, le=2, allow_inf_nan=False)
+    clock_source: Literal["postgresql", "sqlite"]
+    outcome: Literal["task", "none", "database_error"]
+
+    @model_validator(mode="after")
+    def interval(self):
+        if not 0 <= self.completed_at - self.started_at <= 30:
+            raise ValueError("WitnessClockUnverified")
+        return self
+
+
 class Observation(Frozen):
     operation: Operation
     target_step_ref: Digest
@@ -84,11 +101,14 @@ class Observation(Frozen):
     approval_ref: Digest | None = None
     reconciliation_ref: Digest | None = None
     lease_digest: Digest | None = None
+    run_ref: Digest | None = None
+    invocation: ClaimInvocation | None = None
     # Error bound is zero for the DB observation clock, nonzero only for a
     # recently calibrated host-clock observation when the DB cannot be read.
     clock_error_seconds: float = Field(ge=0, le=2, allow_inf_nan=False)
     source: Literal[
         "store.claim",
+        "store.claim.empty",
         "agent.load",
         "agent.reservation",
         "agent.admission_deferred",
@@ -114,6 +134,23 @@ class ProvenanceBinding(Frozen):
     # Each entry is (pinned host identity, sealed journal digest).
     journals: tuple[tuple[Digest, Digest], ...] = Field(min_length=2, max_length=3)
     fault_record_digest: Digest
+    # Independently observed process headers, protected by the existing v3
+    # fault signature over this binding. Empty preserves historical exports.
+    process_headers: tuple[Digest, ...] = Field(default=(), max_length=3)
+
+    @model_serializer(mode="wrap")
+    def historical_binding(self, handler):
+        value = handler(self)
+        if not self.process_headers:
+            value.pop("process_headers", None)
+        return value
+
+
+class WitnessExecutionRejected(ValueError):
+    """The Core lease may exist; stop before any handler, without compensation."""
+
+    def __init__(self):
+        super().__init__("WitnessExecutionRejected")
 
 
 def check_registration(directory, challenge):
@@ -172,7 +209,7 @@ class HostCollector:
             raise ValueError("WitnessScopeMismatch")
         self.store, self.plan, self.challenge, self.registry = (
             store,
-            plan,
+            json.loads(canonical_json(plan)),  # Detach the caller's mutable plan.
             challenge,
             registry,
         )
@@ -188,6 +225,26 @@ class HostCollector:
         root.mkdir(mode=0o700, parents=False, exist_ok=False)
         self.root = root
         first = self.snapshot()
+        authorized = {}
+        with Session(store.engine) as db:
+            for entry in self.plan["runs"]:
+                run = plan_run(db, self.plan, entry)
+                specs = {s.id: s for s in WorkflowSpec.model_validate(run.spec).steps}
+                for step in db.scalars(select(StepRow).where(StepRow.run_id == run.id)):
+                    spec = specs[step.key]
+                    if spec.handler not in {
+                        "agent",
+                        "rc-agent",
+                        "rc-plain",
+                        "durable_summary",
+                    }:
+                        raise ValueError("WitnessScopeMismatch")
+                    authorized[run.id, step.key] = (
+                        step.id,
+                        spec.model_dump_json(),
+                        canonical_json(run.inputs),
+                    )
+        self.authorized = MappingProxyType(authorized)
         if target is not None and target not in {s.ref for s in first.steps}:
             raise ValueError("WitnessTargetMissing")
         self.attempts.update(a.ref for a in first.attempts)
@@ -243,6 +300,11 @@ class HostCollector:
         # Staging must be dedicated to this bounded synthetic batch. Operators
         # must exclude other writers; this guard is not a database RLS policy.
         check_registration(self.registry, self.challenge)
+        if (
+            checked_plan(self.plan, self.challenge.environment_id)
+            != self.challenge.staging_batch_digest
+        ):
+            raise WitnessExecutionRejected()
         with Session(self.store.engine) as db:
             if db.scalar(
                 select(func.count())
@@ -253,6 +315,101 @@ class HostCollector:
                 )
             ):
                 raise ValueError("WitnessBatchIsolationRequired")
+
+    def authorize(self, task):
+        """Mandatory execution check, deliberately outside best_effort logging."""
+        try:
+            check_registration(self.registry, self.challenge)
+            if (
+                checked_plan(self.plan, self.challenge.environment_id)
+                != self.challenge.staging_batch_digest
+            ):
+                raise ValueError
+            identity, spec, inputs = self.authorized[task.run_id, task.step_id]
+            with Session(self.store.engine) as db:
+                entry = next(r for r in self.plan["runs"] if r["id"] == task.run_id)
+                run = plan_run(db, self.plan, entry)
+                step = db.get(StepRow, identity)
+                current = next(
+                    s
+                    for s in WorkflowSpec.model_validate(run.spec).steps
+                    if s.id == task.step_id
+                )
+                if (
+                    step is None
+                    or step.run_id != task.run_id
+                    or step.key != task.step_id
+                    or step.status != "running"
+                    or run.status in {"succeeded", "failed", "cancelled"}
+                    or step.token != task.token
+                    or step.attempts != task.attempt
+                    or step.lease_until <= self.store._now(db)
+                    or task.spec.model_dump_json() != spec
+                    or current.model_dump_json() != spec
+                    or canonical_json(task.inputs) != inputs
+                    or canonical_json(run.inputs) != inputs
+                ):
+                    raise ValueError
+        except Exception:
+            self.broken = True
+            try:
+                _write(
+                    self.root / "execution-rejected.json",
+                    dict(
+                        error="WitnessExecutionRejected",
+                        lease_may_be_held=True,
+                        run_ref=self.ref("run", task.run_id),
+                        lease_digest=self.ref("lease", task.token),
+                        recovery="operator_review_or_lease_expiry",
+                    ),
+                )
+            except Exception:
+                pass  # Authorization still fails when even its report cannot persist.
+            raise WitnessExecutionRejected() from None
+
+    def claim_clock(self):
+        # Sandwich a real DB clock sample with monotonic timestamps. No claim
+        # transaction is replaced, held open or retried by the collector.
+        start = time.perf_counter()
+        with Session(self.store.engine) as db:
+            stamp = self.store._now(db)
+        end = time.perf_counter()
+        return stamp, (start + end) / 2, (end - start) / 2, time.time()
+
+    def claim_interval(self, calibration, start, end, outcome):
+        if calibration is None:
+            raise ValueError("WitnessClockUnverified")
+        stamp, mono, error, wall = calibration
+        # Assumes <=1ms/s bounded drift during this <=30s calibration window.
+        # A DB/host clock jump or excessive RTT invalidates the journal.
+        if outcome == "database_error":
+            elapsed = end - mono
+            bound = error + 0.1 + elapsed * 0.001
+            if (
+                not 0 <= elapsed <= 30
+                or bound > 2
+                or abs(time.time() - wall - elapsed) > 0.1
+            ):
+                raise ValueError("WitnessClockUnverified")
+        else:
+            after, after_mono, after_error, after_wall = self.claim_clock()
+            elapsed = after_mono - mono
+            bound = error + after_error + elapsed * 0.001 + 0.001
+            if (
+                not 0 <= elapsed <= 30
+                or bound > 2
+                or abs(after - stamp - elapsed) > bound
+                or abs(after_wall - wall - elapsed) > bound + 0.1
+            ):
+                raise ValueError("WitnessClockUnverified")
+        return ClaimInvocation(
+            invocation_id=uuid4().hex,
+            started_at=stamp + start - mono,
+            completed_at=stamp + end - mono,
+            clock_error_seconds=bound,
+            clock_source=self.store.engine.dialect.name,
+            outcome=outcome,
+        )
 
     def step(self, task):
         if task.run_id not in {r["id"] for r in self.plan["runs"]}:
@@ -287,7 +444,7 @@ class HostCollector:
         with self.lock:
             if not self.broken:
                 try:
-                    callback(*args)
+                    return callback(*args)
                 except Exception:
                     # No exception text, no effect on the real method's return
                     # or error. Missing/failed evidence can never become PASS.
@@ -324,7 +481,7 @@ class HostCollector:
         # Operation shape as an explicit, typed source in the local journal.
         self._emit(observation)
 
-    def claimed(self, task, lease_seconds=30):
+    def claimed(self, task, lease_seconds=30, invocation=None):
         snapshot = self.snapshot()
         if task is None:
             step = next((s for s in snapshot.steps if s.ref == self.target), None)
@@ -341,6 +498,8 @@ class HostCollector:
                     step.ref,
                     lease_digest=step.lease_digest,
                     lease_until=step.lease_until,
+                    run_ref=step.run_ref,
+                    invocation=invocation,
                 )
             elif step and step.agent_status == "waiting_reconciliation":
                 self._observation(
@@ -380,7 +539,17 @@ class HostCollector:
                         attempt_ref=attempt.ref,
                         provider_ref=pool.ref,
                     )
-            return  # No target lease evidence: no invented rejection.
+            elif step and invocation is not None:
+                self._observation(
+                    snapshot,
+                    "store.claim.empty",
+                    "claim",
+                    "unavailable",
+                    step.ref,
+                    run_ref=step.run_ref,
+                    invocation=invocation,
+                )
+            return  # An empty SKIP LOCKED query is never a rejection receipt.
         ref = self.step(task)
         lease = self.ref("lease", task.token)
         step = next(s for s in snapshot.steps if s.ref == ref)
@@ -396,6 +565,8 @@ class HostCollector:
             lease_digest=lease,
             lease_until=step.lease_until,
             database_at=step.lease_until - lease_seconds,
+            run_ref=step.run_ref,
+            invocation=invocation,
         )
 
     def state(self, task, state, source, admission=None, backpressure=False):
@@ -541,7 +712,7 @@ class HostCollector:
             lease_digest=lease,
         )
 
-    def unavailable(self, task=None, *, stopped=False):
+    def unavailable(self, task=None, *, stopped=False, invocation=None):
         # Host time is usable only after recent DB calibration, with an explicit
         # conservative uncertainty interval; no made-up DB timestamp.
         wall, mono, error = self.calibration
@@ -569,6 +740,7 @@ class HostCollector:
                 target_step_ref=step,
                 source="worker.stop" if stopped else "database.error",
                 clock_error_seconds=min(2.0, error + 0.1),
+                invocation=invocation,
             )
         )
 
@@ -688,6 +860,11 @@ class HostCollector:
                     lease_digest=step.lease_digest,
                     source_record_digest=observed.source_record_digest,
                 )
+        if child.returncode == 3:
+            self.broken = True
+            raise WitnessExecutionRejected()
+        if child.returncode and observed is None:
+            self.broken = True
 
     def rejected(self, task, writing):
         lease = self.ref("lease", task.token)
@@ -751,13 +928,30 @@ class ObservedStore:
         return getattr(self.delegate, name)
 
     def claim(self, lease_seconds=30):
+        self.collector.isolated()  # Execution authorization, not logging.
+        clock = self.collector.best_effort(self.collector.claim_clock)
+        start = time.perf_counter()
         try:
-            self.collector.isolated()  # Execution authorization, not logging.
             task = self.delegate.claim(lease_seconds)
         except SQLAlchemyError:
-            self.collector.best_effort(self.collector.unavailable)
+            end = time.perf_counter()
+            interval = self.collector.best_effort(
+                self.collector.claim_interval, clock, start, end, "database_error"
+            )
+            self.collector.best_effort(
+                lambda: self.collector.unavailable(invocation=interval)
+            )
             raise
-        self.collector.best_effort(self.collector.claimed, task, lease_seconds)
+        end = time.perf_counter()
+        if task is not None:
+            # The global Core transaction may already have granted a lease.
+            self.collector.authorize(task)
+        interval = self.collector.best_effort(
+            self.collector.claim_interval, clock, start, end, "task" if task else "none"
+        )
+        self.collector.best_effort(
+            self.collector.claimed, task, lease_seconds, interval
+        )
         return task
 
 
@@ -966,6 +1160,8 @@ def unsigned_draft(root, challenge, registry, trust, receipts, binding):
                     "clock_error_seconds",
                     "snapshot_digest",
                     "source_record_digest",
+                    "run_ref",
+                    "invocation",
                 },
             ),
             "evidence_version": 3,
@@ -1293,6 +1489,19 @@ def main():
             return 1
         finally:
             engine.dispose()
+    except WitnessExecutionRejected:
+        print(
+            json.dumps(
+                dict(
+                    status="NOT_VERIFIED",
+                    error="WitnessExecutionRejected",
+                    lease_may_be_held=True,
+                    recovery="operator_review_or_lease_expiry",
+                    rejected_task_handler_executed=False,
+                )
+            )
+        )
+        return 3
     except Exception:
         print(
             json.dumps(dict(status="NOT_VERIFIED", error="WitnessCollectionRejected"))
