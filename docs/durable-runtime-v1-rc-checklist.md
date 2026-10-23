@@ -528,3 +528,14 @@ Token 窗口保证仅限经过验证的 Counter / 上界；默认未知，不是
 普通完整 pytest 的专用 PG 变体未启用时跳过；PG 锁、事务和历史迁移由上面的隔离专项验证。
 Docker 的跳过和默认禁用的 Live 测试仍单独视为未本地验证。最新 main 的五项 GitHub Actions
 （Python 3.12/3.13、Web、Docker、Compose）结果在交付报告链接单列，不以离线证据 PASS 替代发布许可。
+
+### 同轮 CI 安全门禁修复
+
+首个提交 ea07d5bbdfac332d73915f8214a51532173fe108 的 Web job 实际失败于
+`npm audit --omit=dev --audit-level=high`，不是跳过构建后宣称全部通过。既有固定 Next.js 16.3.8
+命中 2026-10-22 更新的 GHSA-2464-fhr4-w9xw、GHSA-p3m5-59mp-jv5r、GHSA-673q-mjm6-r5xr。
+依照 [维护方公告](https://github.com/advisories/GHSA-673q-mjm6-r5xr)，独立追加最小修复到
+16.4.1，仅变更 package.json/锁文件及本记录，不改业务页面或 CI 检查门槛。
+本地先复现 critical 审计失败，升级后生产依赖 audit 为 0 vulnerabilities，typecheck 和
+NEXT_TELEMETRY_DISABLED=1 下的生产 build 通过。最终 main CI 以安全修复后的 SHA 为准；
+既有 Python、PG、Soak 和备份的代码未因该依赖修复变化。
