@@ -693,6 +693,22 @@ def scenario_witness(case, before, after, operations):
 
 
 def verify_acceptance(challenge, trust, receipts, *, now=None):
+    if challenge.evidence_version != 2:
+        raise ValueError("EvidenceVersionMismatch")
+    return _verify_acceptance(challenge, trust, receipts, now=now)
+
+
+def _verify_acceptance(
+    challenge,
+    trust,
+    receipts,
+    *,
+    now=None,
+    signing=signing_bytes,
+    witness=scenario_witness,
+    report_type=RCIndependentAcceptance,
+    causal_check=None,
+):
     now = now or datetime.now(timezone.utc)
     if not challenge.issued_at <= now <= challenge.expires_at:
         raise ValueError("EvidenceExpired")
@@ -726,7 +742,7 @@ def verify_acceptance(challenge, trust, receipts, *, now=None):
             raise ValueError("EvidenceHostMismatch")
         try:
             Ed25519PublicKey.from_public_bytes(bytes.fromhex(signer.public_key)).verify(
-                bytes.fromhex(receipt.signature), signing_bytes(evidence)
+                bytes.fromhex(receipt.signature), signing(evidence)
             )
         except InvalidSignature:
             raise ValueError("EvidenceSignatureRejected") from None
@@ -870,8 +886,14 @@ def verify_acceptance(challenge, trust, receipts, *, now=None):
             failures.add("CompletedRedispatched")
         if before and after:
             failures.update(transition_failures(before[0], after[0]))
-            if not scenario_witness(case, before[0], after[0], operations):
+            if not witness(case, before[0], after[0], operations):
                 missing.add("ScenarioWitnessMissing")
+        if causal_check is not None and before and after:
+            bad, incomplete = causal_check(
+                case, before[0], after[0], hosts, faults, challenge
+            )
+            failures.update(bad)
+            missing.update(incomplete)
         review = [r for r in selected if isinstance(r.evidence.payload, ReviewEvidence)]
         reviewed = [
             r for r in selected if not isinstance(r.evidence.payload, ReviewEvidence)
@@ -898,7 +920,7 @@ def verify_acceptance(challenge, trust, receipts, *, now=None):
                 evidence_digest=evidence_set_digest(selected),
             )
         )
-    return RCIndependentAcceptance(
+    return report_type(
         challenge_digest=request_digest(challenge.model_dump(mode="json")),
         v1_report_digest=challenge.v1_report_digest,
         trust_version=trust.version,
@@ -932,7 +954,7 @@ def consume_challenge(directory, challenge):
     if (
         issued.stat().st_size > 16000
         or issued.is_symlink()
-        or AcceptanceChallenge.model_validate_json(issued.read_bytes()) != challenge
+        or type(challenge).model_validate_json(issued.read_bytes()) != challenge
     ):
         raise ValueError("ChallengeRegistrationMismatch")
     try:

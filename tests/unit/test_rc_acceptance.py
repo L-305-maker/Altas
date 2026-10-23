@@ -300,8 +300,9 @@ def test_witnesses_require_the_same_persistent_target_and_a_new_reservation(acce
     assert not m.scenario_witness("F", unchanged, unchanged, (reserve, reserve))
 
 
+@pytest.mark.parametrize("version", (2, 3))
 def test_cli_issue_verify_and_replay_are_offline_and_redacted(
-    monkeypatch, tmp_path, capsys
+    monkeypatch, tmp_path, capsys, version
 ):
     import hashlib
 
@@ -347,7 +348,7 @@ def test_cli_issue_verify_and_replay_are_offline_and_redacted(
             "1" * 64,
         ],
     )
-    assert module.main() == 0
+    assert module.main(evidence_version=version) == 0
     challenge = capsys.readouterr().out
     challenge_path = tmp_path / "challenge.json"
     challenge_path.write_text(challenge)
@@ -365,11 +366,12 @@ def test_cli_issue_verify_and_replay_are_offline_and_redacted(
         hashlib.sha256(trust.read_bytes()).hexdigest(),
     ]
     monkeypatch.setattr("sys.argv", command)
-    assert module.main() == 1
+    assert module.main(evidence_version=version) == 1
     output = capsys.readouterr().out
+    assert json.loads(output)["schema_version"] == version
     assert {c["status"] for c in json.loads(output)["cases"]} == {"NOT_VERIFIED"}
     assert "PRIVATE" not in output and plan["runs"][0]["id"] not in output
-    assert module.main() == 2
+    assert module.main(evidence_version=version) == 2
     assert (
         json.loads(capsys.readouterr().out)["error"] == "AcceptanceVerificationRejected"
     )

@@ -93,7 +93,19 @@ def database_identity(config, url):
     )
 
 
-def collect_snapshot(engine, plan, environment):
+def collect_snapshot(engine, plan, environment, *, evidence_version=2):
+    if evidence_version not in (2, 3):
+        raise ValueError("EvidenceVersionMismatch")
+    if evidence_version == 3:
+        from rc_causal import (
+            ApprovalFact,
+            CallFact,
+            CausalAction,
+            CausalAttempt,
+            CausalSnapshot,
+            ReconciliationFact,
+            SummaryLink,
+        )
     batch = checked_plan(plan, environment)
 
     def reference(*parts):
@@ -110,6 +122,8 @@ def collect_snapshot(engine, plan, environment):
             "providers",
         )
     }
+    if evidence_version == 3:
+        facts.update(calls=[], approvals=[], reconciliations=[], summary_links=[])
     invalid, measured = 0, 0
     deadline = time.monotonic() + 30
     with engine.connect() as connection:
@@ -250,6 +264,54 @@ def collect_snapshot(engine, plan, environment):
                             )
                             if row.provider_key:
                                 provider_keys.add(row.provider_key)
+                            if evidence_version == 3:
+                                for call in state.model_calls:
+                                    facts["calls"].append(
+                                        CallFact(
+                                            ref=reference(
+                                                "call", row.id, call.model_call_id
+                                            ),
+                                            step_ref=ref,
+                                            round_index=call.round_index,
+                                            attempts=call.attempts,
+                                            status=call.status,
+                                        )
+                                    )
+                                for approval in state.approvals:
+                                    facts["approvals"].append(
+                                        ApprovalFact(
+                                            ref=reference(
+                                                "approval", approval.approval_id
+                                            ),
+                                            action_ref=reference(
+                                                "action", row.id, approval.action_id
+                                            ),
+                                            binding_digest=request_digest(
+                                                approval.binding.model_dump(mode="json")
+                                            ),
+                                            decision=approval.decision,
+                                            consumed_at=approval.consumed_at,
+                                        )
+                                    )
+                                for reconciliation in state.reconciliations:
+                                    facts["reconciliations"].append(
+                                        ReconciliationFact(
+                                            ref=reference(
+                                                "reconciliation",
+                                                row.id,
+                                                reconciliation.request_id,
+                                            ),
+                                            action_ref=reference(
+                                                "action",
+                                                row.id,
+                                                reconciliation.action_id,
+                                            ),
+                                            previous_status=reconciliation.previous_status.value,
+                                            confirmed_status=reconciliation.confirmed_status,
+                                            applied=reconciliation.applied,
+                                            confirmed_at=reconciliation.created_at,
+                                        )
+                                    )
                             for stored in state.actions:
                                 action = stored.action
                                 approval = next(
@@ -273,7 +335,27 @@ def collect_snapshot(engine, plan, environment):
                                 identity["action"].pop("error_code")
                                 identity.pop("result")
                                 facts["actions"].append(
-                                    ActionFact(
+                                    (
+                                        CausalAction
+                                        if evidence_version == 3
+                                        else ActionFact
+                                    )(
+                                        **(
+                                            {
+                                                "binding_digest": request_digest(
+                                                    stored.tool_binding.model_dump(
+                                                        mode="json"
+                                                    )
+                                                )
+                                                if stored.tool_binding
+                                                else None,
+                                                "idempotency_digest": request_digest(
+                                                    stored.idempotency_key
+                                                ),
+                                            }
+                                            if evidence_version == 3
+                                            else {}
+                                        ),
                                         ref=reference("action", row.id, action.id),
                                         step_ref=ref,
                                         status=action.status.value,
@@ -291,7 +373,26 @@ def collect_snapshot(engine, plan, environment):
                                 )
                             for attempt in state.model_attempts:
                                 facts["attempts"].append(
-                                    AttemptFact(
+                                    (
+                                        CausalAttempt
+                                        if evidence_version == 3
+                                        else AttemptFact
+                                    )(
+                                        **(
+                                            {
+                                                "summary_input_digest": attempt.request_contract.summary_input_digest
+                                                if attempt.request_contract
+                                                else None,
+                                                "summary_consumption_digest": attempt.request_contract.summary_consumption_digest
+                                                if attempt.request_contract
+                                                else None,
+                                                "contract_digest": attempt.request_contract.request_contract_digest
+                                                if attempt.request_contract
+                                                else None,
+                                            }
+                                            if evidence_version == 3
+                                            else {}
+                                        ),
                                         ref=reference(
                                             "attempt",
                                             row.id,
@@ -353,6 +454,59 @@ def collect_snapshot(engine, plan, environment):
                                 ):
                                     invalid += 1
                                 data["consumer_identity"] = consumption.view.view_digest
+                                if evidence_version == 3:
+                                    generator = next(
+                                        s
+                                        for s in steps
+                                        if s.key
+                                        == consumption.policy.source_summary_step
+                                    )
+                                    generator_row = db.scalar(
+                                        select(AgentSessionRow).where(
+                                            AgentSessionRow.step_row_id == generator.id
+                                        )
+                                    )
+                                    generator_state = agents._read(
+                                        db, generator_row, lock=False
+                                    )
+                                    source = agents._checked_summary_input(
+                                        db, run, generator, generator_state
+                                    )
+                                    generator_contracts = [
+                                        a.request_contract
+                                        for a in generator_state.model_attempts
+                                        if a.outcome == "succeeded"
+                                        and a.request_contract
+                                    ]
+                                    consumer_contracts = [
+                                        a.request_contract
+                                        for a in state.model_attempts
+                                        if a.request_contract
+                                    ]
+                                    if generator_contracts and consumer_contracts:
+                                        facts["summary_links"].append(
+                                            SummaryLink(
+                                                source_step_ref=reference(
+                                                    "step",
+                                                    source.source_snapshot.source_step_id,
+                                                ),
+                                                generator_step_ref=reference(
+                                                    "step", generator.id
+                                                ),
+                                                consumer_step_ref=ref,
+                                                source_snapshot_digest=source.manifest.source_snapshot_digest,
+                                                summary_request_digest=source.manifest.request_id,
+                                                summary_input_digest=source.manifest.summary_input_digest,
+                                                artifact_digest=consumption.view.summary_artifact_digest,
+                                                view_digest=consumption.view.view_digest,
+                                                generator_contract_digest=generator_contracts[
+                                                    -1
+                                                ].request_contract_digest,
+                                                consumer_contract_digest=consumer_contracts[
+                                                    -1
+                                                ].request_contract_digest,
+                                            )
+                                        )
                         try:
                             facts["steps"].append(StepFact(**data))
                         except ValueError:
@@ -397,11 +551,26 @@ def collect_snapshot(engine, plan, environment):
                                 released_at=permit.released_at,
                             )
                         )
-                result = DatabaseSnapshot(
+                result = (
+                    CausalSnapshot if evidence_version == 3 else DatabaseSnapshot
+                )(
+                    **(
+                        {
+                            "global_provider_scope": tuple(
+                                reference("provider", key)
+                                for key in sorted(provider_keys)
+                            )
+                        }
+                        if evidence_version == 3
+                        else {}
+                    ),
                     observed_at=datetime.fromtimestamp(stamp, timezone.utc),
                     database_backend=engine.dialect.name,
                     invalid_records=invalid,
-                    **{k: tuple(v) for k, v in facts.items()},
+                    **{
+                        k: tuple(r.model_dump(mode="json") for r in v)
+                        for k, v in facts.items()
+                    },
                 )
                 if len(result.model_dump_json().encode("utf-8")) > 2_000_000:
                     raise ValueError("EvidenceBoundsExceeded")

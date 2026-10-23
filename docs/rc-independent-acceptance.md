@@ -1,3 +1,95 @@
+# RC Causal Acceptance v3
+
+新的生产验收入口是 `scripts/verify_rc_causal.py`；`verify_rc_acceptance.py` 明确保留为
+**历史 v2** 入口。v3 不修改 Agent Core、数据库状态或迁移，Alembic head 仍为 0008。
+两个入口都只验证保存证据，`exit 0` 不是生产发布许可。离线报告的实时数据库、Provider、Token
+和生产放行状态始终为 NOT_VERIFIED。
+
+## 为什么必须使用 v3
+
+完整合成签名回归已复现 v2 的两个 P1 假阳性：A 中宿主一领取 X、宿主二对 Y 竞争失败；F 中
+不同对象的预约与任意新增 Permit 可以组合成 PASS。v2 只计操作、参与宿主和局部数据库变化，
+不能证明这些事实属于同一次竞争。归档 v2 JSON、签名消息、报告和消费登记全部保持原身份；
+旧 PASS 只代表旧验证规则，不得晋升为 v3 PASS。没有回填 Witness，也不修改历史报告。
+
+## v3 契约与签名
+
+`CausalChallenge(evidence_version=3)` 保留原环境、部署、数据库、批次、v1 预检摘要、256-bit nonce
+和最多一小时期限。`CausalEvidence`、`CausalSignedEvidence`、`RCCausalAcceptance(schema_version=3)`
+使用单独的类型和验证入口。签名消息是 `Altas.RCCausalEvidence.v3\n` 加规范 UTF-8 JSON；v2 的
+`Altas.RCIndependentEvidence.v2\n` 不可认证 v3。规范化仍为键排序、紧凑编码、保留 Unicode、
+拒绝 NaN/Infinity；不修改任何 ModelRequestContract 身份。
+
+不可变 `RCCausalWitness` 继承有限操作枚举及 outcome/time，另绑定：
+
+- environment、batch、case、causal_group_id、固定签名宿主身份；
+- target_step_ref，以及适用的 Action、ModelCall、Attempt、Permit、Provider、Approval、Reconciliation 引用；
+- 不可逆匿名 lease digest，不输出原 token；
+- 完整 before/after 快照摘要、独立 fault 收据摘要及 Witness 自身摘要。
+
+Witness 摘要覆盖全部序列化字段（包括默认 null）；causal_group_id 是 Challenge 摘要、case、两份
+快照摘要及 fault 收据摘要的规范 JSON 摘要。Fault 明确列出最多三个受测 Step、可选配额池、
+最多 60 秒的竞争间隔；签名 envelope 起止时间是本次故障演练窗口。每条操作必须同时落在该窗口、
+宿主 envelope 和数据库观察区间内。A/F 的默认竞争间隔为五秒，不通过把窗口任意扩大来拼接演练。
+
+独立 Reviewer 签署该 case **全部非 reviewer 收据**加全局 build/infrastructure 的排序摘要集合；
+其签署时间不早于全部被审阅收据结束。每 case/host 只接受一份有界宿主收据；相同底层事件即使换 case
+包装也拒绝。跨 Challenge/batch、角色混淆、篡改、未登记公钥、签名域混用、过期、重复消费均拒绝。
+公钥注册、固定文件 SHA、独立角色、基础设施资产映射和私有 O_EXCL/fsync 消费登记沿用 v2 信任边界。
+签名仍只是受信任角色的声明；它不能自行证明物理宿主独立或真实网络中断。
+
+## A–J 的关联规则
+
+| Case | v3 必需的同一对象因果链 |
+| --- | --- |
+| A | 两个宿主竞争同一 Step；READY→RUNNING；winner 的 lease digest/截止时间等于数据库，loser 在有效租约内明确 rejected/unavailable，竞争不超过指定间隔；重叠 accepted lease 为 FAIL |
+| B | 原租约持有宿主的 worker_exit、安全停止、同一 Action INFLIGHT→UNKNOWN 和 waiting reconciliation；退出收据必须匹配原 lease digest，且退出发生在该租约失效前 |
+| C | 同 Step 原 lease、新 lease 与另一宿主 accepted claim；原 lease 的晚到提交在接管后明确 LostLease；连接错误不算拒绝；旧租约尚有效即接管为 FAIL |
+| D | resume 明确引用原 Action 与已消费 Approval；ToolBinding、幂等身份、批准事实和完成结果保持稳定，无再次派发 |
+| E | 对应旧 UNKNOWN Action、唯一 applied 对账、明确确认时间及随后 resume；未 applied 或其他 Action 的记录不足 |
+| F | 同 Provider pool、同有界竞争窗口；winner 的真实新 Call/Attempt/Permit 及预约时间全部相符；另一宿主明确 ProviderAdmissionDeferred 安全拒绝且无新 Attempt；拒绝时持久全局配额已满，包含其他 Run 的 Permit |
+| G | 已确认失败的旧 Attempt、同一 Call/Step/Provider、持久延期和 cooldown；新 index+1 Attempt 在两个 deadline 后预约；rate_limited 收据是对该已确认失败/延期事实的观察，不伪造发生在 before 之前的 HTTP 时间 |
+| H | 同 Run 的 source→generator→artifact→consumer view；原 SummaryInput、来源快照及请求摘要与真实 Generator/Consumer Contract 字段交叉核对，不能组合任意两个摘要 |
+| I | 被取消 Run/Step 就是原 lease 晚到结果遭 LostLease/StateConflict 的对象；其他 Run 的拒绝不作证明 |
+| J | 同环境、数据库身份、Step 和签名故障窗口内，database_unavailable/safe_stopped 后有明确 database_recovered，随后真实只读观察；只有不可用收据不能 PASS |
+
+数据库关系包含真实 ModelCall 归属、Action 的 ToolBinding/幂等摘要、审批消费、applied 对账及
+Summary 来源/Contract 链；旧关系不得消失或移到另一个 Run。原 revision、预算、UNKNOWN、终态、
+Artifact、配额和迟到提交不变量仍执行。明确可信矛盾输出 FAIL；缺少目标、关系、窗口、宿主、故障或
+独立审核为 NOT_VERIFIED。不能将缺证据当成功，也不把合法人工等待当成系统故障。
+
+## 只读采集与操作者步骤
+
+v3 与 v2 复用同一个采集事务。PG 使用 REPEATABLE READ / READ ONLY、statement_timeout=5s、
+lock_timeout=2s；无 FOR UPDATE、DML 或修补。实际会话仍经原 AgentStore reader 和 Summary/Consumer
+校验。最多 20 Run/100 Step，每类 2000 子记录、16 MB 完整会话、2 MB 脱敏快照、30 秒 deadline；
+100 收据和总 8 MB 验收输入上限不变。全配额池查询包含批次外所有 Permit，超限拒绝，不将未扫描数据
+当作不存在。数据库不可用直接安全拒绝，不输出健康空快照。不同请求不是同一个全库一致快照。
+
+先独立批准 staging、资产清单、操作员、故障窗口、SELECT-only 角色和发布信任根，并核实时钟同步；
+无法可靠关联数据库与宿主 UTC 时间时保持 NOT_VERIFIED。以下命令不会
+自动启动远端宿主、注入故障或发送付费请求。参数沿用下方 v2 操作说明，但使用新的独立入口：
+
+```powershell
+uv run python scripts/verify_rc_causal.py issue --config <config.json> --v1-report <v1.json> --plan <plan.json> --database-identity-digest <已独立核实摘要> --state-dir <新的私有v3目录>
+uv run python scripts/verify_rc_causal.py snapshot --config <config.json> --v1-report <v1.json> --plan <plan.json> --challenge <v3-challenge.json> --case A --phase before --read-staging
+uv run python scripts/verify_rc_causal.py verify --config <config.json> --v1-report <v1.json> --plan <plan.json> --challenge <v3-challenge.json> --state-dir <同一私有v3目录> --trust <已批准公钥文件> --trust-sha256 <独立渠道固定SHA> --evidence <签名收据.json>
+uv run python -c "import sys,json; sys.path.insert(0,'scripts'); from rc_causal import CausalEvidence; print(json.dumps(CausalEvidence.model_json_schema()))"
+```
+
+issue 输出应保存在新 Challenge 文件；snapshot 仍为未签名采集结果。受保护的外部签名服务分别签署
+数据库、构建、宿主、基础设施和故障证明，最后由独立 Reviewer 核查实际原始记录。私钥、原 token、
+计划和连接 URL 不进入公开报告或 CI Artifact。全部 A–J 需一次汇集后验证；部分集合退出 1，明确
+矛盾/拒绝退出 2，完整保存证据通过退出 0。验收后即消费 Challenge，补证需重新批准新演练。
+旧登记不迁移、不删除重用；v2 Challenge 不能用于 v3。
+
+数据库负责持久关系，宿主负责操作及 lease 身份，基础设施方负责物理故障域，故障执行方负责受保护
+故障记录，Reviewer 负责独立核实整个集合；Provider 的真实身份/付费 Smoke 另行授权，不能由这些
+收据替代。真实双宿主、网络分区、Provider、exact Token Counter 与 HA/PITR 继续 NOT_VERIFIED。
+本地临时 PostgreSQL、单机三进程 Soak、逻辑备份及软件签名测试不能认证这些生产事实。
+
+---
+
 # RC Independent Acceptance v2
 
 本层验证已保存的演练证据，不是生产发布授权，也不改变运行时数据库。RC v1 的非预检 PASS

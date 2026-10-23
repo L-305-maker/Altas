@@ -161,3 +161,12 @@ Counter UNKNOWN 不可开启 strict；EXACT 必须审核托管模型修订/完�
 数据库逻辑 pg_dump/pg_restore 验证与跨宿主网络恢复、HA/PITR 是三项不同门禁；本工具不认证后两项。
 最终生产放行还需独立宿主证据、实际 A–J 审核、目标环境备份/恢复与 HA 策略、真实 Provider 验收；
 启用真实 strict 前还需独立计数证明。无法执行时保留 NOT_VERIFIED，不影响离线软件门禁真实通过记录。
+
+## 新验收必须采用 v3 因果 Witness
+
+使用 [RC Causal Acceptance v3](rc-independent-acceptance.md) 的独立 `verify_rc_causal.py` 入口。
+v2 的 A/F 已复现不同 Step、不同预约可组合为 PASS，历史报告仅保留历史含义，不作为新的因果验收。
+每个 Witness 固定 before/after、Challenge/batch、故障窗口、真实目标和宿主；F 必须是同配额池，
+审批/对账/摘要都必须有真实关系。缺失为 NOT_VERIFIED，可信矛盾为 FAIL。两宿主、实际故障、
+专用 staging 连接及 Provider 付费请求仍需操作者分别授权；本轮没有自动执行这些操作。
+签名与独立 Reviewer 不能替代资产核验，exit 0 只接受保存证据，不是生产放行。

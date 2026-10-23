@@ -506,3 +506,25 @@ Token 窗口保证仅限经过验证的 Counter / 上界；默认未知，不是
 
 严格 Token 窗口仍会在无可信计数器时拒绝；官方存在离线资源不代表已验证本项目完整请求模板。
 请求契约不证明供应商权重、默认 thinking 行为、采样实际生效、真实费用上限或 exactly-once 账单。
+
+## RC Causal Acceptance v3（2026-10-23）
+
+审核基线 a80f3a750e6d5670395ac624022dcef99f3171c8。只修改验收脚本、测试及文档，
+保持 Core 事务、原始 v2 身份和 Alembic 0008。完整签名回归已复现 A/F 的组合证据假阳性；
+新 `verify_rc_causal.py` 要求 [逐 Case 因果链](rc-independent-acceptance.md)，旧入口仅供历史核查。
+
+| 检查 | 状态 | 本轮实际结果 |
+| --- | --- | --- |
+| 完整签名与 Live v2 门禁专项 | PASS | 84 passed；使用合成 Ed25519 / MockTransport，不是宿主或 Provider 实测 |
+| 最终完整 pytest | PASS | 1220 passed、505 skipped、1 项已有 TestClient 弃用警告，227.64 秒；skipped 不计通过 |
+| 临时 PostgreSQL release gates / 历史迁移 | PASS | 507 passed、473 deselected、零跳过，276.00 秒；v3 关系采集单独 10 passed |
+| Ruff / 架构 / 离线评估 | PASS | check 与 format --check（195 文件）；架构 3 passed；离线 3/3，traceability=1.0 |
+| 构建与仓库外 Wheel | PASS | uv build；45 依赖隔离安装；Core/metrics/参考应用及 source→summary→consumer 链路通过 |
+| 本地三 Worker 稳定性 | PASS | 180 秒目标、实际 196.78 秒、seed=7、32 波、200 Run、103 派发、332 领取；cross_host=NOT VERIFIED |
+| 逻辑备份恢复 | PASS | head 0008、15 表、17 Run（含 4 个 legacy）；已完成工具重派 0、新批准派发 1；Admission/Usage/checkpoint v1–v3/Summary/Consumer 保留 |
+| 本地 Docker / Compose | NOT VERIFIED | Docker Desktop daemon pipe 不可用；由同一 main 提交的 GitHub CI 实际结果补充，不沿用旧 SHA 的结果 |
+| 真实 staging / Provider / Token / HA-PITR / 生产放行 | NOT VERIFIED | 未获目标环境或付费授权，没有远端连接、故障注入或真实模型请求 |
+
+普通完整 pytest 的专用 PG 变体未启用时跳过；PG 锁、事务和历史迁移由上面的隔离专项验证。
+Docker 的跳过和默认禁用的 Live 测试仍单独视为未本地验证。最新 main 的五项 GitHub Actions
+（Python 3.12/3.13、Web、Docker、Compose）结果在交付报告链接单列，不以离线证据 PASS 替代发布许可。

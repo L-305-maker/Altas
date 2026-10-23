@@ -86,7 +86,7 @@ def matches(challenge, config, original, batch):
         raise ValueError("AcceptanceContextMismatch")
 
 
-def main():
+def main(*, evidence_version=2):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("command", choices=("issue", "snapshot", "verify"))
     parser.add_argument("--config")
@@ -108,6 +108,18 @@ def main():
     parser.add_argument("--read-staging", action="store_true")
     args = parser.parse_args()
     try:
+        challenge_type, receipt_type = AcceptanceChallenge, SignedEvidence
+        database_type, verifier = DatabaseEvidence, verify_acceptance
+        if evidence_version == 3:
+            from rc_causal import (
+                CausalChallenge,
+                CausalDatabaseEvidence,
+                CausalSignedEvidence,
+                verify_causal_acceptance,
+            )
+
+            challenge_type, receipt_type = CausalChallenge, CausalSignedEvidence
+            database_type, verifier = CausalDatabaseEvidence, verify_causal_acceptance
         config, original, plan, batch = context(args)
         if args.command == "issue":
             now = datetime.now(timezone.utc)
@@ -117,7 +129,7 @@ def main():
                 <= original.completed_at + timedelta(hours=1)
             ):
                 raise ValueError("PreflightExpired")
-            challenge = AcceptanceChallenge(
+            challenge = challenge_type(
                 environment_id=config.environment_id,
                 deployment_sha=original.git_commit_sha,
                 application_version=original.application_version,
@@ -132,9 +144,7 @@ def main():
             issue_challenge(args.state_dir, challenge)
             print(challenge.model_dump_json())
             return 0
-        challenge = AcceptanceChallenge.model_validate(
-            bounded_json(args.challenge, 16000)
-        )
+        challenge = challenge_type.model_validate(bounded_json(args.challenge, 16000))
         matches(challenge, config, original, batch)
         if args.command == "snapshot":
             if not args.read_staging or not args.case or not args.phase:
@@ -157,7 +167,12 @@ def main():
                 now = datetime.now(timezone.utc)
                 if not challenge.issued_at <= now <= challenge.expires_at:
                     raise ValueError("EvidenceExpired")
-                snapshot = collect_snapshot(engine, plan, config.environment_id)
+                snapshot = collect_snapshot(
+                    engine,
+                    plan,
+                    config.environment_id,
+                    evidence_version=evidence_version,
+                )
                 # Unsigned collector result; external protected signer must bind
                 # this payload and its actual time range to the challenge.
                 print(
@@ -166,7 +181,7 @@ def main():
                             "challenge": challenge.model_dump(mode="json"),
                             "started_at": now.isoformat(),
                             "completed_at": datetime.now(timezone.utc).isoformat(),
-                            "payload": DatabaseEvidence(
+                            "payload": database_type(
                                 case_id=args.case,
                                 phase=args.phase,
                                 snapshot=snapshot.model_dump(mode="json"),
@@ -195,7 +210,7 @@ def main():
         receipts, size = [], 0
         for path in args.evidence:
             value = bounded_json(path, min(2_100_000, 8_000_000 - size))
-            receipt = SignedEvidence.model_validate(value)
+            receipt = receipt_type.model_validate(value)
             size += len(receipt.model_dump_json().encode("utf-8"))
             if size > 8_000_000:
                 raise ValueError("EvidenceBoundsExceeded")
@@ -218,7 +233,7 @@ def main():
                 and {host for host, _ in payload.host_failure_domains} != workers
             ):
                 raise ValueError("HostEvidenceMismatch")
-        report = verify_acceptance(challenge, trust, receipts)
+        report = verifier(challenge, trust, receipts)
         consume_challenge(args.state_dir, challenge)
         print(report.model_dump_json())
         statuses = {c.status for c in report.cases}
@@ -228,7 +243,7 @@ def main():
         print(
             json.dumps(
                 {
-                    "schema_version": 2,
+                    "schema_version": evidence_version,
                     "status": "FAIL",
                     "error": "AcceptanceVerificationRejected",
                 }
