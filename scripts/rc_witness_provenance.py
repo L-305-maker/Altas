@@ -193,10 +193,18 @@ def _check(challenge, registry, roots, binding, trust, receipts, collector_diges
                 )
             ):
                 raise ValueError("WitnessInvocationMismatch")
-            if observed.operation.kind == "claim" and observed.operation.outcome in {
-                "accepted",
-                "rejected",
-            }:
+            # Only A/C export claims as scenario proof. Other cases retain
+            # complete claim prelude, whose lease can legitimately be released
+            # before the final snapshot (for example Admission deferred in F).
+            if (
+                binding.case_id in {"A", "C"}
+                and observed.operation.kind == "claim"
+                and observed.operation.outcome
+                in {
+                    "accepted",
+                    "rejected",
+                }
+            ):
                 if (
                     observed.lease_digest != step.lease_digest
                     or observed.operation.lease_until != step.lease_until

@@ -169,11 +169,28 @@ Counter UNKNOWN 不可开启 strict；EXACT 必须审核托管模型修订/完�
 最终生产放行还需独立宿主证据、实际 A–J 审核、目标环境备份/恢复与 HA 策略、真实 Provider 验收；
 启用真实 strict 前还需独立计数证明。无法执行时保留 NOT_VERIFIED，不影响离线软件门禁真实通过记录。
 
-## 新验收必须采用 v3 因果 Witness
+## 正式验收必须采用 Strict Release Evidence Gate
 
-使用 [RC Causal Acceptance v3](rc-independent-acceptance.md) 的独立 `verify_rc_causal.py` 入口。
+使用 [Strict Release Evidence Gate v1](rc-independent-acceptance.md#strict-release-evidence-gate-v1)
+的 `verify_rc_release.py precheck/verify` 入口。`verify_rc_causal.py` 保留历史 v3 行为；其 PASS
+不能替代 Journal Provenance、精确 Signed Host 对应和 Reviewer 的完整集合审核。
 v2 的 A/F 已复现不同 Step、不同预约可组合为 PASS，历史报告仅保留历史含义，不作为新的因果验收。
 每个 Witness 固定 before/after、Challenge/batch、故障窗口、真实目标和宿主；F 必须是同配额池，
 审批/对账/摘要都必须有真实关系。缺失为 NOT_VERIFIED，可信矛盾为 FAIL。两宿主、实际故障、
 专用 staging 连接及 Provider 付费请求仍需操作者分别授权；本轮没有自动执行这些操作。
 签名与独立 Reviewer 不能替代资产核验，exit 0 只接受保存证据，不是生产放行。
+
+采集与故障执行需要本章的独立授权，离线审核不授予操作权限。操作者依次完成：
+
+1. 从干净部署取得完整 identity（runtime digest 包含严格入口），冻结 plan 与有效 v1 预检，
+   通过原 v3 issue 注册新 Challenge；独立提供 trust 文件 SHA 和 collector SHA。
+2. 在获准环境收集 A–J before/after/fault 和配置中全部 worker 的完整 sealed journal。
+   受保护签名器核对现场来源、完整 Binding/process headers，并签署原 v3 收据。
+3. 按手册固定 bundle 布局离线 precheck。Reviewer 只签署核对过的确切 reviewed_evidence_digest，
+   源证据一旦变化就重新核对。不要提交预检 PASS/bool 作为替代，不上传私钥、密码或原始内容。
+4. 冻结同一集合后最后一次离线 verify；退出码、各分层状态和消费结果共同记录。已登记最终尝试
+   不重用 Challenge，失败补证先申请新授权；不删除、复制消费记录，不运行生产迁移。
+
+software_validation 仅为离线验证器输入/检查，自动化测试成绩单列。保存证据通过、真实宿主与
+故障通过、正式生产批准分别记录。SQL 锁竞争、物理故障域、cross_host_recovery、真实 Provider、
+Token 与 production_release 不由离线工具晋升 PASS。registry 仍是单机文件消费，不是分布式服务。

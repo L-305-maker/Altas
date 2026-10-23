@@ -1,5 +1,86 @@
 # RC Causal Acceptance v3
 
+**正式 RC 证据审核现在必须使用 `scripts/verify_rc_release.py`。** 旧 v2/v3 验证入口继续
+按历史契约工作，其 PASS 不自动成为 Strict Release Gate PASS。顺序 Claim 仍可能满足
+v3 的时间邻近规则；新入口必须另外核对完整 Journal、调用区间、签名 Host 与独立审核。
+
+## Strict Release Evidence Gate v1
+
+新入口只离线读取证据，不连接数据库、不运行 Worker、不签名、不访问模型服务。
+`precheck` 不写 registry；`verify` 必须重新计算所有检查，并执行原有单机文件级防重放登记。
+不得把上传的 `eligible_for_signing`、预检报告或报告摘要当成验证结果。
+
+由受保护签名器和 Reviewer 按以下固定布局冻结完整 A–J 集合，host 序号对应 config 的 worker
+顺序（2–3 个）。每个 case 都须包含配置中的全部 worker，不复用另一 case 的日志或收据。
+
+```text
+bundle/
+  build.json
+  infrastructure.json
+  A/                         # B/ ... J/ 结构相同
+    before.json
+    after.json
+    fault.json
+    binding.json
+    host-0.json               # 原 v3 CausalSignedEvidence
+    host-1.json
+    reviewer.json
+    host-0/                  # 原完整 sealed journal
+      header.json
+      event-0000.json
+      ...
+      closed.json
+    host-1/
+      ...
+```
+
+不要将私有 bundle 上传到公共 CI Artifact。没有私钥输入，不要求提供 API Key、数据库密码、
+原始 Prompt 或工具结果。Challenge、plan、配置和固定 trust 文件由发布负责人从受保护渠道提供。
+trust 的精确文件 SHA 与 collector 文件 SHA 必须独立固定，不从上传者的预检 JSON 中取得。
+文件类型、JSON 大小/字段、完整 chain/seal、签名、Environment/Batch/Case、Run 引用、完整部署
+identity、collector/process header、Fault Binding 与每条 Operation 的对象引用都重新核对。
+
+```powershell
+uv run python scripts/verify_rc_release.py precheck --config <config.json> --v1-report <v1.json> --plan <plan.json> --challenge <challenge.json> --state-dir <受保护registry> --trust <固定trust.json> --trust-sha256 <独立固定SHA> --collector-sha256 <独立固定采集器SHA> --bundle <私有bundle目录>
+uv run python scripts/verify_rc_release.py verify --config <config.json> --v1-report <v1.json> --plan <plan.json> --challenge <challenge.json> --state-dir <同一registry> --trust <固定trust.json> --trust-sha256 <独立固定SHA> --collector-sha256 <独立固定采集器SHA> --bundle <同一冻结bundle目录>
+```
+
+每 Case 从完整 Journal 重新派生 `unsigned_draft`，已签 Host 的 payload 和 envelope 起止时间
+必须精确相等。重新签署另一份 Operation、另一个 Process Header、Step/Lease/Action/Attempt
+不能代替来源一致性。A 必须是真实 PG 时钟、同 Run/Step/Lease 且计入误差后必然重叠的调用；
+顺序为 `SEQUENTIAL_VALID_LEASE`，误差不能排除顺序为 `TIMING_UNCERTAIN`，均不能严格通过。
+F 使用同一 Pool 的完整持久 Attempt/Permit/Deferred 事实。完整日志中的 claim 前导不会因
+合法 Deferred 释放 Lease 而被要求一直持有至 after；A/C 用作验收证明的 claim 仍核对最终 Lease。
+B–J 继续调用原 `rc_causal.py`，新入口另外逐条核对引用，不能由另一条合法事件掩盖错误引用。
+
+Reviewer 沿用 v3：每个 Case 审核其全部非 reviewer 收据，加共享 build/infrastructure。
+报告的 `reviewed_evidence_digest` 是该确切集合的排序摘要，在添加 Reviewer 后保持不变；
+`evidence_digest` 则包含已收到的 Reviewer。缺 Reviewer 时可先运行只读 precheck，只有其他
+层已通过、仅缺独立审核时才申请外部签署。Reviewer 的 approved 收据必须引用该摘要，签署
+时间不得早于被审阅收据的结束时间。任何源变更都需重新核对绑定、Host 签名与 Reviewer，
+最终 verify 不读取上次 precheck 的结论。十份逐 Case 审核共同覆盖同一 Challenge 的完整集合。
+
+| 退出码 / 字段 | 明确含义 |
+| --- | --- |
+| 0 / saved_evidence_validation=PASS | 完整保存证据的严格离线验证通过；不是物理验收或生产许可 |
+| 1 / NOT_VERIFIED | 缺少证据或无法证明时序，不能补写成功事件 |
+| 2 / FAIL | 格式、签名、来源、引用或可信状态矛盾，或 Challenge 已失效 |
+| software_validation | 仅 offline_input_and_verifier_checks；不是软件 CI 测试成绩，后者单列 |
+| provenance_validation / signed_evidence_validation / independent_review | 分别呈现完整来源、签名与 Journal 精确对应、确切证据集合的审核结果 |
+| status / production_release | 总体不输出 PASS；生产发布始终 NOT_VERIFIED |
+
+报告是独立 schema_version=1、evidence_protocol=3 的脱敏确定性格式，附 report_digest。
+transaction_contention、physical_hosts、cross_host_recovery、provider_acceptance、token_conformance
+均保持 NOT_VERIFIED：重叠 invocation 不是 SQL 锁证明，签名资产摘要/PID 不是现场物理认证。
+不能据此推断真实宿主/故障验收、付费 Provider、完整 Token Counter 或生产批准成功。
+
+先使用 precheck 完成补证与 Reviewer，再最后运行一次 verify。沿用历史策略：已完成的
+FAIL/NOT_VERIFIED 证据报告也登记最终尝试，补证需新授权、新 Challenge；解析、固定 pin、
+签名/因果集合被拒绝时不登记消费。最终调用前再次检查有效期、登记和消费状态，O_EXCL 保证
+同一 registry 文件最多一个消费赢家。不要先用旧 `verify_rc_causal.py verify` 消费新 Challenge。
+不删除 tombstone、不复制 registry 规避消费；这仍不是跨宿主全局一致的登记服务。
+收集、故障注入、连接真实 Staging 与付费 Provider 始终需要另行人工授权；上述两条命令纯离线。
+
 Host 事件的实际采集现在使用 [RC Host Witness v1](rc-host-witness.md)。执行返回值、
 数据库事实、私有 journal 与独立签名是不同信任层；手工填写合法 JSON 不产生可信执行证明。
 新入口仅导出 unsigned draft，原 v3 Ed25519 域、角色、公钥 pin、Reviewer 和 Challenge 消费
@@ -11,8 +92,8 @@ A 的 unavailable 不能替代真实未获租约：现在要求 rejected、无�
 Admission deferred，统计全池事实。v3 允许真正的首次 Session 初始化，已有身份不可替换；
 v2 原签名/解析行为不变。实际双宿主及受保护签名服务仍为 NOT VERIFIED。
 
-新的生产验收入口是 `scripts/verify_rc_causal.py`；`verify_rc_acceptance.py` 明确保留为
-**历史 v2** 入口。v3 不修改 Agent Core、数据库状态或迁移，Alembic head 仍为 0008。
+历史 v3 验证入口是 `scripts/verify_rc_causal.py`；`verify_rc_acceptance.py` 明确保留为
+**历史 v2** 入口。正式 RC 另须通过上方严格入口。v3 不修改 Agent Core、数据库状态或迁移，Alembic head 仍为 0008。
 两个入口都只验证保存证据，`exit 0` 不是生产发布许可。离线报告的实时数据库、Provider、Token
 和生产放行状态始终为 NOT_VERIFIED。
 
@@ -84,6 +165,7 @@ lock_timeout=2s；无 FOR UPDATE、DML 或修补。实际会话仍经原 AgentSt
 ```powershell
 uv run python scripts/verify_rc_causal.py issue --config <config.json> --v1-report <v1.json> --plan <plan.json> --database-identity-digest <已独立核实摘要> --state-dir <新的私有v3目录>
 uv run python scripts/verify_rc_causal.py snapshot --config <config.json> --v1-report <v1.json> --plan <plan.json> --challenge <v3-challenge.json> --case A --phase before --read-staging
+# 下条仅历史 v3 核查；新的正式 RC 使用 verify_rc_release.py，不先消费新 Challenge。
 uv run python scripts/verify_rc_causal.py verify --config <config.json> --v1-report <v1.json> --plan <plan.json> --challenge <v3-challenge.json> --state-dir <同一私有v3目录> --trust <已批准公钥文件> --trust-sha256 <独立渠道固定SHA> --evidence <签名收据.json>
 uv run python -c "import sys,json; sys.path.insert(0,'scripts'); from rc_causal import CausalEvidence; print(json.dumps(CausalEvidence.model_json_schema()))"
 ```

@@ -1,5 +1,24 @@
 # Durable Runtime v1：Release Candidate 验收
 
+## RC Release Evidence Gate v1（2026-10-23）
+
+审核基线 `b64a882b12720021c42a45ff1d309aa980848b0d`。正式保存证据审核必须使用
+[`verify_rc_release.py precheck/verify`](rc-independent-acceptance.md#strict-release-evidence-gate-v1)，
+旧 v2/v3 保留原签名、报告和消费契约，不自动晋升严格 PASS。Core、计费语义和 Schema 不变，head 0008。
+
+| 必需门禁 | 本轮约束与证据 |
+| --- | --- |
+| A 的来源与时序 | 顺序/不确定调用不能被旧 v3 PASS 绕过；真实 PG 重叠与唯一 Owner 单独验证，SQL 锁证明仍 NOT_VERIFIED |
+| A–J 完整来源 | 完整 seal/chain、固定 collector/process header、Challenge/Batch/部署、Fault Binding；Host payload/envelope 与 Journal 派生结果精确相等 |
+| 因果与引用 | 原 rc_causal.py 必须通过；每条 Action/Call/Attempt/Permit/Pool/Approval/Reconciliation 引用另外核对，其他合法事件不能掩盖错误引用 |
+| Reviewer | 每 Case 的全部非 reviewer 收据加共享 build/infrastructure，签署确切 reviewed_evidence_digest；verify 重新计算，缓存报告/bool 无效 |
+| 防重放 | precheck 只读；最终 verify 沿用单机 O_EXCL 消费策略，过期/消费/输入漂移/并发重放拒绝，不伪称全局一致登记 |
+| 历史与安全 | 原 v2/v3、Contract、Checkpoint、Summary/Consumer、UNKNOWN、审批、CAS/Fencing、Cancellation、Admission/Usage 均保留；不新增迁移 |
+| 真实环境 | 物理宿主、跨宿主恢复、SQL 锁竞争、付费 Provider、完整 Token Counter、HA/PITR、生产批准继续 NOT_VERIFIED |
+
+完整 pytest、两版本 PG、Wheel、Docker/Compose、Web/Audit、三进程 Soak、逻辑恢复和逐项跳过
+计数在本轮交付报告按实际结果记录，不以历史 PASS 代替新 SHA 的验收。
+
 ## RC Host Witness Collection v1（2026-10-23）
 
 基线 aa6cead46e4d97ad116514b11f3d879a812802c2。实现和授权边界见

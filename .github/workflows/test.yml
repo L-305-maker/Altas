@@ -24,7 +24,7 @@ jobs:
       - run: uv run pytest -q
       - name: PostgreSQL integration with isolated temporary instance
         run: uv run python scripts/verify_postgres.py --bin "$(pg_config --bindir)" ${{ matrix.python == '3.13' && '--release-gates' || '' }}
-      - name: Python 3.12 PostgreSQL witness hardening
+      - name: Python 3.12 PostgreSQL witness and strict release gate
         if: matrix.python == '3.12'
         run: uv run python scripts/verify_postgres.py --bin "$(pg_config --bindir)" --witness-only
       - name: Offline business evaluation

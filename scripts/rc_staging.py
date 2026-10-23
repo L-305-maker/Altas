@@ -225,6 +225,7 @@ def deployment_identity():
         ROOT / "scripts/rc_host_witness.py",
         ROOT / "scripts/rc_acceptance_db.py",
         ROOT / "scripts/rc_witness_provenance.py",
+        ROOT / "scripts/verify_rc_release.py",
     ]
     runtime = request_digest(
         [

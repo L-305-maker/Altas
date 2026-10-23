@@ -28,7 +28,7 @@ def main():
     parser.add_argument(
         "--witness-only",
         action="store_true",
-        help="independent PostgreSQL witness hardening gate (no SQLite substitute)",
+        help="PostgreSQL witness and strict release evidence gate (no SQLite substitute)",
     )
     args = parser.parse_args()
     if args.witness_only and args.release_gates:
@@ -144,6 +144,7 @@ def main():
                             "tests/integration/test_rc_acceptance_db.py",
                             "tests/integration/test_rc_host_witness.py",
                             "tests/integration/test_rc_witness_hardening.py",
+                            "tests/integration/test_rc_release_db.py",
                         ]
                         if args.release_gates
                         else []
@@ -160,8 +161,10 @@ def main():
                     "pytest",
                     "tests/integration/test_rc_host_witness.py",
                     "tests/integration/test_rc_witness_hardening.py",
+                    "tests/integration/test_rc_release_db.py",
                     "tests/unit/test_host_witness_controls.py",
                     "tests/unit/test_witness_provenance.py",
+                    "tests/unit/test_rc_release.py",
                     "-k",
                     POSTGRES_SELECTION,
                     "-q",

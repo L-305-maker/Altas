@@ -179,7 +179,25 @@ Host/Process/Challenge/Batch 与观察的 Run/Step/Lease。在真实 DB 时钟�
 没有完整调用区间，故新报告始终另列 `transaction_contention=NOT_VERIFIED`，并要求独立
 Reviewer 审核完整 fault-bound journal；不通过更改 v3 旧判定制造 PASS。本机签名 fixture、
 Hash Chain、软件 Host Identity 与 PID/nonce 均不能独立认证物理宿主，报告始终列
-`physical_hosts=NOT_VERIFIED`。原 Reviewer 签署和 Challenge 单次消费仍由原 v3 验证器执行。
+`physical_hosts=NOT_VERIFIED`。原 Reviewer 签名与单次消费语义保留，正式 RC 由严格入口统一执行。
+
+## 正式 RC 必须进入 Strict Release Gate
+
+`rc_witness_provenance.py` 是签署准备检查，不能单独完成 RC 审核；旧 v3 PASS 也不能绕过它。
+正式入口改用 [Strict Release Evidence Gate v1](rc-independent-acceptance.md#strict-release-evidence-gate-v1)
+的 `verify_rc_release.py precheck/verify`，保留旧 v2/v3 命令作历史验证。
+
+冻结完整 A–J Journal，保留所有前导事件与 seal。独立签名器核对真实进程与部署，签署包含
+全部 journal/process header 摘要的 Fault Binding；Host 签名 payload 和 envelope 必须等于
+从对应 Journal 确定性派生的草稿。只换同身份收据、重签时间/目标或复制 Header 都不替代检查。
+F 等 Case 的 claim 前导可能已合法释放 Lease，不能把它充作仍持有 Lease 的证明；A/C 导出
+的 claim 继续核对最终租约，原 Core 授权与采集边界不变。
+
+先离线 precheck，Reviewer 核对报告中每 Case 的 reviewed_evidence_digest，再最后离线
+verify 重新读取所有原始证据并消费原 registry。报告和缓存 JSON 均不是验证输入。命令参数、
+退出 0/1/2、失败恢复与消费限制见上方手册；不要用历史 verify 预先消费同一 Challenge。
+本机临时 PG 和合成签名只能证明软件契约，真实双宿主、SQL 锁竞争、独立签名来源、Provider、
+Token 与生产放行仍 NOT_VERIFIED；真实收集与故障操作继续要求单独授权。
 
 ## 本轮验收范围
 
