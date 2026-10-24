@@ -24,11 +24,18 @@ Environment、Batch、Deployment、Collector/Trust SHA、协议 3、A–J、原 
 工具结果或私钥。原始白空格也属于内容身份，不只 Hash 解析后的 JSON。
 
 每次冻结：有界打开普通文件，检查描述符身份、长度、修改时间、链接数和读取后身份；再次核对
-源目录清单；把实际读取的 bytes 排他写入全新私有 `<store>/<manifest_digest>/files`。完成全部
-文件 fsync 后最后保存规范 manifest.json，重新校验副本。未完成对象不被接纳，不覆盖旧对象。
+源目录清单；把实际读取的 bytes 排他写入全新私有 `<store>/.pending-<随机ID>/files`。完成全部
+文件和目录 fsync 后最后保存规范 manifest.json，重读并核对完整副本，再原子、不覆盖地发布为
+`<store>/<manifest_digest>`。工作对象即使已有 Manifest 也不能由公开 load 或 Release Gate 接纳。
+两个进程同时发布时，后者必须完整核验赢家的 Manifest、文件集合与原始 bytes，才可幂等返回。
+重复冻结也执行同样核验，且先检查原 registry、spent intent、有效期和独立 pin；损坏或同摘要
+不同字节一律失败，不能忽略 FileExistsError，也不能覆盖已完成对象。
 这保证一个确定的已读字节集合，不声称源目录所有文件来自一个数据库式原子瞬间。最终仍由
 原 Provenance/Causal/Signed Host/Reviewer 交叉验证对象关系。Unix 同步目录；Windows 没有
 Python 可移植的目录 fsync，掉电目录持久性仍需操作者的受保护存储保证，不能宣称已验证。
+发布使用 Windows 原生不覆盖 rename，Linux 使用 renameat2(RENAME_NOREPLACE)；其他平台、
+内核或文件系统不支持该原语时拒绝发布，不降级到会覆盖目标的 rename。真实子进程退出测试
+仅证明进程崩溃边界，不证明掉电、物理磁盘或跨宿主原子性。私有父级和所有者信任要求不变。
 
 保管布局由 Strict bundle 布局加以下固定输入组成：config.json、v1.json、plan.json、
 challenge.json、trust.json、registry-issued.json；prepared 另可包含 requests/，其路径镜像收据路径。
@@ -43,9 +50,15 @@ Journal 仅保留 header/event/closed，不夹带 unsigned-host 缓存或其他�
    requests 文件是原 `CausalEvidence` 完整 envelope：固定 attestation_identity、Challenge、
    起止时间、payload。Host payload 必须来自原 unsigned_draft；不接受 concurrent=true。
    本工具不选择新 signer、不造 key、不改 Journal、不刷新 Challenge。
+   同一路径不能同时存在 bundle Signed Receipt 和 requests envelope，即使两者内容一致也拒绝；
+   另一把已固定、同角色的合法公钥也不能通过 Request 替换已有来源。没有对应 Request 的
+   已签收据按原始 bytes 固定，后续 Prepared/Final 不允许改写或重新签名掩盖来源漂移。
 3. Handoff：按 receipt-path 导出 `UNSIGNED` 请求，含原 v3 domain、准确 signing_bytes_base64、
    payload/evidence digest、所有源文件 SHA、Binding、部署 identity、Prepared Manifest pin 与
    需人工核实的进程/现场/故障事项。生成请求不是签名或事实认证。
+   只对尚未签署的 Request 导出；已有 Signed Receipt 不重新标为 UNSIGNED。signing_domain
+   解码后为 `Altas.RCCausalEvidence.v3` 加单个 LF（0x0a），与 base64 解码后的签名字节前缀完全一致；
+   JSON 显示的转义 `\n` 不代表签名字节中存在反斜线和字母 n。
 4. 外部返回后，保持原文件字节，把收据放回镜像位置。所有返回必须与冻结请求的原待签 bytes
    完全相同，并通过原 v3 固定公钥、角色、Host、Challenge、时间、签名与因果验证。
 5. Reviewer 不必在初始 Prepared 中存在。收齐全部非 Reviewer 返回后，创建第二份 Prepared，
@@ -83,6 +96,26 @@ store 写入排他 spent intent，再调用旧 registry 消费并复核身份/�
 复制 registry、清空 tombstone、重建目录不能在同一固定 store 中重用。中途失败可能留下 intent，
 应保留审计、停止并人工处置，不自动删除或重试；这是单机可信域，未建立跨宿主全局登记。
 
+### 冻结中断、重试与人工隔离
+
+冻结阶段未发布的 `.pending-*` 始终保留。先确认本次生产者进程已停止，记录私有目录、阶段与
+输入来源，再用同一 store、原 registry、原 Challenge/Trust 和原始输入重试。重试创建独立工作
+对象，不需要删除半成品；仍需 Challenge 有效且未消费。发布后重复操作返回完整核验过的同一
+Manifest，不改原文件身份和字节。崩溃遗留或并发输家的工作对象按原私有保留策略归档。
+
+旧版本若已在最终 SHA 名称下留下半成品，默认阻塞，不能猜测有效性。操作者确认无活跃写者、
+保留审计来源后，可显式隔离一个指定的损坏 SHA 对象或 `.pending-*`：
+
+```powershell
+uv run python scripts/rc_evidence_custody.py quarantine --store <同一store> --object-name <指定SHA或.pending-ID>
+```
+
+工具先持久化 quarantine-intent，再以不覆盖 rename 移至同一 store 的 `.quarantine-*`，最后写
+quarantine-done；原字节和两个名称均保留。若隔离进程中断，人工核对 intent、源/目标和 done，
+不能盲目重试移动。完整可核验的 SHA 对象拒绝隔离；未知目录不自动处理，不递归删除历史。
+隔离成功后才可重新冻结旧名称。隔离不清理 consumed、spent、registry 绑定或 store 身份；
+最终消费中断仍必须停止并人工处置，不能用冻结重试流程恢复一次性消费权。
+
 ### Operator Readiness
 
 `rc_operator_readiness.py` 只检查准备材料与冻结范围的一致性，输出 GO_FOR_OPERATOR_REVIEW 或
@@ -94,6 +127,8 @@ alembic_revision=0008、synthetic_task_limit（1–20）、fault_window_start/en
 unknown_recovery_runbook_digest、lease_recovery_runbook_digest、private_retention_policy_digest、
 aj_runbook_digest。审批人与操作者必须不同，Host 集合、计划/预检 SHA、OID/Marker、故障窗口都
 须与冻结材料一致。Digest 的存在不是审批真实性证明，原件与独立批准仍需人工核实。
+自行提供的 Digest 只是声明，冻结的 bytes 只是材料身份，独立机构认证、真实故障域和正式
+操作者授权须各自取得外部证据；这些事实不能由材料齐全或软件测试成绩推导。
 
 ```powershell
 uv run python scripts/rc_operator_readiness.py --store <store> --manifest-sha256 <已固定ManifestSHA> --state-dir <原registry> --materials <私有准备材料.json> --trust-sha256 <独立TrustSHA> --collector-sha256 <独立CollectorSHA>

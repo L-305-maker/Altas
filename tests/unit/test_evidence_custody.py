@@ -498,8 +498,10 @@ def test_manifest_identity_bounds_and_private_store_cannot_be_faked(
 ):
     f = release_bundle
     module, store, manifest = frozen(f, monkeypatch)
-    with pytest.raises(FileExistsError):
-        module.freeze(f.args, store, stage="final")
+    before = module.load(store, module.digest(manifest))
+    assert module.freeze(f.args, store, stage="final") == manifest
+    after = module.load(store, module.digest(manifest))
+    assert before.data == after.data and before.identities == after.identities
     root = store / module.digest(manifest)
     renamed = store / ("d" * 64)
     root.rename(renamed)

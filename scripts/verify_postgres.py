@@ -168,6 +168,7 @@ def main():
                     "tests/unit/test_witness_provenance.py",
                     "tests/unit/test_rc_release.py",
                     "tests/unit/test_evidence_custody.py",
+                    "tests/unit/test_custody_publication.py",
                     "-k",
                     POSTGRES_SELECTION,
                     "-q",

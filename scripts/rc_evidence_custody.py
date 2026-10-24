@@ -7,6 +7,8 @@ No keys, signing, DB connections, fault execution or production authorization.
 
 import argparse
 import base64
+import ctypes
+import errno
 import hashlib
 import json
 import os
@@ -18,7 +20,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from types import MappingProxyType, SimpleNamespace
 from typing import Literal
-from uuid import UUID
+from uuid import UUID, uuid4
 
 from pydantic import Field
 from rc_acceptance import AcceptanceTrust, Digest, Frozen, evidence_set_digest
@@ -337,13 +339,9 @@ class Snapshot:
         return SimpleNamespace(**values)
 
 
-def load(store, manifest_digest, _ancestors=()):
-    if manifest_digest in _ancestors or len(_ancestors) >= 4:
-        raise ValueError("CustodyPreparedChainRejected")
-    if not re.fullmatch(r"[a-f0-9]{64}", manifest_digest):
-        raise ValueError("CustodyManifestRejected")
-    store = store_path(store)
-    root = private_dir(store / manifest_digest)
+def read_object(root, manifest_digest):
+    """Verify actual bytes; working objects are never public load() targets."""
+    root = private_dir(root)
     if {p.name for p in root.iterdir()} != {"files", "manifest.json"}:
         raise ValueError("CustodyLayoutRejected")
     raw = read_file(root / "manifest.json", 2_000_000)
@@ -363,18 +361,37 @@ def load(store, manifest_digest, _ancestors=()):
         or manifest.cases != tuple("ABCDEFGHIJ")
     ):
         raise ValueError("CustodySnapshotChanged")
+    return manifest, data, {name: fingerprint(path) for name, path in paths.items()}
+
+
+def load(store, manifest_digest, _ancestors=()):
+    if manifest_digest in _ancestors or len(_ancestors) >= 4:
+        raise ValueError("CustodyPreparedChainRejected")
+    if not re.fullmatch(r"[a-f0-9]{64}", manifest_digest):
+        raise ValueError("CustodyManifestRejected")
+    store = store_path(store)
+    manifest, data, identities = read_object(store / manifest_digest, manifest_digest)
+    reject_source_request_conflicts(data)
     if manifest.prepared_manifest_digest:
         parent = load(
             store, manifest.prepared_manifest_digest, (*_ancestors, manifest_digest)
         )
         if parent.manifest.stage != "prepared":
             raise ValueError("CustodyPreparedMismatch")
-    return Snapshot(
-        store, manifest, data, {name: fingerprint(path) for name, path in paths.items()}
-    )
+    return Snapshot(store, manifest, data, identities)
+
+
+def reject_source_request_conflicts(data):
+    if any(
+        name.startswith("requests/")
+        and "bundle/" + name.removeprefix("requests/") in data
+        for name in data
+    ):
+        raise ValueError("CustodySourceRequestConflict")
 
 
 def check_requests(data, challenge, trust):
+    reject_source_request_conflicts(data)
     now = datetime.now(timezone.utc)
     if not challenge.issued_at <= now <= challenge.expires_at:
         raise ValueError("EvidenceExpired")
@@ -456,6 +473,8 @@ def check_receipt_name(name, evidence):
 
 
 def check_returns(prepared, data, challenge, trust):
+    reject_source_request_conflicts(prepared.data)
+    reject_source_request_conflicts(data)
     receipts = []
     for name, raw in data.items():
         if name.startswith("requests/"):
@@ -464,15 +483,15 @@ def check_returns(prepared, data, challenge, trust):
             receipt = CausalSignedEvidence.model_validate(decode(raw))
             check_receipt_name(name.removeprefix("bundle/"), receipt.evidence)
             request_name = "requests/" + name.removeprefix("bundle/")
-            if request_name in prepared.data:
+            if name in prepared.data:
+                if raw != prepared.data[name]:
+                    raise ValueError("CustodySourceChanged")
+            elif request_name in prepared.data:
                 expected = CausalEvidence.model_validate(
                     decode(prepared.data[request_name])
                 )
                 if signing_bytes(expected) != signing_bytes(receipt.evidence):
                     raise ValueError("CustodySigningReturnMismatch")
-            elif name in prepared.data:
-                if raw != prepared.data[name]:
-                    raise ValueError("CustodySourceChanged")
             else:
                 raise ValueError("CustodySigningRequestMissing")
             receipts.append(receipt)
@@ -483,6 +502,82 @@ def check_returns(prepared, data, challenge, trust):
             raise ValueError("CustodySourceMissing")
     # Reuse the original role/host/key/time/signature/review/replay checks.
     verify_causal_acceptance(challenge, trust, receipts)
+
+
+def publish_no_replace(source, destination):
+    """Atomic same-store publication; never fall back to a replacing rename."""
+    source = private_dir(source)
+    destination = Path(destination).absolute()
+    parent = private_dir(destination.parent)
+    if source.resolve().parent != parent.resolve():
+        raise ValueError("CustodyPublicationConflict")
+    if os.name == "nt":
+        os.rename(source, destination)  # Windows refuses an existing destination.
+        return
+    if sys.platform != "linux":
+        raise ValueError("CustodyAtomicPublicationUnavailable")
+    rename = getattr(ctypes.CDLL(None, use_errno=True), "renameat2", None)
+    if rename is None:
+        raise ValueError("CustodyAtomicPublicationUnavailable")
+    rename.argtypes = [
+        ctypes.c_int,
+        ctypes.c_char_p,
+        ctypes.c_int,
+        ctypes.c_char_p,
+        ctypes.c_uint,
+    ]
+    rename.restype = ctypes.c_int
+    if rename(-100, os.fsencode(source), -100, os.fsencode(destination), 1):
+        code = ctypes.get_errno()
+        if code in {errno.ENOSYS, errno.EINVAL, errno.EOPNOTSUPP, errno.EXDEV}:
+            raise ValueError("CustodyAtomicPublicationUnavailable")
+        raise OSError(code, "CustodyPublicationRejected")
+
+
+def verified_existing(store, manifest, data):
+    try:
+        existing = load(store, digest(manifest))
+        if existing.manifest != manifest or existing.data != data:
+            raise ValueError("CustodyPublicationConflict")
+        existing.verify()
+    except (ValueError, OSError) as error:
+        raise ValueError("CustodyPublicationConflict") from error
+    sync_dir(existing.root.parent)
+    sync_dir(store)
+    return existing.manifest
+
+
+def quarantine(store, object_name):
+    """Explicit operator recovery; preserve invalid objects and audit the move."""
+    store = store_path(store)
+    if not re.fullmatch(r"(?:[a-f0-9]{64}|\.pending-[a-f0-9]{32})", object_name):
+        raise ValueError("CustodyPublicationConflict")
+    source = private_dir(store / object_name)
+    if not object_name.startswith(".pending-"):
+        try:
+            load(store, object_name)
+        except (ValueError, OSError):
+            pass
+        else:
+            raise ValueError("CustodyCompletedObjectProtected")
+    operation = uuid4().hex
+    record = {
+        "schema_version": 1,
+        "operation": operation,
+        "source_name": object_name,
+        "target_name": ".quarantine-" + operation,
+    }
+    write_new(
+        store / f"quarantine-intent-{operation}.json", canonical_json(record).encode()
+    )
+    sync_dir(store)
+    publish_no_replace(source, store / record["target_name"])
+    sync_dir(store)
+    write_new(
+        store / f"quarantine-done-{operation}.json", canonical_json(record).encode()
+    )
+    sync_dir(store)
+    return record
 
 
 def freeze(args, store, *, stage, prepared_digest=None, requests=None):
@@ -545,8 +640,17 @@ def freeze(args, store, *, stage, prepared_digest=None, requests=None):
             [r.model_dump(mode="json") for r in records]
         ),
     )
-    root = store / digest(manifest)
+    # Validate the captured bytes before allocating unpublished work.
+    snap = Snapshot(store, manifest, data)
+    with frozen_input_bytes(snap.root, snap.data):
+        config, original, _, batch = context(snap.arguments(args))
+    matches(challenge, config, original, batch)
+    destination = store / digest(manifest)
+    if os.path.lexists(destination):
+        return verified_existing(store, manifest, data)
+    root = store / (".pending-" + uuid4().hex)
     root.mkdir(mode=0o700, exist_ok=False)
+    sync_dir(store)
     (root / "files").mkdir(mode=0o700)
     (root / "files" / "bundle").mkdir(mode=0o700)
     for name, raw in data.items():
@@ -561,19 +665,24 @@ def freeze(args, store, *, stage, prepared_digest=None, requests=None):
             parent = parent.parent
     for directory in sorted(directories, key=lambda p: len(p.parts), reverse=True):
         sync_dir(directory)
-    # Validate the COPIED context, never reopen mutable source context.
-    snap = Snapshot(store, manifest, data)
-    with frozen_input_bytes(snap.root, snap.data):
-        config, original, _, batch = context(snap.arguments(args))
-    matches(challenge, config, original, batch)
     write_new(
         root / "manifest.json",
         canonical_json(manifest.model_dump(mode="json")).encode(),
     )
-    snap.verify()
+    copied_manifest, copied_data, _ = read_object(root, digest(manifest))
+    if copied_manifest != manifest or copied_data != data:
+        raise ValueError("CustodySnapshotChanged")
+    if prepared_digest:
+        prepared.verify()
     sync_dir(root)
-    sync_dir(store)
-    return manifest
+    try:
+        publish_no_replace(root, destination)
+    except OSError:
+        if not os.path.lexists(destination):
+            raise
+        # A peer may have published first. Retain our work for audit and fully
+        # verify the winner; an existing directory alone never means success.
+    return verified_existing(store, manifest, data)
 
 
 def run_release(args):
@@ -688,13 +797,13 @@ def handoff(store, manifest_digest, receipt_path):
     if snapshot.manifest.stage != "prepared" or not re.fullmatch(RECEIPT, receipt_path):
         raise ValueError("CustodySigningRequestRejected")
     data = snapshot.data
+    reject_source_request_conflicts(data)
     name = "requests/" + receipt_path
-    if name in data:
-        evidence = CausalEvidence.model_validate(decode(data[name]))
-    else:
-        evidence = CausalSignedEvidence.model_validate(
-            decode(data["bundle/" + receipt_path])
-        ).evidence
+    if "bundle/" + receipt_path in data:
+        raise ValueError("CustodyAlreadySignedSource")
+    if name not in data:
+        raise ValueError("CustodySigningRequestMissing")
+    evidence = CausalEvidence.model_validate(decode(data[name]))
     challenge = CausalChallenge.model_validate(decode(data["challenge.json"]))
     trust = AcceptanceTrust.model_validate(decode(data["trust.json"]))
     check_requests(
@@ -712,7 +821,7 @@ def handoff(store, manifest_digest, receipt_path):
         "evidence": evidence.model_dump(mode="json"),
         "payload_digest": request_digest(evidence.payload.model_dump(mode="json")),
         "evidence_digest": digest(evidence),
-        "signing_domain": "Altas.RCCausalEvidence.v3\\n",
+        "signing_domain": "Altas.RCCausalEvidence.v3\n",
         "signing_bytes_base64": base64.b64encode(signing_bytes(evidence)).decode(),
         "prepared_manifest_digest": digest(snapshot.manifest),
         "source_files": [r.model_dump(mode="json") for r in snapshot.manifest.files],
@@ -731,13 +840,16 @@ def handoff(store, manifest_digest, receipt_path):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("command", choices=("init-store", "freeze", "handoff"))
+    parser.add_argument(
+        "command", choices=("init-store", "freeze", "handoff", "quarantine")
+    )
     parser.add_argument("--store", required=True)
     parser.add_argument("--stage", choices=("prepared", "final"))
     parser.add_argument("--prepared-manifest-sha256")
     parser.add_argument("--manifest-sha256")
     parser.add_argument("--receipt-path")
     parser.add_argument("--requests")
+    parser.add_argument("--object-name")
     for name in (
         "config",
         "v1-report",
@@ -767,6 +879,11 @@ def main():
                 "status": "FROZEN_COPY",
                 "manifest_digest": digest(manifest),
                 "manifest": manifest.model_dump(mode="json"),
+            }
+        elif args.command == "quarantine":
+            result = {
+                "status": "QUARANTINED",
+                **quarantine(args.store, args.object_name),
             }
         else:
             result = handoff(args.store, args.manifest_sha256, args.receipt_path)

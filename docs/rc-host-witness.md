@@ -198,6 +198,9 @@ F 等 Case 的 claim 前导可能已合法释放 Lease，不能把它充作仍�
 原 v3 准确待签 bytes、来源摘要和现场材料；Reviewer 可在非 Reviewer 返回后另做 Prepared Freeze。
 最终收齐全部签名后做 Final Freeze。再 custody-precheck，最后 custody-verify 验证同一冻结副本并
 消费原 registry，报告绑定 Manifest/完整字节摘要；原始可变路径不再作为最终验收对象。
+同路径 Signed Receipt 与 Request 即使相同也拒绝；已有签名原始 bytes 固定，Handoff 仅导出
+未签 Request，domain 尾部为一个真实 LF。工作对象 `.pending-*` 验证完成后才原子发布；中断
+保留工作对象并原样重试，重复 SHA 必须完整核验。旧半成品仅按手册人工隔离，不清除消费状态。
 保管目录所有者/管理员仍受信任，Hash 不能认证物理来源；复制或清空登记不能在同一受保护
 store 内重用 Challenge。报告和缓存 JSON 均不是验证输入。命令参数、
 退出 0/1/2、失败恢复与消费限制见上方手册；不要用历史 verify 预先消费同一 Challenge。

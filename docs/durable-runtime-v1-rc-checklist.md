@@ -1,5 +1,21 @@
 # Durable Runtime v1：Release Candidate 验收
 
+## RC Evidence Custody Hardening v2（2026-10-24）
+
+审核基线 `67a1f27addda195e7e3a90c5220277d10b868899`。新增门禁为：同路径 Signed Receipt/
+Request 一律拒绝；已有签名 bytes 固定；Handoff domain 的实际 LF 与签名字节一致；私有工作
+对象完整重验后原子、不覆盖发布；重复 SHA 完整核验后幂等；损坏与摘要冲突保留且拒绝。
+真实子进程在分配、部分文件、Manifest 前和验证前退出，并验证重试、并发及审计保留。
+旧 SHA 半成品只按 [人工隔离流程](rc-independent-acceptance.md#冻结中断重试与人工隔离) 处理，
+不删除 consumed/spent 或重置可信域。Linux renameat2 与 Windows rename 分别验证，Junction
+在 Windows 专项验证，Linux 单列 NOT VERIFIED；Windows 目录掉电持久性仍 NOT VERIFIED。
+
+本轮实际 passed/failed/skipped/deselected 与最终 SHA CI 在交付报告单列，不修改下方历史统计。
+Core、迁移 Head 0008、v2/v3 签名、Strict v1/Report v1 与 Custody Report v2 契约保持。
+Readiness 仅为材料范围检查，正式双宿主、SQL 锁竞争、受保护签名来源、Provider/Token、HA/PITR
+与生产授权仍待外部证据。除出现新明确 P0/P1 外，下一阶段停止扩展离线 RC 基础设施，转向
+独立授权的真实双宿主 Staging 验收准备。
+
 ## Evidence Custody / Signer Handoff v1（2026-10-24）
 
 基线 `94b45d8daa76daa7d48462891484654669b4c58c`。本轮建立私有内容寻址 Prepared/Final

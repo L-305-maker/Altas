@@ -17,6 +17,13 @@ Collector/Manifest pin 与审批原件；副本用于审计，不用复制 regis
 完整 Hash 只能检测内容差异，不能认证有权修改私有存储的管理员。Windows 文件 fsync 已执行，
 目录掉电持久性及生产 HA/PITR 仍未验证。GO_FOR_OPERATOR_REVIEW 也不授权恢复或真实故障操作。
 
+冻结中断与最终消费中断分别处理：新冻结只在 `.pending-*` 完整验证后才不覆盖地发布，遗留
+工作对象保留，原 Challenge 尚有效且未消费时可原样重试。已完成 SHA 对象必须完整重验后才
+幂等返回；损坏对象不覆盖。旧 SHA 半成品只有操作者确认无活跃写者后，按
+[人工隔离流程](rc-independent-acceptance.md#冻结中断重试与人工隔离) 显式处理；保留 intent/done
+与隔离原字节，不删除或重建可信域。消费 intent、consumed 或绑定异常不能通过该流程清除。
+同路径 Signed Receipt/Request 一律拒绝；恢复不得重新签名、换 Trust/Challenge 或修改旧 Manifest。
+
 Host Witness 采集升级不新增数据库迁移或执行状态字段。按
 [受控采集流程](rc-host-witness.md) 保护新私有目录、Challenge 登记及消费 tombstone，
 保存签名信任根版本和完整 provenance binding；不要通过复制/清空登记重复使用旧 Challenge。

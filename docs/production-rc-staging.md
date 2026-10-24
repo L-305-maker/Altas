@@ -189,10 +189,15 @@ v2 的 A/F 已复现不同 Step、不同预约可组合为 PASS，历史报告�
 3. 按手册固定 bundle 布局，在新的私有 custody store 做 Prepared Freeze，导出 UNSIGNED 待签请求。
    独立签名方核对原 v3 精确 bytes、来源与固定 trust。收齐非 Reviewer 返回后可做第二份 Prepared，
    Reviewer 只签署确切 reviewed_evidence_digest 与冻结 envelope；源或签名漂移拒绝交接。
+   同路径 Signed Receipt/Request 冲突一律拒绝；已有签名不重新导出为 UNSIGNED，也不改原始字节。
 4. Final Freeze 固定全部签名、Reviewer 和输入；先 custody-precheck，最后一次 custody-verify。
    记录 Manifest SHA、完整字节摘要、原 registry 与受保护 store；不把原路径存在当作不可变性。
    退出码、各分层状态和消费结果共同记录。已登记最终尝试
    不重用 Challenge，失败补证先申请新授权；不删除、复制消费记录，不运行生产迁移。
+
+冻结使用私有未发布工作对象，完整重验后不覆盖地原子发布；同内容重试也必须核验全部原始
+bytes/Manifest。中断工作对象保留，旧 SHA 半成品按手册显式人工隔离，不清除 registry/spent。
+Windows 的进程退出测试不能证明目录掉电持久性；不支持不覆盖发布原语的平台直接拒绝。
 
 software_validation 仅为离线验证器输入/检查，自动化测试成绩单列。保存证据通过、真实宿主与
 故障通过、正式生产批准分别记录。SQL 锁竞争、物理故障域、cross_host_recovery、真实 Provider、
