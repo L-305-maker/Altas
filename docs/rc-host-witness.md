@@ -133,7 +133,8 @@ uv run python scripts/rc_host_witness.py export --config <config.json> --environ
 不能解析为完整 SignedEvidence，也不能生产可信 PASS。受保护 Host 签名器核对构建/来源、
 完整绑定、scope、Challenge 登记、故障窗口后，才添加登记身份并使用原
 `Altas.RCCausalEvidence.v3\n` 域签名。独立 Reviewer 审核全证据集合后签字，最后仍由
-`verify_rc_causal.py verify` 使用固定信任根及单次 Challenge 消费登记接纳保存证据。
+`verify_rc_causal.py verify` 仅用于历史 v3 核查，不能作为正式最终 RC 放行入口，也不要提前消费
+新 Challenge。正式保存证据审核采用下方 Custody 模式的严格入口。
 私钥不进入 Worker 配置、仓库或常规日志；密钥轮换另行审批。签名证明来源，不单独证明物理事实。
 
 原 v2 序列化/签名规则只读保持不变，不晋升为 v3。v3 A 现在明确要求无 DB 错误的 rejected
@@ -185,7 +186,7 @@ Hash Chain、软件 Host Identity 与 PID/nonce 均不能独立认证物理宿�
 
 `rc_witness_provenance.py` 是签署准备检查，不能单独完成 RC 审核；旧 v3 PASS 也不能绕过它。
 正式入口改用 [Strict Release Evidence Gate v1](rc-independent-acceptance.md#strict-release-evidence-gate-v1)
-的 `verify_rc_release.py precheck/verify`，保留旧 v2/v3 命令作历史验证。
+的 `verify_rc_release.py custody-precheck/custody-verify`，保留旧 v2/v3 和 Strict v1 命令作历史验证。
 
 冻结完整 A–J Journal，保留所有前导事件与 seal。独立签名器核对真实进程与部署，签署包含
 全部 journal/process header 摘要的 Fault Binding；Host 签名 payload 和 envelope 必须等于
@@ -193,8 +194,12 @@ Hash Chain、软件 Host Identity 与 PID/nonce 均不能独立认证物理宿�
 F 等 Case 的 claim 前导可能已合法释放 Lease，不能把它充作仍持有 Lease 的证明；A/C 导出
 的 claim 继续核对最终租约，原 Core 授权与采集边界不变。
 
-先离线 precheck，Reviewer 核对报告中每 Case 的 reviewed_evidence_digest，再最后离线
-verify 重新读取所有原始证据并消费原 registry。报告和缓存 JSON 均不是验证输入。命令参数、
+先在操作者控制的私有 store 做 Prepared Freeze，并导出 UNSIGNED 签名交接请求。独立签名方核对
+原 v3 准确待签 bytes、来源摘要和现场材料；Reviewer 可在非 Reviewer 返回后另做 Prepared Freeze。
+最终收齐全部签名后做 Final Freeze。再 custody-precheck，最后 custody-verify 验证同一冻结副本并
+消费原 registry，报告绑定 Manifest/完整字节摘要；原始可变路径不再作为最终验收对象。
+保管目录所有者/管理员仍受信任，Hash 不能认证物理来源；复制或清空登记不能在同一受保护
+store 内重用 Challenge。报告和缓存 JSON 均不是验证输入。命令参数、
 退出 0/1/2、失败恢复与消费限制见上方手册；不要用历史 verify 预先消费同一 Challenge。
 本机临时 PG 和合成签名只能证明软件契约，真实双宿主、SQL 锁竞争、独立签名来源、Provider、
 Token 与生产放行仍 NOT_VERIFIED；真实收集与故障操作继续要求单独授权。

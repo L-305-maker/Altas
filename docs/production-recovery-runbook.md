@@ -1,5 +1,22 @@
 # Durable Runtime v1：备份、恢复及 staging 演练
 
+## Evidence Custody 保留与签署交接
+
+正式 RC 保存证据使用 [Evidence Custody Freeze 与严格入口](rc-independent-acceptance.md#evidence-custody-与-independent-signer-handoff-v1)。
+历史 v2/v3 核查、Strict v1、Prepared/Final Freeze、Signer Handoff、Operator Readiness、真实现场
+Acceptance 与生产批准是不同结果。不要先用历史 verify 命令消费新 Challenge。
+
+保留受保护 store 的身份记录、原 registry、issued/consumed、registry 绑定、spent intent、
+Prepared 链、全部原始 bytes 与规范 Manifest。报告 manifest_digest 对应 store 下的内容寻址对象；
+不能仅保留报告 JSON、可变原路径或摘要。备份应遵守私有保留策略，并保存独立固定的 Trust/
+Collector/Manifest pin 与审批原件；副本用于审计，不用复制 registry 发起第二次验收。
+在不同路径或不同身份恢复 store 需要人工核对保管链；工具不会自动重置身份或重用 Challenge。
+
+消费 intent 已写入但流程未完成、冻结副本哈希变化、store/registry 身份不一致时，停止验收，
+保留现场材料并人工处理；不删除 tombstone/intent、不自动重签、刷新 Challenge 或重发 UNKNOWN。
+完整 Hash 只能检测内容差异，不能认证有权修改私有存储的管理员。Windows 文件 fsync 已执行，
+目录掉电持久性及生产 HA/PITR 仍未验证。GO_FOR_OPERATOR_REVIEW 也不授权恢复或真实故障操作。
+
 Host Witness 采集升级不新增数据库迁移或执行状态字段。按
 [受控采集流程](rc-host-witness.md) 保护新私有目录、Challenge 登记及消费 tombstone，
 保存签名信任根版本和完整 provenance binding；不要通过复制/清空登记重复使用旧 Challenge。

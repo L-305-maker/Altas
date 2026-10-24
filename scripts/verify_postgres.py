@@ -145,6 +145,7 @@ def main():
                             "tests/integration/test_rc_host_witness.py",
                             "tests/integration/test_rc_witness_hardening.py",
                             "tests/integration/test_rc_release_db.py",
+                            "tests/integration/test_rc_custody_db.py",
                         ]
                         if args.release_gates
                         else []
@@ -162,9 +163,11 @@ def main():
                     "tests/integration/test_rc_host_witness.py",
                     "tests/integration/test_rc_witness_hardening.py",
                     "tests/integration/test_rc_release_db.py",
+                    "tests/integration/test_rc_custody_db.py",
                     "tests/unit/test_host_witness_controls.py",
                     "tests/unit/test_witness_provenance.py",
                     "tests/unit/test_rc_release.py",
+                    "tests/unit/test_evidence_custody.py",
                     "-k",
                     POSTGRES_SELECTION,
                     "-q",

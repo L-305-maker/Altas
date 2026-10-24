@@ -226,6 +226,9 @@ def deployment_identity():
         ROOT / "scripts/rc_acceptance_db.py",
         ROOT / "scripts/rc_witness_provenance.py",
         ROOT / "scripts/verify_rc_release.py",
+        ROOT / "scripts/verify_rc_acceptance.py",
+        ROOT / "scripts/rc_evidence_custody.py",
+        ROOT / "scripts/rc_operator_readiness.py",
     ]
     runtime = request_digest(
         [

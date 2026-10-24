@@ -1,5 +1,25 @@
 # Durable Runtime v1：Release Candidate 验收
 
+## Evidence Custody / Signer Handoff v1（2026-10-24）
+
+基线 `94b45d8daa76daa7d48462891484654669b4c58c`。本轮建立私有内容寻址 Prepared/Final
+快照、原 v3 精确签名交接、schema_version=2 Custody 报告与离线 Operator Readiness。
+正式最终入口为 `verify_rc_release.py custody-precheck/custody-verify`；旧 v2/v3、Strict v1
+报告及命令继续按历史契约保留，不自动获得新 Custody PASS。
+
+| 门禁 | 本轮要求 |
+| --- | --- |
+| TOCTOU | 先在合成 Bundle 的 evaluate 后替换 Hook 复现旧路径风险；新入口只读取固定副本，报告绑定完整原始字节 Manifest |
+| 文件系统 | 有界读取、描述符/路径身份核对、拒绝 symlink/junction/hardlink、排他新写、fsync、完成后重验；平台不支持项单列跳过 |
+| 签署交接 | UNSIGNED 请求包含原 v3 精确 bytes、Payload/来源/Binding/Prepared pin；返回必须原封匹配，不自动选 key、重签或改 Journal |
+| Reviewer | 可在非 Reviewer 返回后另做 Prepared；核对确切集合摘要和 envelope，再 Final Freeze |
+| 消费 | 原 registry + 固定私有 store；并发一个赢家，复制/清空/重建 registry 拒绝；中途 intent 保留并停止，不宣称全局一致 |
+| Readiness | GO_FOR_OPERATOR_REVIEW 仅材料完整与范围一致，execution_authorized=false；独立审批和现场真实性仍需人工 |
+| 兼容与现场边界 | Core/Schema/收费语义不变，Head 0008；真实签名来源、双宿主故障、Provider/Token、HA/PITR、生产批准继续 NOT_VERIFIED |
+
+完整命令、原子性与管理员信任边界见 [Custody 手册](rc-independent-acceptance.md#evidence-custody-与-independent-signer-handoff-v1)。
+本轮 passed/failed/skipped/deselected、本地与最终 SHA CI 的区别记录在交付报告，不改写下方历史成绩。
+
 ## RC Release Evidence Gate v1（2026-10-23）
 
 审核基线 `b64a882b12720021c42a45ff1d309aa980848b0d`。正式保存证据审核必须使用

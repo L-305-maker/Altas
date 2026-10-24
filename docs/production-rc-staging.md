@@ -172,7 +172,7 @@ Counter UNKNOWN 不可开启 strict；EXACT 必须审核托管模型修订/完�
 ## 正式验收必须采用 Strict Release Evidence Gate
 
 使用 [Strict Release Evidence Gate v1](rc-independent-acceptance.md#strict-release-evidence-gate-v1)
-的 `verify_rc_release.py precheck/verify` 入口。`verify_rc_causal.py` 保留历史 v3 行为；其 PASS
+的 `verify_rc_release.py custody-precheck/custody-verify` 入口。`verify_rc_causal.py` 保留历史 v3 行为；其 PASS
 不能替代 Journal Provenance、精确 Signed Host 对应和 Reviewer 的完整集合审核。
 v2 的 A/F 已复现不同 Step、不同预约可组合为 PASS，历史报告仅保留历史含义，不作为新的因果验收。
 每个 Witness 固定 before/after、Challenge/batch、故障窗口、真实目标和宿主；F 必须是同配额池，
@@ -186,11 +186,19 @@ v2 的 A/F 已复现不同 Step、不同预约可组合为 PASS，历史报告�
    通过原 v3 issue 注册新 Challenge；独立提供 trust 文件 SHA 和 collector SHA。
 2. 在获准环境收集 A–J before/after/fault 和配置中全部 worker 的完整 sealed journal。
    受保护签名器核对现场来源、完整 Binding/process headers，并签署原 v3 收据。
-3. 按手册固定 bundle 布局离线 precheck。Reviewer 只签署核对过的确切 reviewed_evidence_digest，
-   源证据一旦变化就重新核对。不要提交预检 PASS/bool 作为替代，不上传私钥、密码或原始内容。
-4. 冻结同一集合后最后一次离线 verify；退出码、各分层状态和消费结果共同记录。已登记最终尝试
+3. 按手册固定 bundle 布局，在新的私有 custody store 做 Prepared Freeze，导出 UNSIGNED 待签请求。
+   独立签名方核对原 v3 精确 bytes、来源与固定 trust。收齐非 Reviewer 返回后可做第二份 Prepared，
+   Reviewer 只签署确切 reviewed_evidence_digest 与冻结 envelope；源或签名漂移拒绝交接。
+4. Final Freeze 固定全部签名、Reviewer 和输入；先 custody-precheck，最后一次 custody-verify。
+   记录 Manifest SHA、完整字节摘要、原 registry 与受保护 store；不把原路径存在当作不可变性。
+   退出码、各分层状态和消费结果共同记录。已登记最终尝试
    不重用 Challenge，失败补证先申请新授权；不删除、复制消费记录，不运行生产迁移。
 
 software_validation 仅为离线验证器输入/检查，自动化测试成绩单列。保存证据通过、真实宿主与
 故障通过、正式生产批准分别记录。SQL 锁竞争、物理故障域、cross_host_recovery、真实 Provider、
 Token 与 production_release 不由离线工具晋升 PASS。registry 仍是单机文件消费，不是分布式服务。
+
+准备材料可由 `scripts/rc_operator_readiness.py` 离线核对，GO_FOR_OPERATOR_REVIEW 仅表示材料
+与固定范围一致，execution_authorized=false；真实环境范围、两 Host 部署清单、OID/Marker/TLS/0008、
+任务上限、故障窗口、独立审批人、停止条件、UNKNOWN/Lease 恢复、保留策略和 A–J 手册原件仍须
+操作者独立核实并另行批准。未获批准不连接 Staging、不执行故障，也不接入生产签名私钥。

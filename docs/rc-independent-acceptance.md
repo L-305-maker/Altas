@@ -1,10 +1,109 @@
 # RC Causal Acceptance v3
 
-**正式 RC 证据审核现在必须使用 `scripts/verify_rc_release.py`。** 旧 v2/v3 验证入口继续
+**正式 RC 证据审核使用 `scripts/verify_rc_release.py custody-precheck/custody-verify`。** 旧 v2/v3 验证入口继续
 按历史契约工作，其 PASS 不自动成为 Strict Release Gate PASS。顺序 Claim 仍可能满足
 v3 的时间邻近规则；新入口必须另外核对完整 Journal、调用区间、签名 Host 与独立审核。
 
-## Strict Release Evidence Gate v1
+## Evidence Custody 与 Independent Signer Handoff v1
+
+Strict v1 的旧 `precheck/verify` 与 schema_version=1 报告保留原行为。它们仍分阶段读取可变路径，
+不会获得新的 Custody PASS。已在合成 A–J 的可控 Hook 中复现：旧 evaluate 完成后替换 build，
+旧 verify 仍返回先前证据的 PASS 并消费 Challenge。正式流程使用下方冻结副本和 schema_version=2
+的 Custody 报告；不重新解释已归档的历史 v2/v3 或 Strict v1 报告。
+
+`rc_evidence_custody.py` 只保管证据。新的私有 store 必须由操作者控制，与不可信输入目录分开。
+store 及其父级命名空间不得由输入写者改名或替换；这需要操作者实际配置和核实。
+`init-store` 排他创建目录；Unix 要求当前 UID、0700 根目录，Windows 要求 Python 3.12.4+，
+使用该版本 mkdir(0700) 的私有 ACL。拒绝符号链接、Windows reparse/junction、硬链接及链接祖先。
+管理员和保管目录所有者仍属于信任边界；同一身份能写受保护目录的恶意进程不能被 Hash 认证。
+不能复制或重置整个可信域，再声称有全局一致防重放。
+
+Manifest 为 `EvidenceCustodyManifest(schema_version=1)`，绑定 prepared/final 阶段、Challenge、
+Environment、Batch、Deployment、Collector/Trust SHA、协议 3、A–J、原 registry 身份、相对路径、
+原始字节长度/SHA 和完整 bundle_content_digest。Manifest 不含绝对路径、口令、Token、Prompt、
+工具结果或私钥。原始白空格也属于内容身份，不只 Hash 解析后的 JSON。
+
+每次冻结：有界打开普通文件，检查描述符身份、长度、修改时间、链接数和读取后身份；再次核对
+源目录清单；把实际读取的 bytes 排他写入全新私有 `<store>/<manifest_digest>/files`。完成全部
+文件 fsync 后最后保存规范 manifest.json，重新校验副本。未完成对象不被接纳，不覆盖旧对象。
+这保证一个确定的已读字节集合，不声称源目录所有文件来自一个数据库式原子瞬间。最终仍由
+原 Provenance/Causal/Signed Host/Reviewer 交叉验证对象关系。Unix 同步目录；Windows 没有
+Python 可移植的目录 fsync，掉电目录持久性仍需操作者的受保护存储保证，不能宣称已验证。
+
+保管布局由 Strict bundle 布局加以下固定输入组成：config.json、v1.json、plan.json、
+challenge.json、trust.json、registry-issued.json；prepared 另可包含 requests/，其路径镜像收据路径。
+Journal 仅保留 header/event/closed，不夹带 unsigned-host 缓存或其他文件。单文件沿用原上限，
+快照最多 6500 文件、48 MB；有界 prepared 链最多 4 个对象（包含 final）。
+
+### 操作者冻结与交接顺序
+
+1. 通过独立授权取得真实来源材料；从原 v3 issue 建立新 Challenge 和唯一原 registry。
+   独立固定 trust、collector 与 manifest pin。以下操作纯离线，均不授予现场执行权限。
+2. Prepared：冻结源 Journal、Binding、上下文、已取得的签名收据以及待签 requests。
+   requests 文件是原 `CausalEvidence` 完整 envelope：固定 attestation_identity、Challenge、
+   起止时间、payload。Host payload 必须来自原 unsigned_draft；不接受 concurrent=true。
+   本工具不选择新 signer、不造 key、不改 Journal、不刷新 Challenge。
+3. Handoff：按 receipt-path 导出 `UNSIGNED` 请求，含原 v3 domain、准确 signing_bytes_base64、
+   payload/evidence digest、所有源文件 SHA、Binding、部署 identity、Prepared Manifest pin 与
+   需人工核实的进程/现场/故障事项。生成请求不是签名或事实认证。
+4. 外部返回后，保持原文件字节，把收据放回镜像位置。所有返回必须与冻结请求的原待签 bytes
+   完全相同，并通过原 v3 固定公钥、角色、Host、Challenge、时间、签名与因果验证。
+5. Reviewer 不必在初始 Prepared 中存在。收齐全部非 Reviewer 返回后，创建第二份 Prepared，
+   用 `--prepared-manifest-sha256` 链接第一份，并通过 `--requests` 冻结 Reviewer 的确切 envelope。
+   它审核每 Case 全部非 Reviewer 收据加共享 Build/Infrastructure 的原 evidence_set_digest，
+   起始时间不早于被审核收据的结束时间。再导出 Reviewer UNSIGNED 请求、核对并取得外部签名。
+6. Final：把全部返回与 Reviewer 一起冻结，用 `--prepared-manifest-sha256` 绑定最后的 Prepared。
+   源文件、envelope、signer 或待签 digest 漂移均拒绝。原始路径随后变化，不改变此验收对象。
+   已有完整历史 v3 签名集合也可直接 final 冻结；它不声称本工具已认证签名人的物理来源。
+7. 对 final 运行 custody-precheck，再最后运行 custody-verify。先有界加载副本的完整实际 bytes，
+   每次验证在独立 ContextVar 中只使用同一不可变字节视图，配置、Trust、收据与 Journal 共用，
+   并发验证互不混用；原 registry 仍作实时有效期/消费检查。验证前后重验副本字节与文件身份，
+   包括短暂改写后恢复的元数据漂移，并校验 Prepared 链。报告的 manifest_digest 和 bundle_content_digest
+   可重新定位和核验完整原始字节集合。Reviewer 的旧 v3 消息不被改写以嵌入新 Manifest。
+
+```powershell
+uv run python scripts/rc_evidence_custody.py init-store --store <新的受保护目录>
+# 以下公共输入参数只包含文件位置和独立固定的公开摘要，不包含数据库 URL 或私钥。
+$rcInputs = @('--config','<config.json>','--v1-report','<v1.json>','--plan','<plan.json>','--challenge','<challenge.json>','--state-dir','<原registry>','--trust','<固定trust.json>','--trust-sha256','<独立TrustSHA>','--collector-sha256','<独立CollectorSHA>','--bundle','<源bundle>')
+uv run python scripts/rc_evidence_custody.py freeze --store <store> --stage prepared --requests <非Reviewer待签目录> @rcInputs
+uv run python scripts/rc_evidence_custody.py handoff --store <store> --manifest-sha256 <Prepared1SHA> --receipt-path A/host-0.json
+# 核对并放入所有非 Reviewer 返回，冻结 Reviewer 请求，再分别导出 A–J Reviewer handoff。
+uv run python scripts/rc_evidence_custody.py freeze --store <store> --stage prepared --prepared-manifest-sha256 <Prepared1SHA> --requests <Reviewer待签目录> @rcInputs
+uv run python scripts/rc_evidence_custody.py handoff --store <store> --manifest-sha256 <Prepared2SHA> --receipt-path A/reviewer.json
+uv run python scripts/rc_evidence_custody.py freeze --store <store> --stage final --prepared-manifest-sha256 <Prepared2SHA> @rcInputs
+uv run python scripts/verify_rc_release.py custody-precheck --custody-store <store> --manifest-sha256 <FinalSHA> --state-dir <原registry> --trust-sha256 <独立TrustSHA> --collector-sha256 <独立CollectorSHA>
+uv run python scripts/verify_rc_release.py custody-verify --custody-store <同一store> --manifest-sha256 <同一FinalSHA> --state-dir <同一原registry> --trust-sha256 <独立TrustSHA> --collector-sha256 <独立CollectorSHA>
+```
+
+冻结或交接错误退出 2；只读 custody-precheck 不写证据、不消费 Challenge。custody-verify 的
+0/1/2 与旧严格入口相同，分别为保存证据通过/不完整/拒绝；`custody_validation=PASS` 只证明该
+快照身份检查，不能覆盖 signed_evidence_validation 或 independent_review 的失败。
+完成的 FAIL/NOT_VERIFIED 最终尝试仍登记消费；解析/签名拒绝不登记。最终消费先在受保护
+store 写入排他 spent intent，再调用旧 registry 消费并复核身份/有效期/副本。并发仅一个赢家；
+复制 registry、清空 tombstone、重建目录不能在同一固定 store 中重用。中途失败可能留下 intent，
+应保留审计、停止并人工处置，不自动删除或重试；这是单机可信域，未建立跨宿主全局登记。
+
+### Operator Readiness
+
+`rc_operator_readiness.py` 只检查准备材料与冻结范围的一致性，输出 GO_FOR_OPERATOR_REVIEW 或
+NOT_READY，且 execution_authorized 恒为 false。材料 schema_version=1 使用公开 digest 引用：
+environment_id、scope_approval_digest、operator_identity、independent_approver_identity、
+host_inventory_digest、worker_hosts、deployment_sha、trust_sha256、collector_sha256、
+private_plan_sha256、preflight_sha256、database_oid、database_marker、tls_preflight_digest、
+alembic_revision=0008、synthetic_task_limit（1–20）、fault_window_start/end、stop_conditions_digest、
+unknown_recovery_runbook_digest、lease_recovery_runbook_digest、private_retention_policy_digest、
+aj_runbook_digest。审批人与操作者必须不同，Host 集合、计划/预检 SHA、OID/Marker、故障窗口都
+须与冻结材料一致。Digest 的存在不是审批真实性证明，原件与独立批准仍需人工核实。
+
+```powershell
+uv run python scripts/rc_operator_readiness.py --store <store> --manifest-sha256 <已固定ManifestSHA> --state-dir <原registry> --materials <私有准备材料.json> --trust-sha256 <独立TrustSHA> --collector-sha256 <独立CollectorSHA>
+```
+
+Readiness 通过不是 Staging Acceptance，更不是生产 Release Approval。受保护签名来源、真实
+双宿主故障、事务锁竞争、Provider、完整 Token Counter、HA/PITR 与 production_release 仍为
+NOT_VERIFIED。不要上传私钥、API Key、真实数据库密码、原始 Prompt 或工具结果。
+
+## Strict Release Evidence Gate v1（历史兼容入口）
 
 新入口只离线读取证据，不连接数据库、不运行 Worker、不签名、不访问模型服务。
 `precheck` 不写 registry；`verify` 必须重新计算所有检查，并执行原有单机文件级防重放登记。
@@ -83,7 +182,7 @@ FAIL/NOT_VERIFIED 证据报告也登记最终尝试，补证需新授权、新 C
 
 Host 事件的实际采集现在使用 [RC Host Witness v1](rc-host-witness.md)。执行返回值、
 数据库事实、私有 journal 与独立签名是不同信任层；手工填写合法 JSON 不产生可信执行证明。
-新入口仅导出 unsigned draft，原 v3 Ed25519 域、角色、公钥 pin、Reviewer 和 Challenge 消费
+Host 采集器仅导出 unsigned draft，原 v3 Ed25519 域、角色、公钥 pin、Reviewer 和 Challenge 消费
 保留。完整 journal 的摘要通过 ProvenanceBinding 进入独立签署 Fault 的 protected_record_digest；
 签名方必须实际核查来源，hash chain 本身没有认证能力。
 

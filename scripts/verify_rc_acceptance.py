@@ -10,8 +10,11 @@ import hashlib
 import json
 import os
 import secrets
+from contextlib import contextmanager
+from contextvars import ContextVar
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from types import MappingProxyType
 
 from rc_acceptance import (
     AcceptanceChallenge,
@@ -30,11 +33,34 @@ from rc_staging import RCStagingEvidenceReport, StagingConfiguration, required_r
 
 from agentflow.application.ports.model_request import request_digest
 
+_frozen_inputs = ContextVar("rc_frozen_inputs", default=None)
+
+
+@contextmanager
+def frozen_input_bytes(root, data):
+    """One immutable byte version per verification; isolated across threads."""
+    root = Path(root).absolute()
+    token = _frozen_inputs.set(
+        (root, MappingProxyType({root / name: raw for name, raw in data.items()}))
+    )
+    try:
+        yield
+    finally:
+        _frozen_inputs.reset(token)
+
+
+def read_prefix(path, limit):
+    path = Path(path).absolute()
+    frozen = _frozen_inputs.get()
+    if frozen is not None and path.is_relative_to(frozen[0]):
+        return frozen[1][path][:limit]  # Missing/unmanifested paths fail closed.
+    with path.open("rb") as stream:
+        return stream.read(limit)
+
 
 def bounded_json(path, maximum):
     # read(max+1) bounds the actual read, including files growing after stat.
-    with Path(path).open("rb") as stream:
-        raw = stream.read(maximum + 1)
+    raw = read_prefix(path, maximum + 1)
     if len(raw) > maximum:
         raise ValueError("EvidenceBoundsExceeded")
     return json.loads(

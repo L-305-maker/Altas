@@ -34,6 +34,7 @@ from verify_rc_acceptance import (
     bounded_json,
     context,
     matches,
+    read_prefix,
     reject_constant,
     unique_fields,
 )
@@ -94,6 +95,20 @@ class ReleaseReport(Frozen):
         "LiveProviderAndTokenConformanceNotVerified",
         "ProductionAuthorizationRequired",
         "SoftwareTestResultsRequireSeparateCI",
+    )
+
+
+class CustodyReleaseReport(ReleaseReport):
+    schema_version: Literal[2] = 2
+    custody_validation: Literal["PASS", "FAIL"]
+    manifest_digest: Digest | None = None
+    bundle_content_digest: Digest | None = None
+    prepared_manifest_digest: Digest | None = None
+    custody_limitations: tuple[str, ...] = (
+        "ProtectedStoreOwnerAndAdministratorTrusted",
+        "SingleProtectedStoreAndOriginalRegistryRequired",
+        "WindowsDirectoryPowerLossDurabilityNotVerified",
+        "SyntheticSignaturesDoNotAuthenticatePhysicalSources",
     )
 
 
@@ -402,8 +417,7 @@ def evaluate(args):
         r"[a-f0-9]{64}", args.collector_sha256
     ):
         raise ValueError("ReleaseContextRejected")
-    with regular(args.trust).open("rb") as stream:
-        raw = stream.read(32001)
+    raw = read_prefix(regular(args.trust), 32001)
     if len(raw) > 32000 or hashlib.sha256(raw).hexdigest() != args.trust_sha256:
         raise ValueError("TrustPinMismatch")
     trust = AcceptanceTrust.model_validate(
@@ -522,6 +536,10 @@ def evaluate(args):
 
 
 def run(args):
+    if args.command in {"custody-precheck", "custody-verify"}:
+        from rc_evidence_custody import run_release
+
+        return run_release(args)
     try:
         if args.command not in {"precheck", "verify"}:
             raise ValueError("ReleaseCommandRejected")
@@ -575,7 +593,11 @@ def run(args):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("command", choices=("precheck", "verify"))
+    parser.add_argument(
+        "command", choices=("precheck", "verify", "custody-precheck", "custody-verify")
+    )
+    parser.add_argument("--custody-store")
+    parser.add_argument("--manifest-sha256")
     for name in (
         "config",
         "v1-report",
@@ -587,8 +609,32 @@ def main():
         "collector-sha256",
         "bundle",
     ):
-        parser.add_argument("--" + name, required=True)
-    code, report = run(parser.parse_args())
+        parser.add_argument("--" + name)
+    args = parser.parse_args()
+    needed = (
+        (
+            "custody_store",
+            "manifest_sha256",
+            "state_dir",
+            "trust_sha256",
+            "collector_sha256",
+        )
+        if args.command.startswith("custody-")
+        else (
+            "config",
+            "v1_report",
+            "plan",
+            "challenge",
+            "state_dir",
+            "trust",
+            "trust_sha256",
+            "collector_sha256",
+            "bundle",
+        )
+    )
+    if any(getattr(args, name) is None for name in needed):
+        parser.error("required evidence inputs missing")
+    code, report = run(args)
     value = report.model_dump(mode="json")
     print(canonical_json({**value, "report_digest": request_digest(value)}))
     return code
