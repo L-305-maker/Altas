@@ -30,6 +30,9 @@ jobs:
       - name: Offline business evaluation
         if: matrix.python == '3.13'
         run: uv run python evals/run.py
+      - name: Bounded PostgreSQL workflow capacity measurements
+        if: matrix.python == '3.13'
+        run: uv run python scripts/benchmark_workflow_capacity.py --bin "$(pg_config --bindir)" --samples 5
       - name: Bounded RC process and logical restore drills
         if: matrix.python == '3.13'
         run: |

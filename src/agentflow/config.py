@@ -11,6 +11,7 @@ from agentflow.application.ports.provider_admission import (
     ProviderAdmissionPolicy,
     ProviderKey,
 )
+from agentflow.application.ports.workflow_admission import WorkflowAdmissionPolicy
 
 
 class Settings(BaseSettings):
@@ -26,6 +27,9 @@ class Settings(BaseSettings):
     model_request: ModelRequestOptions = Field(default_factory=ModelRequestOptions)
     provider_admission: ProviderAdmissionPolicy | None = None
     observed_usage: ObservedUsagePolicy | None = None
+    workflow_admission: WorkflowAdmissionPolicy = Field(
+        default_factory=WorkflowAdmissionPolicy
+    )
     concurrency: int = Field(default=4, ge=1, le=64)
     lease_seconds: float = Field(default=30, ge=3, le=600)
     poll_seconds: float = Field(default=0.5, gt=0, le=30)

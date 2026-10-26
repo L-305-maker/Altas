@@ -13,13 +13,17 @@ from contextlib import contextmanager
 from typing import TYPE_CHECKING, Any
 from uuid import uuid4
 
-from sqlalchemy import and_, create_engine, event, or_, select, text
-from sqlalchemy.exc import IntegrityError, SQLAlchemyError
+from sqlalchemy import and_, create_engine, event, func, or_, select, text
+from sqlalchemy.exc import IntegrityError, InvalidRequestError, SQLAlchemyError
 from sqlalchemy.orm import Session
 from sqlalchemy.pool import StaticPool
 
 from agentflow.application.ports.agent_store import LostLease, StateConflict
 from agentflow.application.ports.handler_result import CommittedAgentResult
+from agentflow.application.ports.workflow_admission import (
+    WorkflowAdmissionPolicy,
+    WorkflowCapacityExceeded,
+)
 from agentflow.domain.agent.run import AgentSnapshot
 from agentflow.domain.execution.task import Task
 from agentflow.domain.workflow.spec import WorkflowSpec
@@ -60,8 +64,15 @@ def json_bytes(value: Any) -> bytes:
 
 
 class Store:
-    def __init__(self, url: str, *, metrics: "RuntimeMetrics | None" = None):
+    def __init__(
+        self,
+        url: str,
+        *,
+        metrics: "RuntimeMetrics | None" = None,
+        workflow_admission: WorkflowAdmissionPolicy | None = None,
+    ):
         self.metrics = metrics
+        self.workflow_admission = workflow_admission or WorkflowAdmissionPolicy()
         options: dict[str, Any] = {"pool_pre_ping": True}
         if url.startswith("sqlite"):
             options["connect_args"] = {"check_same_thread": False, "timeout": 30}
@@ -165,6 +176,19 @@ class Store:
             raise ValueError("submission key must contain 1..128 characters")
         try:
             with self.transaction() as session:
+                if (
+                    self.workflow_admission.max_active_runs is not None
+                    and self.engine.dialect.name == "postgresql"
+                ):
+                    # READ COMMITTED gives COUNT a fresh snapshot after the lock wait.
+                    if session.connection().get_isolation_level() != "READ COMMITTED":
+                        raise InvalidRequestError(
+                            "WorkflowAdmissionIsolationUnsupported"
+                        )
+                    session.execute(text("SET LOCAL lock_timeout = '5s'"))
+                    session.execute(text("SET LOCAL statement_timeout = '5s'"))
+                    # Database-local, transaction-scoped AFWA/v1 namespace; not an RC session lock.
+                    session.execute(text("SELECT pg_advisory_xact_lock(1095128897, 1)"))
                 if key:
                     old = session.scalar(
                         select(RunRow).where(RunRow.submission_key == key)
@@ -178,6 +202,17 @@ class Store:
                 workflow = session.get(WorkflowRow, workflow_id)
                 if workflow is None:
                     raise NotFoundError("workflow not found")
+                limit = self.workflow_admission.max_active_runs
+                if (
+                    limit is not None
+                    and session.scalar(
+                        select(func.count())
+                        .select_from(RunRow)
+                        .where(RunRow.status.not_in(TERMINAL))
+                    )
+                    >= limit
+                ):
+                    raise WorkflowCapacityExceeded()
                 run = RunRow(
                     id=str(uuid4()),
                     workflow_id=workflow_id,
@@ -202,6 +237,9 @@ class Store:
                 session.flush()
                 self._schedule(session, run)
                 return run.id
+        except WorkflowCapacityExceeded:
+            self._observe("record", "workflow.admission_rejected", {})
+            raise
         except IntegrityError:
             if key:
                 with Session(self.engine) as session:
@@ -212,6 +250,26 @@ class Store:
                         return old.id
                 raise ConflictError("submission key conflict") from None
             raise
+
+    def queue_diagnostics(self, *, timeout_seconds: int = 5) -> dict:
+        from agentflow.infrastructure.persistence.queue_diagnostics import (
+            queue_snapshot,
+        )
+
+        result = queue_snapshot(self.engine, timeout_seconds=timeout_seconds)
+        result["admission_policy"] = self.workflow_admission.model_dump(mode="json")
+        result["admission_rejection_scope"] = "process_observations"
+        result["admission_rejections_observed"] = None
+        if self.metrics is not None:
+            try:
+                result["admission_rejections_observed"] = (
+                    self.metrics.registry.get_sample_value(
+                        "agentflow_workflow_admission_rejections_total"
+                    )
+                )
+            except Exception:
+                pass  # Optional process metrics are never quota or database facts.
+        return result
 
     def _locked_run(self, session: Session, run_id: str) -> RunRow:
         run = session.scalar(

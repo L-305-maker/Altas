@@ -4,6 +4,10 @@
 本次不发布新的 distribution 版本，wheel / `agentflow.__version__` 仍为 1.0.0。
 不新增数据库 Schema，Alembic Head 仍为 `0008`。
 
+[Workflow Capacity Admission v1](workflow-capacity.md) 增加默认关闭的
+`WorkflowAdmissionPolicy` / `WorkflowCapacityExceeded` 公共入口、受控 submit 和
+`Store.queue_diagnostics()` / 认证队列聚合 API；不改变 Agent mode 或已有 Run 恢复。
+
 ## 能力与执行模式
 
 | 能力 | 普通持久 Step | Legacy Agent（省略 mode） | 显式 Durable Agent |

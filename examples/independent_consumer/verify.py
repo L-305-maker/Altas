@@ -107,7 +107,23 @@ def verify():
                 assert response.status_code == 200
                 return approval
 
+            occupant = submit("capacity-occupant")
             normal = submit("normal")
+            assert client.get("/api/runtime/queue").json()["active_runs"] == 2
+            rejected = client.post(
+                "/api/runs",
+                json={
+                    "workflow_id": workflow_id,
+                    "inputs": {},
+                    "submission_key": "over-limit",
+                },
+            )
+            assert rejected.status_code == 429 and "retry-after" not in rejected.headers
+            assert rejected.json() == {"detail": "WorkflowCapacityExceeded"}
+            # submit() has already checked identical replay and conflicting identity at capacity.
+            assert submit("normal") == normal
+            assert client.post(f"/api/runs/{occupant}/cancel").status_code == 200
+            assert client.get("/api/runtime/queue").json()["active_runs"] == 1
             worker(normal)  # A real process exits waiting for explicit Action Approval.
             assert not effects()
             approval = approve(normal)
@@ -225,7 +241,10 @@ def verify():
             "status": "PASS",
             "installed_wheel": True,
             "backend": "postgresql",
-            "dag_runs": 4,
+            "dag_runs": 5,
+            "max_active_runs": 2,
+            "capacity_rejection": "verified",
+            "full_capacity_idempotency": "verified",
             "mock_effects": 2,
             "approved_actions": 2,
             "unknown_redispatches": 0,

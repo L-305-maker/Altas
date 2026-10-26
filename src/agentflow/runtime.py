@@ -34,6 +34,10 @@ from agentflow.application.ports.model_request import (
     ProviderCapabilities,
     build_request,
 )
+from agentflow.application.ports.workflow_admission import (
+    WorkflowAdmissionPolicy,
+    WorkflowCapacityExceeded,
+)
 from agentflow.application.tools.runtime import (
     Tool,
     ToolApprovalRequired,
@@ -99,6 +103,8 @@ __all__ = [
     "ToolRuntime",
     "ToolSideEffect",
     "Worker",
+    "WorkflowAdmissionPolicy",
+    "WorkflowCapacityExceeded",
     "WorkflowSpec",
     "build_handlers",
     "build_request",

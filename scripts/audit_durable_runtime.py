@@ -230,6 +230,11 @@ def audit(
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "--queue",
+        action="store_true",
+        help="constant-size database-wide queue aggregates, no per-Run rows",
+    )
     parser.add_argument("--limit", type=int, default=1000)
     parser.add_argument(
         "--offset",
@@ -256,6 +261,14 @@ def main():
             if url.startswith("postgresql")
             else {"timeout": 5},
         )
+        if args.queue:
+            from agentflow.infrastructure.persistence.queue_diagnostics import (
+                queue_snapshot,
+            )
+
+            report = queue_snapshot(engine, timeout_seconds=args.timeout_seconds)
+            print(json.dumps(report, sort_keys=True, allow_nan=False))
+            return 0
         report = audit(
             engine,
             limit=args.limit,

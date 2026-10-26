@@ -1,5 +1,9 @@
 # 运行、安全与观测
 
+[容量准入与队列诊断](workflow-capacity.md) 说明 opt-in 部署、429 / 409 / 503、
+多 API Writer 一致性、混合版本边界、认证聚合 API 和已有审计脚本的 `--queue` 模式。
+准入与每 Worker concurrency、Provider Permit、实际 Usage 是四种独立控制。
+
 ## 配置
 
 所有配置通过环境变量读取，源码不自动读取 `.env`。

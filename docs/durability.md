@@ -1,5 +1,9 @@
 # 持久执行语义
 
+[Workflow Admission](workflow-capacity.md) 可选限制非终态 Run，默认关闭。
+幂等查询、容量检查和 Run / Step 创建共用提交事务；全局 key、既有审批、UNKNOWN 核对、
+延期恢复、取消和 claim / CAS / Fencing 规则保持不变。
+
 [Production RC Staging](production-rc-staging.md) 增加独立只读预检、冻结证据报告及单独授权的合成夹具入口。
 Worker 启动前验证实际 Alembic Head（目前 0008）、管理员环境标记/OID、TLS、角色、超时及部署身份；
 不自动迁移外部数据库。固定 RC Worker 槽位只用于限制本轮进程数，不替代已有租约、CAS 或 fencing。

@@ -1,5 +1,9 @@
 # AgentFlow V1.0 架构
 
+[Workflow Admission v1](workflow-capacity.md) 在 Store.submit 既有事务内可选协调新 Run，
+不增加调度器、Agent Store、消息队列或计费账本。队列诊断从持久事实读取有界只读聚合，
+遥测不是配额事实；没有 Schema / 索引迁移，claim 的最旧可领取 Run 顺序保持。
+
 本文件描述 V1.0 实际提交的代码，而不是长期目标目录。V1.0 是单租户内部部署与
 学习基线：优先保证持久执行语义、可审计的人机审批和可复现部署，不为未来拆分预放空壳。
 

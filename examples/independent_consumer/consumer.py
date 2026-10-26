@@ -22,6 +22,7 @@ from agentflow.runtime import (
     ToolRuntime,
     ToolSideEffect,
     Worker,
+    WorkflowAdmissionPolicy,
     WorkflowSpec,
     create_app,
 )
@@ -80,7 +81,10 @@ def workflow():
 
 
 def components():
-    store = Store(os.environ["INDEPENDENT_CONSUMER_DB_URL"])
+    store = Store(
+        os.environ["INDEPENDENT_CONSUMER_DB_URL"],
+        workflow_admission=WorkflowAdmissionPolicy(max_active_runs=2),
+    )
     agents = SQLAgentStore(store)
     handlers = HandlerRegistry()
 

@@ -28,6 +28,7 @@ from sqlalchemy.exc import SQLAlchemyError
 from agentflow import __version__
 from agentflow.application.orchestration.worker import HandlerRegistry
 from agentflow.application.ports.agent_store import AgentStoreUnavailable, StateConflict
+from agentflow.application.ports.workflow_admission import WorkflowCapacityExceeded
 from agentflow.bootstrap import build_handlers
 from agentflow.config import Settings
 from agentflow.domain.agent.review import (
@@ -106,7 +107,10 @@ def create_app(
             "AGENTFLOW_API_TOKEN must be configured with at least 16 characters"
         )
     owned_store = store is None
-    store = store or Store(settings.database_url.get_secret_value())
+    store = store or Store(
+        settings.database_url.get_secret_value(),
+        workflow_admission=settings.workflow_admission,
+    )
     handlers = handlers if handlers is not None else build_handlers(settings)
     agents = SQLAgentStore(store)
 
@@ -144,6 +148,10 @@ def create_app(
     @app.exception_handler(ConflictError)
     async def conflict(_request, error):
         return JSONResponse({"detail": str(error)}, 409)
+
+    @app.exception_handler(WorkflowCapacityExceeded)
+    async def capacity_exceeded(_request, _error):
+        return JSONResponse({"detail": "WorkflowCapacityExceeded"}, 429)
 
     @app.exception_handler(ValueError)
     async def invalid(_request, _error):
@@ -221,6 +229,10 @@ def create_app(
     @app.get("/api/workflows", dependencies=auth)
     def workflows():
         return store.list_workflows()
+
+    @app.get("/api/runtime/queue", dependencies=auth)
+    def queue_diagnostics():
+        return store.queue_diagnostics()
 
     @app.post("/api/workflows", dependencies=auth, status_code=201)
     def register(spec: WorkflowSpec):

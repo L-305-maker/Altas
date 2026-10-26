@@ -19,7 +19,10 @@ from agentflow.infrastructure.telemetry.tracing import local_tracing
 async def serve_worker(
     settings: Settings, *, once: bool = False, handler_factory=build_handlers
 ) -> None:
-    store = Store(settings.database_url.get_secret_value())
+    store = Store(
+        settings.database_url.get_secret_value(),
+        workflow_admission=settings.workflow_admission,
+    )
     if settings.telemetry:
         try:
             from agentflow.infrastructure.telemetry.metrics import RuntimeMetrics

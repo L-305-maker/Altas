@@ -22,6 +22,11 @@ class RuntimeMetrics:
 
     def __init__(self):
         self.registry = CollectorRegistry()
+        self.workflow_rejections = Counter(
+            "agentflow_workflow_admission_rejections_total",
+            "Observed capacity rejections; process telemetry, not durable quota facts",
+            registry=self.registry,
+        )
         self.transitions = Counter(
             "agentflow_agent_transitions_total",
             "Committed agent transitions",
@@ -73,7 +78,9 @@ class RuntimeMetrics:
         )
 
     def record(self, kind, data):
-        if kind == "agent.transition" and data.get("state") in {
+        if kind == "workflow.admission_rejected":
+            self.workflow_rejections.inc()
+        elif kind == "agent.transition" and data.get("state") in {
             s.value for s in AgentStatus
         }:
             self.transitions.labels(data["state"]).inc()
