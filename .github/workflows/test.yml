@@ -41,6 +41,21 @@ jobs:
           uv build
           uv run python scripts/verify_wheel.py dist/agentflow-1.0.0-py3-none-any.whl
 
+  windows-custody:
+    runs-on: windows-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@v6
+        with:
+          version: '0.12.13'
+          python-version: '3.12'
+      - run: uv sync --frozen
+      - name: Native Windows publication, owned process exits and Junction rejection
+        run: uv run pytest tests/unit/test_custody_publication.py "tests/unit/test_evidence_custody.py::test_real_filesystem_aliases_are_rejected[junction]" -q -ra --junitxml=output/windows-custody.xml
+
   web:
     runs-on: ubuntu-latest
     env:

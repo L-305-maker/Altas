@@ -3,6 +3,10 @@
 核实日期：2026-10-23。此入口收集真实 RC 执行边界的脱敏观察，默认不执行外部
 操作、不签名，也不宣布生产放行。Core、数据库事务、调度器和 0001–0008 均不变。
 
+两物理宿主的待审批执行说明、独立材料与时间预算统一见
+[Staging 操作者准备包](production-rc-staging.md#两物理宿主操作者准备包)。该包没有环境审批原件，
+不授予连接或故障权限；每个 Case 的真实执行/来源认证状态须单独填写，不能从本地测试推导。
+
 ## 来源与信任边界
 
 `scripts/rc_host_witness.py` 的 `ObservedStore` / `ObservedAgents` 只包装实际调用的
@@ -96,6 +100,8 @@ claim API，专库隔离仍然必要。该风险没有彻底消除。
 * G：使用 acceptance suite 的 retry Run（索引 5）和启用的共享 Admission。采集模式 case G
   对第一次 Mock retry 产生确认的 429，之后保留原 model_call_id 正常继续；仍非真实 API。
   先在失败/defer 后取 before；同一采集进程继续观察未到期的实际 claim，之后取合法重试。
+  `rate_limited` 证据来自该进程亲自确认 backpressure 后、在到期前实际未领取及数据库事实；
+  保留全部前导事件，不能重启采集器后用历史 failed Attempt 补造本进程的观察。
   旧 model_rate_limited fixture 仍是单尝试耗尽，用于备份/终态测试，不能替代此同调用链。
 * H：围绕实际 Summary Generator、Artifact、Consumer View/Contract 链取快照；只有摘要身份
   不足以证明宿主恢复事件。I 要求同取消对象的真实晚到写拒绝。J 要求操作者授权的实际断链，

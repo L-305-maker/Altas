@@ -230,6 +230,26 @@ def test_two_processes_publish_one_complete_identical_object(
     assert module.load(store, records[0]["manifest_digest"]).manifest.stage == "final"
 
 
+@pytest.mark.parametrize("occupied", (False, True))
+def test_native_publication_never_replaces_an_existing_directory(
+    monkeypatch, release_bundle, occupied
+):
+    f = release_bundle
+    module = custody(monkeypatch)
+    store = module.init_store(f.root / "custody")
+    source, destination = store / (".pending-" + "a" * 32), store / ("b" * 64)
+    source.mkdir(mode=0o700)
+    destination.mkdir(mode=0o700)
+    (source / "evidence.bin").write_bytes(b"new")
+    if occupied:
+        (destination / "evidence.bin").write_bytes(b"retained")
+    before = {p.name: p.read_bytes() for p in destination.iterdir()}
+    with pytest.raises(OSError):
+        module.publish_no_replace(source, destination)
+    assert (source / "evidence.bin").read_bytes() == b"new"
+    assert {p.name: p.read_bytes() for p in destination.iterdir()} == before
+
+
 @pytest.mark.parametrize("attack", ("bytes", "manifest", "extra", "hardlink"))
 def test_idempotency_rejects_and_preserves_corrupt_existing_objects(
     monkeypatch, release_bundle, attack
