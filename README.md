@@ -107,6 +107,7 @@ CI 还会启动 PostgreSQL → Alembic → API → worker → Next.js 的referen
 
 - [逐层阅读代码](docs/learning-guide.md)：读什么、为什么这么设计、如何修改。
 - [持久执行语义](docs/durability.md)：事务、租约、去重、崩溃恢复。
+- [Core 扩展契约 1.1](docs/core-extension-contract.md)：公共接口、Legacy / Durable 边界与独立 Consumer 验证。
 - [版本验收与边界](docs/version.md)：各阶段实现和验证方式。
 - [运行、安全和观测](docs/operations.md)：配置、监控、备份与发布。
 - [验证记录](docs/verification.md)：已实际运行的检查与尚未联调的部分。
